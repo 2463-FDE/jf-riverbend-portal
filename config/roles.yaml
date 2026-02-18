@@ -1,0 +1,17 @@
+# RBAC configuration.
+# Everyone who works here gets the "staff" role. Simple to manage.
+roles:
+  staff:
+    description: All Riverbend employees.
+    permissions:
+      - patients.read
+      - patients.write
+      - records.read        # includes clinical notes
+      - records.write
+      - billing.read
+      - disclosures.read
+      - appointments.write
+
+# Every account maps to "staff": front desk, billing, ROI clerks, clinicians.
+default_role: staff
+mfa_required: false

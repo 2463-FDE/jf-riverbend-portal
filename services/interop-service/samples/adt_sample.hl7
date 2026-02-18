@@ -1,0 +1,5 @@
+MSH|^~\&|RIVERBEND_HOSP|HOSP|RIVERBEND_PORTAL|CLINIC|20260601120000||ADT^A01|MSG00001|P|2.3
+PID|1||M4471^^^HOSP^MR||Gonzalez^Maria||19710302|F|||118 Maple Ave^^Beverly Hills^CA^90210
+PV1|1|O|CLINIC^^^RIVERBEND||||1234^Nguyen^Anita|||||||||||V01
+AL1|1|DA|penicillin^Penicillin|SV|Hives
+RXA|0|1|20260601120000||amoxicillin^Amoxicillin 500mg|1|tablet
