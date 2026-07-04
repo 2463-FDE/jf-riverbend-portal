@@ -11,6 +11,8 @@ from typing import Callable, Optional, Type, TypeVar, Union
 
 from pydantic import BaseModel
 
+from libs.safe_logging import get_safe_logger
+
 from .errors import (
     BudgetExceededError,
     LLMRetriesExhaustedError,
@@ -19,6 +21,8 @@ from .errors import (
     StructuredOutputError,
 )
 from .providers.base import Provider
+
+log = get_safe_logger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -93,14 +97,36 @@ class LLMClient:
                 )
                 break
             except (ProviderTimeoutError, ProviderTransientError) as exc:
+                # Log the exception TYPE only, never str(exc) — a provider SDK's
+                # error message can, in principle, echo back request details.
+                # See docs/planning/phi-safe-logging-policy.md rule 5.
                 if attempt >= self._config.max_retries:
+                    log.error(
+                        "llm_client retries exhausted (provider=%s, attempts=%s, error_type=%s)",
+                        self._config.provider,
+                        attempt + 1,
+                        type(exc).__name__,
+                    )
                     raise LLMRetriesExhaustedError(
-                        f"Gave up after {attempt + 1} attempt(s): {exc}"
+                        f"Gave up after {attempt + 1} attempt(s): {type(exc).__name__}"
                     ) from exc
+                log.warning(
+                    "llm_client retrying (provider=%s, attempt=%s/%s, error_type=%s)",
+                    self._config.provider,
+                    attempt + 1,
+                    self._config.max_retries,
+                    type(exc).__name__,
+                )
                 self._sleep(self._backoff_delay(attempt))
 
         self._tokens_used += response.input_tokens + response.output_tokens
         if self._tokens_used > self._config.monthly_token_budget:
+            log.error(
+                "llm_client budget exceeded (provider=%s, tokens_used=%s, budget=%s)",
+                self._config.provider,
+                self._tokens_used,
+                self._config.monthly_token_budget,
+            )
             raise BudgetExceededError(
                 f"This call pushed usage to {self._tokens_used} tokens, over the "
                 f"monthly budget of {self._config.monthly_token_budget}"
@@ -108,10 +134,35 @@ class LLMClient:
 
         if schema is not None:
             try:
-                return schema.model_validate_json(response.text)
+                result = schema.model_validate_json(response.text)
             except Exception as exc:
-                raise StructuredOutputError(str(exc)) from exc
+                # Never log/embed str(exc) here — a schema validation error
+                # message can include the invalid input, i.e. the model's raw
+                # response text, which may contain patient data.
+                log.error(
+                    "llm_client structured output validation failed (provider=%s, error_type=%s)",
+                    self._config.provider,
+                    type(exc).__name__,
+                )
+                raise StructuredOutputError(
+                    f"Response did not validate against {schema.__name__}: {type(exc).__name__}"
+                ) from exc
+            log.info(
+                "llm_client complete ok (provider=%s, input_tokens=%s, output_tokens=%s, structured=%s)",
+                self._config.provider,
+                response.input_tokens,
+                response.output_tokens,
+                True,
+            )
+            return result
 
+        log.info(
+            "llm_client complete ok (provider=%s, input_tokens=%s, output_tokens=%s, structured=%s)",
+            self._config.provider,
+            response.input_tokens,
+            response.output_tokens,
+            False,
+        )
         return response.text
 
     @staticmethod
