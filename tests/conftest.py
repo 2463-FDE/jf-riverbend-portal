@@ -12,6 +12,14 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Real shared packages (currently libs/llm_client, libs/safe_logging) live at
+# the repo root and are imported normally (`import libs.llm_client`), unlike
+# the per-service modules below which have no shared package (adr/0001) and
+# are loaded by file path instead. Plain `pytest` only adds this file's own
+# directory to sys.path, not the repo root, so add it explicitly.
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 
 def load_module(relpath: str, name: str):
     """Load <REPO_ROOT>/<relpath> as a uniquely-named module."""
