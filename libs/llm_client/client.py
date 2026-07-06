@@ -60,7 +60,11 @@ def _build_provider(name: str) -> Provider:
         from .providers.ollama_provider import OllamaProvider
 
         return OllamaProvider()
-    raise ValueError(f"Unknown LLM_PROVIDER '{name}' — expected one of: fake, openai, anthropic, ollama")
+    if name == "bedrock":
+        from .providers.bedrock_provider import BedrockProvider
+
+        return BedrockProvider()
+    raise ValueError(f"Unknown LLM_PROVIDER '{name}' — expected one of: fake, openai, anthropic, ollama, bedrock")
 
 
 class LLMClient:
