@@ -149,7 +149,14 @@ def test_timeout_is_translated_to_provider_timeout_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "error_code", ["ThrottlingException", "ModelTimeoutException", "ServiceUnavailableException"]
+    "error_code",
+    [
+        "ThrottlingException",
+        "ModelTimeoutException",
+        "ServiceUnavailableException",
+        "ModelNotReadyException",
+        "InternalServerException",
+    ],
 )
 def test_retryable_client_errors_are_translated_to_provider_transient_error(monkeypatch, error_code):
     from libs.llm_client.providers.bedrock_provider import BedrockProvider
@@ -161,10 +168,20 @@ def test_retryable_client_errors_are_translated_to_provider_transient_error(monk
         provider.complete("prompt", timeout=10, max_tokens=256)
 
 
-def test_non_retryable_client_error_propagates_unchanged(monkeypatch):
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "AccessDeniedException",
+        "ValidationException",
+        "ResourceNotFoundException",
+        "ModelErrorException",
+        "ServiceQuotaExceededException",
+    ],
+)
+def test_non_retryable_client_error_propagates_unchanged(monkeypatch, error_code):
     from libs.llm_client.providers.bedrock_provider import BedrockProvider
 
-    _install_fake_boto3(monkeypatch, converse_error=_FakeClientError("AccessDeniedException"))
+    _install_fake_boto3(monkeypatch, converse_error=_FakeClientError(error_code))
     provider = BedrockProvider(model_id="anthropic.claude-3-5-sonnet", region="us-east-1")
 
     with pytest.raises(_FakeClientError):

@@ -20,7 +20,13 @@ import os
 from ..errors import ProviderNotConfiguredError, ProviderTimeoutError, ProviderTransientError
 from .base import Provider, ProviderResponse
 
-_RETRYABLE_ERROR_CODES = {"ThrottlingException", "ModelTimeoutException", "ServiceUnavailableException"}
+_RETRYABLE_ERROR_CODES = {
+    "ThrottlingException",
+    "ModelTimeoutException",
+    "ServiceUnavailableException",
+    "ModelNotReadyException",
+    "InternalServerException",
+}
 
 
 class BedrockProvider(Provider):
