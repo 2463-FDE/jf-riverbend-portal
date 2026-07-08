@@ -1,0 +1,5 @@
+# Real-provider deps — only needed by a caller that actually selects
+# EMBEDDING_PROVIDER=ollama at runtime. Deliberately NOT referenced by the
+# root requirements-dev.txt, so CI (which only exercises the fake provider)
+# never installs or requires these. Mirrors libs/llm_client/requirements.txt.
+httpx==0.28.1
