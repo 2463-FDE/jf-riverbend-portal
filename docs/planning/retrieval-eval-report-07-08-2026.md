@@ -28,7 +28,7 @@
 | recall@1 | 0.0% |
 | precision@1 | 0.0% |
 | duplicate-rate | 33.3% |
-| fragment-coverage gap | 66.7% |
+| fragment-coverage gap | 33.3% |
 
 ## 3. Duplicate clusters (identity proxy: normalized SSN match)
 
@@ -39,11 +39,11 @@
 
 ## 4. Per-case detail
 
-| Query | Expected patient | Expected record | Retrieved record (top-1) | recall hit | fragment gap |
-|---|---|---|---|---|---|
-| show me Maria Gonzalez's allergies | 1042 | seed-enc-0001 | seed-enc-0005 | no | **yes** |
-| what medications is James O'Brien on? | 1043 | seed-enc-0004 | seed-enc-0005 | no | no |
-| latest lab results for M. Gonzalez | 1588 | seed-enc-0003 | seed-enc-0005 | no | **yes** |
+| Query | Clinical domain | Expected patient | Expected record | Retrieved record (top-1) | recall hit | fragment gap |
+|---|---|---|---|---|---|---|
+| show me Maria Gonzalez's allergies | allergy_medication | 1042 | seed-enc-0001 | seed-enc-0005 | no | **yes** |
+| what medications is James O'Brien on? | allergy_medication | 1043 | seed-enc-0004 | seed-enc-0005 | no | no |
+| latest lab results for M. Gonzalez | lab | 1588 | seed-enc-0003 | seed-enc-0005 | no | no |
 
 ## 5. What this run does and does not show
 
@@ -67,28 +67,29 @@ environment, and running it is not required for what this commit measures).
   1 (Maria Gonzalez) is split across 3 patient rows. This number comes
   entirely from `db/seed/patients.csv`'s SSN field, not from retrieval, so it
   is unaffected by which embedding provider is used.
-- **fragment-coverage gap (66.7% at top_k=1)** — this is the metric that
-  matters most for this deliverable. In both cases involving the fragmented
-  "Maria Gonzalez" identity, the harness flags a gap: the query resolved to
-  one fragment (e.g. patient 1042, whose own chart row says "no known
-  allergies"), while a *different* fragment for the same real person
-  (patient 1330) holds the clinically relevant content (a penicillin
-  allergy) that the top-1 result never surfaced. This reproduces, in
-  miniature and without touching production code, the exact mechanism
-  described in `AUD-04`/`AUD-09` and manifested in the real incident
-  `RIV-160` (`docs/analysis/system-audit-07-01-2026.md`): a clinician can
-  get a confident, fully-cited, "no known allergies" answer that is wrong by
-  omission, from a system with no way to indicate anything is missing. The
-  James O'Brien case (no duplicate patient row) correctly shows no gap,
-  confirming the metric doesn't fire on non-fragmented patients.
+- **fragment-coverage gap (33.3% at top_k=1)** — this is the metric that
+  matters most for this deliverable, but it is intentionally conservative:
+  sibling content is counted only when it matches the gold case's clinical
+  domain. The allergy case involving the fragmented "Maria Gonzalez"
+  identity flags a gap: the query resolved to patient 1042, whose own chart
+  row says "no known allergies," while a *different* fragment for the same
+  real person (patient 1330) holds the clinically relevant allergy content
+  that the top-1 result never surfaced. The M. Gonzalez lab-results case is
+  **not** counted as a fragment gap merely because sibling patient 1330 has
+  allergy/medication data; allergy/medication rows are not lab-result
+  evidence. This keeps the metric as a conservative signal of the
+  `AUD-04`/`AUD-09` mechanism, not corrupted proof inflated by cross-domain
+  sibling data. The James O'Brien case (no duplicate patient row) correctly
+  shows no gap, confirming the metric doesn't fire on non-fragmented
+  patients.
 
 This is the concrete demonstration behind
 `docs/planning/gold-set-risk-log-07-08-2026.md`'s `RISK-GS-01` claim: a
 retrieval approach can look acceptable on recall/precision alone while still
 missing a patient's other fragments, and a gold set authored without
-correcting for `AUD-09` (as this one was — `cites_records` for the Maria
-Gonzalez cases points at a single fragment each, never both) will not by
-itself catch this.
+correcting for `AUD-09` will not by itself catch this. The current
+case-specific fragment-gap metric shows this for the allergy/medication
+domain; it does not treat unrelated sibling domains as evidence for a gap.
 
 ## 6. Known limitations of this harness
 

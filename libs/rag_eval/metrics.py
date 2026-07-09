@@ -17,7 +17,7 @@ from typing import Dict, List
 
 from libs.rag_corpus import CorpusRecord
 
-from .clinical_fields import has_relevant_clinical_content
+from .clinical_fields import has_relevant_clinical_content, infer_clinical_domain
 from .goldset import GoldCase
 
 
@@ -78,8 +78,11 @@ def compute_metrics(
             for patient_id in cluster
             if patient_id != case.expected_patient_id and patient_id in corpus_patient_ids
         ]
+        clinical_domain = infer_clinical_domain(case.query, case.expected_answer)
         siblings_with_relevant_content = [
-            patient_id for patient_id in sibling_ids_in_corpus if has_relevant_clinical_content(patient_id)
+            patient_id
+            for patient_id in sibling_ids_in_corpus
+            if has_relevant_clinical_content(patient_id, clinical_domain)
         ]
         gap = bool(siblings_with_relevant_content) and not (
             set(siblings_with_relevant_content) & retrieved_patient_ids
@@ -94,6 +97,7 @@ def compute_metrics(
                 "retrieved_record_ids": retrieved_ids,
                 "recall_hit": hit,
                 "fragment_coverage_gap": gap,
+                "clinical_domain": clinical_domain,
                 "cluster_patient_ids": cluster,
             }
         )

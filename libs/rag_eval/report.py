@@ -30,12 +30,13 @@ def render_markdown(report: EvalReport) -> str:
         "",
         "## Per-case detail",
         "",
-        "| Query | Expected patient | Expected record(s) | Retrieved record(s) | recall hit | fragment gap |",
-        "|---|---|---|---|---|---|",
+        "| Query | Clinical domain | Expected patient | Expected record(s) | Retrieved record(s) | recall hit | fragment gap |",
+        "|---|---|---|---|---|---|---|",
     ]
     for case in report.per_case:
         lines.append(
-            f"| {case['query']} | {case['expected_patient_id']} | "
+            f"| {case['query']} | {case.get('clinical_domain', 'unknown')} | "
+            f"{case['expected_patient_id']} | "
             f"{', '.join(case['expected_record_ids'])} | "
             f"{', '.join(case['retrieved_record_ids']) or '(none)'} | "
             f"{'yes' if case['recall_hit'] else 'no'} | "

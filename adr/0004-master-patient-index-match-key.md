@@ -27,9 +27,11 @@
   patient's other fragments.
 - `docs/planning/retrieval-eval-report-07-08-2026.md` demonstrates this
   concretely: at `top_k=1`, the eval harness's fragment-coverage-gap metric
-  is 66.7%, driven entirely by the Maria Gonzalez fragmentation — both gold-
-  set questions about her hit this gap, while the non-fragmented James
-  O'Brien case does not.
+  is 33.3%, driven by the Maria Gonzalez allergy/medication case. The M.
+  Gonzalez lab-results case is no longer counted as a gap when the only
+  sibling evidence is allergy/medication data, so the metric should be read
+  as a conservative signal rather than inflated proof. The non-fragmented
+  James O'Brien case does not hit the gap.
 - The client's actual ask (a retrieval helper that surfaces relevant past
   records at chart-open) cannot be built safely on top of this: a
   summarization/retrieval feature would inherit whichever single chart row
