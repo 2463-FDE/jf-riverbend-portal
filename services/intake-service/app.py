@@ -17,6 +17,7 @@ Inherited shortcomings (left as-is from the handoff):
 """
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -150,5 +151,20 @@ def _verify_eligibility(ins: Optional[Insurance]) -> Optional[dict[str, Any]]:
         )  # no timeout= — synchronous, blocks /intake (RIV-088)
         return resp.json()
     except Exception as e:
-        log.error("intake: eligibility check failed: %s", e)
-        return {"active": False, "error": str(e)}
+        # Stage 1 fix: failing to REACH eligibility-service is a transport
+        # failure, not evidence the member's coverage is inactive — map it to
+        # "unknown" (see services/eligibility-service/contracts.py::EligibilityStatus),
+        # never "active": False on its own. Log/return the exception TYPE
+        # only, never str(e) — it can echo the request URL, which includes
+        # the member_id.
+        log.error("intake: eligibility check unreachable (error_type=%s)", type(e).__name__)
+        return {
+            "insurance_id": ins.member_id,
+            "active": False,
+            "status": "unknown",
+            "payer": ins.payer_name,
+            "raw_status": None,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "stale": False,
+            "error": type(e).__name__,
+        }
