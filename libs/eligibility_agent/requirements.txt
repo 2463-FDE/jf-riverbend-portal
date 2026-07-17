@@ -1,0 +1,6 @@
+# Real-provider SDK for the default raw_bedrock runtime — only needed by a
+# service that actually builds/runs an AgentRuntime with ELIGIBILITY_AGENT_
+# RUNTIME=raw_bedrock. Deliberately NOT referenced by the root
+# requirements-dev.txt, so CI (which only exercises fakes) never installs or
+# requires it. Mirrors libs/llm_client/requirements.txt.
+boto3==1.35.90

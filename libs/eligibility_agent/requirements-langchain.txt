@@ -1,0 +1,22 @@
+# LangChain comparison-spike runtime (ELIGIBILITY_AGENT_RUNTIME=langchain) —
+# a NEW heavy dependency, deliberately NOT in the root requirements-dev.txt
+# and NOT in any service's own requirements.txt (nothing is wired into a
+# running service yet — see Stage 3). Only a caller that actually selects
+# this runtime needs it installed; every import in runtimes/langchain_runtime.py
+# is lazy for exactly that reason.
+#
+# Package names and these exact versions were verified to resolve on PyPI
+# (`pip index versions <pkg>`) at the time this was written. They have NOT
+# been installed or run against real code in this environment — that's by
+# design (see the hard rule above and runtimes/langchain_runtime.py's module
+# docstring) — so cross-package compatibility between these pins is
+# unverified, unlike everything else in this repo's requirements files.
+langchain-core==0.3.29
+langgraph==0.2.62
+langchain-aws==0.2.19
+# Redis-backed LangGraph checkpointer — required in production so the
+# checkpointer is never langgraph.checkpoint.memory.InMemorySaver (see
+# runtimes/langchain_runtime.py::_default_checkpointer). A Postgres-backed
+# alternative (langgraph-checkpoint-postgres) exists if this stack's own
+# Postgres instance is ever preferred over Redis for this.
+langgraph-checkpoint-redis==0.3.6
