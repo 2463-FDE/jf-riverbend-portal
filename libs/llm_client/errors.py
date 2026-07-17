@@ -23,6 +23,18 @@ class ProviderTransientError(LLMClientError):
     """A provider call failed in a way that's safe to retry (e.g. rate limit, connection reset)."""
 
 
+class ProviderCallError(LLMClientError):
+    """A provider call failed in a NON-retryable way after construction — an
+    auth/validation rejection (e.g. AccessDenied, ValidationException) or an
+    unexpected response shape. Unlike ProviderTimeoutError/ProviderTransientError
+    it must not be retried. The completion client (LLMClient) does not raise
+    this — it deliberately lets such errors propagate as-is — but a
+    tool-capable adapter whose caller requires graceful degradation (the
+    eligibility agent) normalizes them to this type so the caller can catch a
+    single provider-error base and return a controlled failure instead of
+    letting a raw SDK exception escape."""
+
+
 class LLMRetriesExhaustedError(LLMClientError):
     """All configured retries were used without a successful response."""
 

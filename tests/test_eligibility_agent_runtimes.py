@@ -35,7 +35,7 @@ from libs.eligibility_agent.contracts import EligibilityStatus, TerminationReaso
 from libs.eligibility_agent.eligibility_tool import TOOL_NAME
 from libs.eligibility_agent.memory import VisitMemoryPort
 from libs.eligibility_agent.runtimes.raw_bedrock import RawBedrockAgentRuntime
-from libs.llm_client.errors import ProviderTimeoutError
+from libs.llm_client.errors import ProviderCallError, ProviderTimeoutError
 
 # --------------------------------------------------------------------------- #
 # Shared test doubles
@@ -70,6 +70,10 @@ def eligibility_transport(status: str, checked_at: str = "2026-07-17T12:00:00Z")
         return httpx.Response(200, json={"status": status, "checked_at": checked_at})
 
     return httpx.MockTransport(handler)
+
+
+def _visit_memory_checked_at(memory, visit_id):
+    return memory.get(visit_id).eligibility_checked_at
 
 
 def never_called_transport():
@@ -361,6 +365,80 @@ def test_provider_timeout_produces_a_safe_reply_and_never_raises(runtime_name, m
     memory = FakeVisitMemory()
     _seed_context(memory)
     script = [("error", ProviderTimeoutError("boom"))]
+    runtime = build_runtime(
+        runtime_name, script=script, memory=memory, tool_transport=never_called_transport(), monkeypatch=monkeypatch
+    )
+
+    result = runtime.handle_message("visit-1", "check now")
+
+    assert result.termination_reason == TerminationReason.PROVIDER_ERROR
+    assert "try again" in result.reply.lower()
+
+
+def test_stale_result_preserves_the_original_checked_at_not_now(runtime_name, monkeypatch):
+    # A payer-outage stale fallback carries its ORIGINAL (old) checked_at.
+    # The runtime must persist that, never stamp "now" — otherwise a stale
+    # result looks freshly verified in memory / audit views.
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    original = "2020-01-01T00:00:00Z"
+    script = [("tool_call", {}), ("text", "Showing last known result.")]
+    runtime = build_runtime(
+        runtime_name,
+        script=script,
+        memory=memory,
+        tool_transport=eligibility_transport("stale", checked_at=original),
+        monkeypatch=monkeypatch,
+    )
+
+    result = runtime.handle_message("visit-1", "check now")
+
+    assert result.eligibility_status == EligibilityStatus.STALE
+    stored = _visit_memory_checked_at(memory, "visit-1")
+    assert stored == datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    # And definitively NOT "now": 2020 is years before this test runs.
+    assert stored.year == 2020
+
+
+def test_failed_check_preserves_prior_checked_at_rather_than_stamping_now(runtime_name, monkeypatch):
+    # Seed a prior ACTIVE verification at a known old time, then a check that
+    # comes back UNKNOWN (no as_of). The prior timestamp must be preserved,
+    # not overwritten with "now".
+    memory = FakeVisitMemory()
+    prior = datetime(2021, 6, 6, 6, 0, 0, tzinfo=timezone.utc)
+    memory.put(
+        VisitContext(
+            visit_id="visit-1",
+            insurance_id="BCBS1",
+            eligibility_status=EligibilityStatus.ACTIVE,
+            eligibility_checked_at=prior,
+            updated_at=prior,
+        )
+    )
+    # eligibility-service reachable but returns unknown with no checked_at.
+    def handler(request):
+        return httpx.Response(200, json={"status": "unknown"})
+
+    runtime = build_runtime(
+        runtime_name,
+        script=[("tool_call", {}), ("text", "Couldn't verify right now.")],
+        memory=memory,
+        tool_transport=httpx.MockTransport(handler),
+        monkeypatch=monkeypatch,
+    )
+
+    runtime.handle_message("visit-1", "check now")
+
+    assert _visit_memory_checked_at(memory, "visit-1") == prior
+
+
+def test_non_retryable_provider_error_becomes_a_safe_result_not_an_exception(runtime_name, monkeypatch):
+    # A non-retryable provider failure (e.g. AccessDenied, normalized by the
+    # tool port to ProviderCallError) must degrade to a safe PROVIDER_ERROR
+    # turn, never escape handle_message.
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    script = [("error", ProviderCallError("AccessDeniedException"))]
     runtime = build_runtime(
         runtime_name, script=script, memory=memory, tool_transport=never_called_transport(), monkeypatch=monkeypatch
     )

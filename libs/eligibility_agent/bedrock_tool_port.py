@@ -20,7 +20,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from libs.llm_client.errors import ProviderNotConfiguredError, ProviderTimeoutError, ProviderTransientError
+from libs.llm_client.errors import (
+    ProviderCallError,
+    ProviderNotConfiguredError,
+    ProviderTimeoutError,
+    ProviderTransientError,
+)
 
 _RETRYABLE_ERROR_CODES = {
     "ThrottlingException",
@@ -94,19 +99,32 @@ class BedrockConverseToolModel(ToolCapableModel):
             error_code = exc.response.get("Error", {}).get("Code", "")
             if error_code in _RETRYABLE_ERROR_CODES:
                 raise ProviderTransientError(type(exc).__name__) from exc
-            raise
+            # Non-retryable (AccessDenied, ValidationException, ...). Unlike the
+            # completion-only bedrock_provider (which re-raises so a developer
+            # sees the misconfiguration), this agent-facing port normalizes it
+            # to ProviderCallError so the runtime can degrade gracefully to a
+            # safe reply rather than letting a raw SDK exception escape
+            # handle_message. Only the error TYPE crosses the boundary.
+            raise ProviderCallError(error_code or type(exc).__name__) from exc
 
-        content = response["output"]["message"]["content"]
-        text_parts = [block["text"] for block in content if "text" in block]
-        tool_calls = [
-            ToolCall(
-                id=block["toolUse"]["toolUseId"],
-                name=block["toolUse"]["name"],
-                arguments=block["toolUse"].get("input") or {},
-            )
-            for block in content
-            if "toolUse" in block
-        ]
+        try:
+            content = response["output"]["message"]["content"]
+            text_parts = [block["text"] for block in content if "text" in block]
+            tool_calls = [
+                ToolCall(
+                    id=block["toolUse"]["toolUseId"],
+                    name=block["toolUse"]["name"],
+                    arguments=block["toolUse"].get("input") or {},
+                )
+                for block in content
+                if "toolUse" in block
+            ]
+        except (KeyError, TypeError, IndexError) as exc:
+            # An unexpected Converse response shape (a model/SDK change) must
+            # not throw a raw KeyError out of the agent — surface it as a
+            # controlled provider failure, TYPE only.
+            raise ProviderCallError(type(exc).__name__) from exc
+
         return ConverseTurn(
             text="".join(text_parts) if text_parts else None,
             tool_calls=tool_calls,

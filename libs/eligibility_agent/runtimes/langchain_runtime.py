@@ -42,10 +42,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from libs.llm_client.errors import ProviderTimeoutError, ProviderTransientError
 from libs.safe_logging import get_safe_logger
 
-from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult
+from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult, parse_as_of
 from ..eligibility_tool import TOOL_NAME, TOOL_SPEC, CheckEligibilityTool, EligibilityToolConfig
 from ..memory import VisitMemoryPort
 
@@ -123,7 +122,14 @@ class LangChainAgentRuntime:
             state["turns"] = state.get("turns", 0) + 1
             try:
                 response = bound_model.invoke(state["messages"])
-            except (ProviderTimeoutError, ProviderTransientError) as exc:
+            except Exception as exc:
+                # Unlike raw_bedrock (whose ToolCapableModel port normalizes
+                # failures to the LLMClientError base we could catch precisely),
+                # the real langchain_aws model raises library-specific
+                # exceptions we cannot enumerate without installing the dep.
+                # The contract ("never raise for a provider failure") wins:
+                # catch broadly around ONLY this single external call and
+                # degrade to a safe PROVIDER_ERROR turn, logging TYPE only.
                 log.warning(
                     "agent provider call failed (turn=%s, error_type=%s)", state["turns"], type(exc).__name__
                 )
@@ -147,10 +153,17 @@ class LangChainAgentRuntime:
                         if "status" in payload:
                             status = EligibilityStatus(payload["status"])
                             outcome["eligibility_status"] = status
+                            # Persist the payer's real verification time (as_of),
+                            # NOT now() — parity with raw_bedrock; a stale
+                            # fallback must not be recorded as freshly checked.
+                            checked_at = (
+                                parse_as_of(payload.get("as_of"))
+                                or outcome["context"].eligibility_checked_at
+                            )
                             outcome["context"] = outcome["context"].model_copy(
                                 update={
                                     "eligibility_status": status,
-                                    "eligibility_checked_at": self._now(),
+                                    "eligibility_checked_at": checked_at,
                                     "updated_at": self._now(),
                                 }
                             )

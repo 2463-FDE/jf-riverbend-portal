@@ -24,6 +24,29 @@ class EligibilityStatus(str, Enum):
     STALE = "stale"
 
 
+def parse_as_of(as_of) -> Optional[datetime]:
+    """Convert the eligibility tool payload's `as_of` (the eligibility-service
+    response's own `checked_at`) into a datetime.
+
+    This is the REAL verification time — for a stale last-known-good fallback
+    it is deliberately the original, older check time. A runtime must persist
+    THIS, never `now()`, or a stale result would be recorded as freshly
+    verified. Returns None when `as_of` is absent (a failed/no-check path) or
+    unparseable, so the caller can preserve the prior timestamp instead of
+    inventing one.
+    """
+    if not as_of:
+        return None
+    if isinstance(as_of, datetime):
+        return as_of
+    try:
+        # `.replace("Z", ...)` for Python versions whose fromisoformat predates
+        # native "Z" support; a no-op on already-offset strings.
+        return datetime.fromisoformat(str(as_of).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 class VisitContext(BaseModel):
     """Structured, visit-scoped memory. NOT a chat transcript — this is the
     entire persistence surface for a visit; there is deliberately no field

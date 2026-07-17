@@ -13,11 +13,11 @@ the user.
 from datetime import datetime, timezone
 from typing import Optional
 
-from libs.llm_client.errors import ProviderTimeoutError, ProviderTransientError
+from libs.llm_client.errors import LLMClientError
 from libs.safe_logging import get_safe_logger
 
 from ..bedrock_tool_port import BedrockConverseToolModel, ConverseTurn, ToolCapableModel
-from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult
+from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult, parse_as_of
 from ..eligibility_tool import TOOL_NAME, TOOL_SPEC, CheckEligibilityTool, EligibilityToolConfig
 from ..memory import VisitMemoryPort
 
@@ -66,7 +66,11 @@ class RawBedrockAgentRuntime:
         for turn in range(1, self._max_turns + 1):
             try:
                 response = self._model.converse(messages, [TOOL_SPEC], timeout=self._timeout_seconds)
-            except (ProviderTimeoutError, ProviderTransientError) as exc:
+            except LLMClientError as exc:
+                # The provider-error base — covers timeout, transient, and the
+                # non-retryable/response-shape failures the tool port now
+                # normalizes to ProviderCallError. Any of them must degrade to
+                # a safe PROVIDER_ERROR turn, never escape handle_message.
                 log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
                 return VisitTurnResult(
                     visit_id=visit_id,
@@ -100,10 +104,15 @@ class RawBedrockAgentRuntime:
                         tool_called = True
                         if "status" in payload:
                             eligibility_status = EligibilityStatus(payload["status"])
+                            # Persist the payer's real verification time (as_of),
+                            # NOT now() — a stale fallback carries its original,
+                            # older checked_at and must not look freshly checked.
+                            # Absent/unparseable as_of preserves the prior time.
+                            checked_at = parse_as_of(payload.get("as_of")) or context.eligibility_checked_at
                             context = context.model_copy(
                                 update={
                                     "eligibility_status": eligibility_status,
-                                    "eligibility_checked_at": self._now(),
+                                    "eligibility_checked_at": checked_at,
                                     "updated_at": self._now(),
                                 }
                             )

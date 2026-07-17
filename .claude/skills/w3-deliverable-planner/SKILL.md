@@ -149,6 +149,26 @@ then immediately re-touching the tool's error-handling assumptions.
 - LangChain is a NEW heavy dependency: put it in a dedicated optional manifest
   (e.g. `libs/eligibility_agent/requirements-langchain.txt`), NOT in
   `requirements-dev.txt`. Keep all provider/SDK imports lazy.
+- Freshness integrity (adversarial-review finding, REQUIRED): when persisting a
+  tool result to visit memory, record the eligibility-service's own
+  verification time (the tool payload's `as_of`), NEVER `now()`. A stale
+  last-known-good fallback carries its original, older `checked_at`; stamping
+  `now()` records a stale result as freshly verified and corrupts audit/
+  downstream trust. Parse `as_of` via a shared helper
+  (`libs/eligibility_agent/contracts.py::parse_as_of`); on a failed/no-check
+  path (absent/unparseable `as_of`), preserve the prior `eligibility_checked_at`
+  rather than inventing a timestamp. `updated_at` may still be `now()`.
+- Provider-error containment (adversarial-review finding, REQUIRED): the
+  `AgentRuntime` contract is that no provider/tool failure escapes
+  `handle_message`. Non-retryable Bedrock `ClientError`s (AccessDenied,
+  ValidationException) and unexpected Converse response shapes must be
+  normalized at the tool-capable port into the llm_client provider-error
+  vocabulary (`ProviderCallError`), and `handle_message` must catch the
+  provider-error base (`LLMClientError`) — not just the two retryable types —
+  and return a safe `PROVIDER_ERROR` turn, logging the error TYPE only. For the
+  LangChain runtime, whose third-party model raises library-specific exceptions
+  that cannot be enumerated without the dep installed, catch broadly around
+  ONLY the single model-invoke call and degrade the same way.
 - Suggested commit: `feat(agent): add switchable raw-bedrock (default) and langchain eligibility runtimes`
 
 ### Stage 3 — Async intake, minimal UI, tracing, and ADR
