@@ -2,8 +2,12 @@
 
 Stage 1 resilience fix for D4/RIV-088/RIV-141: the payer call now has a
 timeout, is retried a small bounded number of times with jittered exponential
-backoff, and only for transport-level failures (timeout / connection reset) —
-never for a plain non-2xx response, which is a successful, informative call.
+backoff, for transport-level failures (timeout / connection reset) AND for a
+429 or any 5xx response — those are the payer/clearinghouse telling us it's
+rate-limiting or down, not giving a business answer, so they're retried the
+same as a transport failure rather than trusted as "coverage is inactive"
+(Stage 1 Hardening Fix). Any other completed response (2xx, or a 4xx other
+than 429) is treated as a genuine, terminal business answer.
 Once retries are exhausted the caller (check.py) decides what to do; this
 client never itself decides that a failure means "inactive".
 
@@ -20,6 +24,13 @@ from errors import PayerTimeoutError, PayerTransientError, RetriesExhaustedError
 
 _BACKOFF_BASE_SECONDS = 0.5
 _BACKOFF_MAX_SECONDS = 8.0
+
+
+# 429 (rate limited) and any 5xx (payer/clearinghouse server error) are
+# transient — retried the same as a transport failure — never a terminal
+# business answer. Everything else (2xx, or a 4xx other than 429) is terminal.
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
 
 
 class PayerClient:
@@ -46,7 +57,7 @@ class PayerClient:
         """Returns {"insurance_id", "active": bool, "raw_status": int}.
 
         Raises RetriesExhaustedError (chained from the last classified
-        transport error) once max_retries is used up.
+        transport or retryable-HTTP-status error) once max_retries is used up.
         """
         params = {"member_id": insurance_id, "service_type": "30"}
         headers = {"Authorization": f"Bearer {self._api_key}"}
@@ -61,11 +72,14 @@ class PayerClient:
                 except httpx.TransportError as exc:
                     last_exc = PayerTransientError(type(exc).__name__)
                 else:
-                    return {
-                        "insurance_id": insurance_id,
-                        "active": resp.is_success,
-                        "raw_status": resp.status_code,
-                    }
+                    if _is_retryable_status(resp.status_code):
+                        last_exc = PayerTransientError(f"HTTPStatus{resp.status_code}")
+                    else:
+                        return {
+                            "insurance_id": insurance_id,
+                            "active": resp.is_success,
+                            "raw_status": resp.status_code,
+                        }
                 if attempt < self._max_retries:
                     await self._sleep(self._backoff_delay(attempt))
 

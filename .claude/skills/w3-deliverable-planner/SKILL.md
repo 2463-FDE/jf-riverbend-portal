@@ -48,25 +48,92 @@ internal contract.
    already exists, LangChain was already added). If it has, STOP and report
    before implementing.
 
-## Approved Three-Stage Scope
+## Approved Scope: Three Stages Plus One Gating Fix Commit
 
-Implement in this order. **Exactly one stage per run.** Each stage is one manual
-commit. Preserve backward compatibility unless the plan says otherwise.
+Implement in this order. **Exactly one commit-sized unit per run.** Each unit is
+one manual commit. Preserve backward compatibility unless the plan says
+otherwise.
 
-### Stage 1 — Resilience foundation and shared contracts
+Stage 1 is DONE and already committed (`135e453 feat(eligibility): add bounded
+resilience and safe status handling`). A post-commit adversarial code review
+(Codex) found two HIGH-severity regressions of Stage 1's own invariant in the
+code as shipped. **The Stage 1 Hardening Fix below is a required prerequisite
+and must be committed before any Stage 2 work begins.** This is a deviation
+from the original "exactly three commits" instruction, justified below under
+"Why this is a fourth commit, not scope creep."
+
+### Stage 1 — Resilience foundation and shared contracts (DONE, committed)
 - Feature: bounded async payer client (timeout, retry classification + jitter,
   injected clock/transport for tests), circuit-breaker state machine, Redis
   last-known-good cache (separate key prefix, fresh TTL + bounded stale window,
   never cache errors, store `checked_at` + stale age), and Pydantic contracts
   (`EligibilityStatus` = active|inactive|unknown|pending|stale, `EligibilityResult`,
   `VisitContext`, `AuditEvent`).
-- Fix the unknown-vs-inactive bug in BOTH `services/eligibility-service/app.py`
-  (approx lines 37-52) and `services/intake-service/app.py` (approx lines
-  138-154). A transport failure must map to `unknown`, never `inactive`.
-- DB migration under `db/migrations/` to allow `pending`/`stale` status values.
-- No new heavy dependency. Reuse `httpx` and the existing `redis` client. Do
-  NOT add a circuit-breaker library.
-- Suggested commit: `feat(eligibility): add bounded client, breaker, stale cache, and status contracts`
+- Fixed the unknown-vs-inactive bug for *transport-level* failures (timeout,
+  connection reset) in both `services/eligibility-service/app.py`/`check.py`
+  and `services/intake-service/app.py`.
+- DB migration `db/migrations/009_eligibility_status_values.sql` allows
+  `pending`/`stale` status values.
+- No new heavy dependency; reused `httpx` and the existing `redis` client.
+- Committed: `feat(eligibility): add bounded resilience and safe status handling`
+
+### Stage 1 Hardening Fix — close the HTTP-status and cache-availability gaps (REQUIRED, gates Stage 2)
+
+**Why this is a fourth commit, not scope creep.** The original Week 3
+instructions require exactly three stages/commits. This fix is not new
+feature scope — it is a correction to a defect in code Stage 1 already
+shipped, surfaced by adversarial review after the commit. This repo's own
+history already uses this exact pattern (`a4bafe6 feat(rag): add retrieval
+eval harness...` followed by `e4ef08a fix(rag): make fragment-gap metric
+case-specific`), so a small `fix(...)` commit between a `feat(...)` commit and
+the next stage is consistent with project convention. Folding it into Stage
+2's commit would mix an agent-runtime feature with an unrelated resilience
+bugfix in one commit, which breaks the plan's own commit-discipline rule
+("each commit is independently reviewable and tested").
+
+**Why it must happen before Stage 2, not after.** Stage 2 builds the
+`check_eligibility` tool directly on top of `check.py`/`payer_client.py`/
+`cache.py`. If the agent ships before this fix, the assistant will confidently
+tell the front desk "inactive" during a payer rate-limit or outage, and a
+Redis blip will surface as a hard failure instead of a graceful "unknown" —
+exactly the two failure modes the whole eligibility-resilience effort exists
+to prevent (RIV-088/RIV-141). Fixing it after Stage 2 would mean shipping and
+then immediately re-touching the tool's error-handling assumptions.
+
+- Fix A — HTTP-status misclassification
+  (`services/eligibility-service/payer_client.py:63-68`): the `else` branch
+  after a completed HTTP request currently treats ANY response (including
+  429/500/502/503/504) as a successful, terminal answer via `active:
+  resp.is_success`. Classify 429 and 5xx as a transient payer error (retry,
+  same bounded/jittered path as timeouts), and only treat an explicit
+  business-level response (e.g. a real 271/denial payload or another
+  non-retryable status your clearinghouse defines) as a genuine
+  active/inactive answer. After retries are exhausted on a transient status,
+  raise the existing `RetriesExhaustedError` path so `check.py` returns
+  `unknown`/`stale` and never caches it — do not invent a new status enum
+  value for this.
+- Fix B — cache is not best-effort
+  (`services/eligibility-service/cache.py:51,54`, called from
+  `check.py:87,98`): wrap the Redis calls in `LastKnownGoodCache.get`/`set` (or
+  at their call sites in `check.py`, whichever keeps the failure-handling
+  closest to the Redis boundary) in a catch for Redis/connection errors. Log
+  the error TYPE only (no PHI, mirrors the existing pattern already used
+  elsewhere in this file). On a `set` failure, swallow it and still return the
+  live payer result to the caller. On a `get` failure during `_fallback`,
+  treat it as a cache miss and return `unknown` — never let a Redis outage
+  surface as an unhandled 500.
+- Tests: add a payer-stub case returning 429/500/503 and assert the result is
+  `unknown` (retried, then not cached as inactive); add a cache double that
+  raises on `get`/`set` and assert `check()` still returns the live result
+  (set-failure case) and still degrades to `unknown` (get-failure case)
+  instead of raising.
+- Definition of Done: `pytest -m "not integration" -q` passes including the
+  new cases; a payer 503 never produces a cached `inactive`; a Redis outage
+  never produces an unhandled exception from `/eligibility`.
+- Suggested commit: `fix(eligibility): classify payer HTTP failures as transient and make cache best-effort`
+- This unit follows the same per-run workflow as any stage below (re-inspect,
+  implement, test, self-review, completion report, STOP for manual commit)
+  before Stage 2 begins.
 
 ### Stage 2 — Switchable agent runtimes and visit memory
 - Feature: `AgentRuntime` port + factory selected by `ELIGIBILITY_AGENT_RUNTIME`
@@ -140,8 +207,10 @@ exact commands they can run manually; the user runs them.
 ## Per-Run Workflow (one stage)
 
 1. Run the Re-Inspection Gate above.
-2. Confirm which stage is next (Stage 1 unless the user says otherwise).
-3. Implement only that stage per the approved plan.
+2. Confirm which unit is next. Stage 1 is committed; the Stage 1 Hardening Fix
+   is next and MUST land before Stage 2, unless the user explicitly says
+   otherwise.
+3. Implement only that unit per the approved plan.
 4. Add or update tests (success + failure paths; fakes only).
 5. Run `pytest -m "not integration" -q` (and, for Stage 3, the integration
    tests if the user has `make up` running). Capture the real output.

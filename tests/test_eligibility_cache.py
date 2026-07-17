@@ -32,6 +32,28 @@ class FakeRedis:
         return self.store.get(key)
 
 
+class RaisingRedis:
+    """Stands in for a Redis client that's completely unreachable — both
+    get() and set() raise. Used to prove the cache is best-effort."""
+
+    class Down(Exception):
+        pass
+
+    def get(self, key):
+        raise self.Down("connection refused")
+
+    def set(self, key, value, ex=None):
+        raise self.Down("connection refused")
+
+
+class RaisingOnlyOnGetRedis(FakeRedis):
+    """A cache that can be written to normally but whose reads are broken —
+    e.g. a malformed/corrupted entry, or a read-path-specific outage."""
+
+    def get(self, key):
+        raise RuntimeError("corrupted read")
+
+
 BASE_TIME = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -162,3 +184,50 @@ def test_rejects_stale_ttl_shorter_than_fresh_ttl():
 
     with pytest.raises(ValueError):
         _cache(fresh_ttl=600, stale_ttl=300)
+
+
+# --- Stage 1 Hardening Fix: get/set are best-effort -----------------------
+
+
+def test_set_swallows_a_redis_failure_instead_of_raising():
+    cache = _cache(RaisingRedis())
+
+    cache.set(_result(EligibilityStatus.ACTIVE))  # must not raise
+
+
+def test_set_logs_the_error_type_only_on_a_redis_failure(caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger=cache_mod.__name__)
+    cache = _cache(RaisingRedis())
+
+    cache.set(_result(EligibilityStatus.ACTIVE))
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "error_type=Down" in text
+    assert "connection refused" not in text  # raw exception message never logged
+
+
+def test_get_returns_none_on_a_redis_failure_instead_of_raising():
+    cache = _cache(RaisingRedis())
+
+    assert cache.get("MEM1") is None
+
+
+def test_get_returns_none_on_a_malformed_cached_entry_instead_of_raising():
+    cache = _cache(RaisingOnlyOnGetRedis())
+
+    assert cache.get("MEM1") is None
+
+
+def test_get_failure_log_contains_no_raw_exception_text(caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger=cache_mod.__name__)
+    cache = _cache(RaisingRedis())
+
+    cache.get("MEM1-SECRET")
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "MEM1-SECRET" not in text
+    assert "connection refused" not in text

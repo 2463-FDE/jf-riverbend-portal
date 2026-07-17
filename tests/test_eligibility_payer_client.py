@@ -84,6 +84,80 @@ def test_authorization_header_and_params_sent():
     assert captured["params"] == {"member_id": "MEM1", "service_type": "30"}
 
 
+# --- retryable HTTP status (Stage 1 Hardening Fix) ----------------------------
+# 429/5xx are the payer/clearinghouse telling us it's rate-limiting or down —
+# not a business answer — so they must be retried like a transport failure,
+# never trusted as a terminal "inactive" on the first response.
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 502, 503, 504])
+def test_retryable_status_is_retried_then_succeeds(status_code):
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            return httpx.Response(status_code)
+        return httpx.Response(200)
+
+    client, sleeps = _client(handler, max_retries=2)
+
+    result = asyncio.run(client.check("MEM1"))
+
+    assert result["active"] is True
+    assert attempts["n"] == 2
+    assert len(sleeps) == 1  # retried exactly once before succeeding
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_retryable_status_exhausts_retries_and_raises(status_code):
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(status_code)
+
+    client, sleeps = _client(handler, max_retries=2)
+
+    with pytest.raises(RetriesExhaustedError):
+        asyncio.run(client.check("MEM1"))
+
+    assert attempts["n"] == 3  # initial attempt + 2 retries
+    assert len(sleeps) == 2
+
+
+def test_400_is_not_retried_and_reported_as_a_terminal_answer():
+    """400 is outside the retryable set (429, 5xx) — treated as a genuine,
+    terminal business answer (active: False), exactly like the pre-hardening-
+    fix 404 case, and never retried."""
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(400)
+
+    client, sleeps = _client(handler, max_retries=2)
+
+    result = asyncio.run(client.check("MEM1"))
+
+    assert result == {"insurance_id": "MEM1", "active": False, "raw_status": 400}
+    assert attempts["n"] == 1
+    assert sleeps == []
+
+
+def test_is_retryable_status_boundary():
+    is_retryable = payer_client_mod._is_retryable_status
+
+    assert is_retryable(429) is True
+    assert is_retryable(500) is True
+    assert is_retryable(501) is True  # any 5xx, not just the common ones above
+    assert is_retryable(599) is True
+    assert is_retryable(200) is False
+    assert is_retryable(400) is False
+    assert is_retryable(404) is False
+    assert is_retryable(428) is False  # neighbor of 429, must not be swept in
+
+
 # --- retry / backoff on transport failure -------------------------------------
 
 

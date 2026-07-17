@@ -12,6 +12,7 @@ silently becomes `inactive`.
 import asyncio
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 
 from conftest import load_module
@@ -59,6 +60,21 @@ def _env(*, script, breaker=None, cache=None):
     breaker = breaker or CircuitBreaker(failure_threshold=3, reset_timeout_seconds=30)
     cache = cache if cache is not None else LastKnownGoodCache(_FakeRedis(), now=lambda: NOW)
     return client, breaker, cache
+
+
+class _RaisingRedis:
+    """Stands in for a Redis client that's completely unreachable — every call
+    raises. Used to prove check()'s cache-boundary is best-effort end-to-end
+    (cache.py itself is unit-tested for this in test_eligibility_cache.py)."""
+
+    class _Down(Exception):
+        pass
+
+    def get(self, key):
+        raise self._Down("connection refused")
+
+    def set(self, key, value, ex=None):
+        raise self._Down("connection refused")
 
 
 # --- happy path -----------------------------------------------------------
@@ -177,3 +193,86 @@ def test_open_circuit_serves_stale_cache_when_available():
     assert result.status == EligibilityStatus.STALE
     assert result.cached_status == EligibilityStatus.INACTIVE
     assert result.error_type == "CircuitOpenError"
+
+
+# --- Stage 1 Hardening Fix: a transient HTTP response is never cached as
+# "inactive" ------------------------------------------------------------------
+# These use the REAL PayerClient (via httpx.MockTransport), not the stub, so
+# the proof runs through the exact same retry-classification code check()
+# relies on in production, not just a hand-scripted stand-in for it.
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_transient_http_status_exhausted_maps_to_unknown_and_is_never_cached(status_code):
+    def handler(request):
+        return httpx.Response(status_code)
+
+    real_client = PayerClient(
+        base_url="https://payer.example.test/eligibility",
+        api_key="k",
+        max_retries=1,
+        transport=httpx.MockTransport(handler),
+        sleep=lambda seconds: asyncio.sleep(0),
+    )
+    fake_redis = _FakeRedis()
+    cache = LastKnownGoodCache(fake_redis, now=lambda: NOW)
+    breaker = CircuitBreaker(failure_threshold=5, reset_timeout_seconds=30)
+
+    result = asyncio.run(check("MEM1", client=real_client, breaker=breaker, cache=cache, now=lambda: NOW))
+
+    assert result.status == EligibilityStatus.UNKNOWN
+    assert result.status != EligibilityStatus.INACTIVE
+    assert result.error_type == "RetriesExhaustedError"
+    assert fake_redis.store == {}  # nothing was ever cached for this failure
+
+
+def test_transient_http_status_that_recovers_is_cached_as_its_real_answer():
+    """The inverse check: once retries succeed, the real (now-terminal) answer
+    IS cached normally — the hardening fix only changes what happens while
+    the payer is degraded, not the happy path."""
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            return httpx.Response(503)
+        return httpx.Response(404)  # terminal business answer: inactive
+
+    real_client = PayerClient(
+        base_url="https://payer.example.test/eligibility",
+        api_key="k",
+        max_retries=2,
+        transport=httpx.MockTransport(handler),
+        sleep=lambda seconds: asyncio.sleep(0),
+    )
+    fake_redis = _FakeRedis()
+    cache = LastKnownGoodCache(fake_redis, now=lambda: NOW)
+    breaker = CircuitBreaker(failure_threshold=5, reset_timeout_seconds=30)
+
+    result = asyncio.run(check("MEM1", client=real_client, breaker=breaker, cache=cache, now=lambda: NOW))
+
+    assert result.status == EligibilityStatus.INACTIVE
+    assert fake_redis.store  # a genuine terminal answer is still cached
+
+
+# --- Stage 1 Hardening Fix: cache failures are best-effort, end to end -------
+
+
+def test_cache_set_failure_still_returns_the_live_payer_result():
+    client, breaker, _ = _env(script=[{"insurance_id": "MEM1", "active": True, "raw_status": 200}])
+    cache = LastKnownGoodCache(_RaisingRedis(), now=lambda: NOW)
+
+    result = asyncio.run(check("MEM1", client=client, breaker=breaker, cache=cache, now=lambda: NOW))
+
+    assert result.status == EligibilityStatus.ACTIVE  # the live result, despite the cache write failing
+    assert result.error_type is None
+
+
+def test_cache_get_failure_during_fallback_degrades_to_unknown_not_an_exception():
+    client, breaker, _ = _env(script=[RetriesExhaustedError("PayerTimeoutError")])
+    cache = LastKnownGoodCache(_RaisingRedis(), now=lambda: NOW)
+
+    result = asyncio.run(check("MEM1", client=client, breaker=breaker, cache=cache, now=lambda: NOW))
+
+    assert result.status == EligibilityStatus.UNKNOWN  # cache-read failure treated as a miss
+    assert result.error_type == "RetriesExhaustedError"
