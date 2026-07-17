@@ -8,3 +8,4 @@ dist/
 *.log.2
 .venv/
 .cache/
+.codex_tmp/
