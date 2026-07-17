@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS insurance_coverages (
     member_id     TEXT,
     group_number  TEXT,
     plan_type     TEXT,                        -- PPO | HMO | Medicaid | Medicare | self_pay
-    status        TEXT DEFAULT 'unknown',      -- active | inactive | unknown
+    status        TEXT DEFAULT 'unknown'        -- active | inactive | unknown | pending | stale
+                  CHECK (status IN ('active', 'inactive', 'unknown', 'pending', 'stale')),
     verified_at   TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );

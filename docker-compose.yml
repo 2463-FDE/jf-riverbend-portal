@@ -79,6 +79,9 @@ services:
     env_file: .env
     ports:
       - "8072:8072"
+    depends_on:
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8072/healthz')\""]
       interval: 10s
