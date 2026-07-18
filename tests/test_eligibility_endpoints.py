@@ -14,11 +14,37 @@ from conftest import load_module
 app_mod = load_module("services/eligibility-service/app.py", "eligibility_app")
 
 
+class _FakePipeline:
+    def __init__(self, redis):
+        self._redis = redis
+        self._ops = []
+
+    def set(self, *args, **kwargs):
+        self._ops.append(("set", args, kwargs))
+        return self
+
+    def lrem(self, *args, **kwargs):
+        self._ops.append(("lrem", args, kwargs))
+        return self
+
+    def rpush(self, *args, **kwargs):
+        self._ops.append(("rpush", args, kwargs))
+        return self
+
+    def execute(self):
+        results = [getattr(self._redis, name)(*a, **k) for name, a, k in self._ops]
+        self._ops = []
+        return results
+
+
 class _FakeRedis:
+    """In-memory double for the redis-py surface eligibility-service uses
+    (job store + visit memory): strings, lists, atomic list move/scan/remove,
+    and a transaction pipeline. Also serves the agent visit-memory keys."""
+
     def __init__(self):
         self.strings = {}
         self.lists = {}
-        self.sets = {}
 
     def get(self, key):
         return self.strings.get(key)
@@ -29,18 +55,31 @@ class _FakeRedis:
     def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
 
-    def lpop(self, key):
+    def lmove(self, src, dst, src_pos="LEFT", dst_pos="RIGHT"):
+        lst = self.lists.get(src)
+        if not lst:
+            return None
+        value = lst.pop(0) if str(src_pos).upper() == "LEFT" else lst.pop()
+        dest = self.lists.setdefault(dst, [])
+        dest.append(value) if str(dst_pos).upper() == "RIGHT" else dest.insert(0, value)
+        return value
+
+    def lrange(self, key, start, end):
+        lst = self.lists.get(key, [])
+        stop = len(lst) if end == -1 else end + 1
+        return list(lst[start:stop])
+
+    def lrem(self, key, count, value):
         lst = self.lists.get(key)
-        return lst.pop(0) if lst else None
+        if not lst:
+            return 0
+        kept = [x for x in lst if x != value]
+        removed = len(lst) - len(kept)
+        self.lists[key] = kept
+        return removed
 
-    def sadd(self, key, value):
-        self.sets.setdefault(key, set()).add(value)
-
-    def srem(self, key, value):
-        self.sets.get(key, set()).discard(value)
-
-    def smembers(self, key):
-        return set(self.sets.get(key, set()))
+    def pipeline(self, transaction=True):
+        return _FakePipeline(self)
 
 
 @pytest.fixture

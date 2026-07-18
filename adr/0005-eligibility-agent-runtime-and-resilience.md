@@ -72,8 +72,11 @@ namespaced Redis keys, distinct from every other Redis use in this stack
 - `elig:job:idem:{key}` — idempotency key -> job id, so a retried enqueue
   (a network blip on intake-service's side, not a new registration) returns
   the SAME job instead of triggering a second live payer call.
-- `elig:job:inflight` — job ids currently `RUNNING`, used only for
-  worker-restart recovery.
+- `elig:job:processing` — job ids a worker has claimed but not yet finished.
+  A job is moved here from the queue by the SAME atomic `LMOVE` that claims
+  it (see §3) and stays until a terminal/re-queue transition removes it, so
+  it is never in neither structure. This is the only structure
+  worker-restart recovery scans.
 
 Job ids are `uuid4().hex` — safe, opaque, non-guessable, mirroring gateway
 session tokens (`services/gateway/security.py::create_session`).
@@ -94,17 +97,44 @@ forever.
 
 ### 3. Worker-restart safety without a broker's built-in redelivery
 
-A `RUNNING` job's lease (`ELIGIBILITY_JOB_LEASE_SECONDS`, default 30s) is
-checked on worker startup and periodically thereafter
-(`reclaim_expired()`). A worker that dies mid-check (crash, container
-restart) leaves its job's record and queue entry in Redis, not in the dead
-process's memory; the next worker instance to start reclaims any
-lease-expired `RUNNING` job through the exact same bounded
-retry-or-dead-letter path a live failure uses. This was exercised directly
-against a real `docker kill` of the `eligibility-service` container during
-this stage's manual verification: the in-flight job survived, was reclaimed
-by the restarted worker, and reached `DEAD_LETTER` on schedule — it was
-never silently dropped.
+Recovery rests on two atomicity properties so a crash at any point leaves a
+job recoverable, never in neither the queue nor the processing list:
+
+- **Atomic claim.** A worker claims the head of the queue with a single
+  `LMOVE elig:job:queue elig:job:processing LEFT RIGHT`, then stamps the
+  record `RUNNING` with a lease (`ELIGIBILITY_JOB_LEASE_SECONDS`, default
+  30s). Because the move is one command, the job is in the processing list
+  the instant it leaves the queue — a crash before the `RUNNING` write just
+  leaves a no-lease `QUEUED` record sitting in the processing list, which
+  recovery re-drives.
+- **Atomic transition.** Every terminal/retry transition (succeed, retry,
+  dead-letter, manual retry) writes the record, removes the job from the
+  processing list, and — on retry — re-enqueues it as ONE Redis `MULTI/EXEC`
+  transaction. There is no observable "removed from processing but not yet
+  re-queued" state for a crash to strand; the transition either fully
+  happened or did not happen at all.
+
+`reclaim_expired()` — run on worker startup and periodically thereafter —
+scans the processing list and re-drives every entry a live worker does not
+currently own (anything but a `RUNNING` record with an unexpired lease)
+through the exact same bounded retry-or-dead-letter path a live failure
+uses. Under this stack's one-instance-per-region model (see §1;
+`breaker.py` makes the same assumption) claim and recovery never run
+concurrently, so an orphan is always a dead predecessor's. The residual cost
+is at-least-once delivery (a job may be re-driven after a crash window),
+which is safe because the payer `check()` is a read. This was exercised
+directly against a real `docker kill` of the `eligibility-service` container
+during this stage's manual verification: the in-flight job survived, was
+reclaimed by the restarted worker, and reached `DEAD_LETTER` on schedule —
+it was never silently dropped.
+
+> **Post-review hardening (2026-07-18).** The claim/transition mechanism
+> above replaces the originally-shipped design (a separate `elig:job:inflight`
+> SET plus `LPOP` claim and multi-step, non-transactional retry requeue),
+> which an adversarial review found had two crash windows that could silently
+> drop an accepted registration's eligibility check — the exact failure this
+> stage exists to prevent. The public job API, states, and TTLs are
+> unchanged; only the underlying Redis structures and their atomicity changed.
 
 ### 4. Circuit breaker and stale cache (Stage 1, now load-bearing for the job path)
 

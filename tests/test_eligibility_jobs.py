@@ -20,20 +20,47 @@ JobStoreUnavailable = jobs_mod.JobStoreUnavailable
 RECORD_PREFIX = jobs_mod.RECORD_PREFIX
 QUEUE_KEY = jobs_mod.QUEUE_KEY
 IDEMPOTENCY_PREFIX = jobs_mod.IDEMPOTENCY_PREFIX
-INFLIGHT_KEY = jobs_mod.INFLIGHT_KEY
+PROCESSING_KEY = jobs_mod.PROCESSING_KEY
 
 NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
 
 
+class _FakePipeline:
+    """Minimal MULTI/EXEC double: buffers commands, then applies them all on
+    execute() (redis-py's transaction=True semantics — the server runs the
+    queued commands atomically once EXEC is received)."""
+
+    def __init__(self, redis):
+        self._redis = redis
+        self._ops: list = []
+
+    def set(self, *args, **kwargs):
+        self._ops.append(("set", args, kwargs))
+        return self
+
+    def lrem(self, *args, **kwargs):
+        self._ops.append(("lrem", args, kwargs))
+        return self
+
+    def rpush(self, *args, **kwargs):
+        self._ops.append(("rpush", args, kwargs))
+        return self
+
+    def execute(self):
+        results = [getattr(self._redis, name)(*a, **k) for name, a, k in self._ops]
+        self._ops = []
+        return results
+
+
 class _FakeRedis:
     """In-memory double covering exactly the redis-py surface jobs.py uses:
-    get/set (strings + ex=), rpush/lpop (a list), sadd/srem/smembers (a set)."""
+    get/set (strings + ex=), rpush/lmove/lrange/lrem (lists), and a
+    transaction pipeline (MULTI/EXEC)."""
 
     def __init__(self):
         self.strings: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
         self.lists: dict[str, list] = {}
-        self.sets: dict[str, set] = {}
 
     def get(self, key):
         return self.strings.get(key)
@@ -46,20 +73,35 @@ class _FakeRedis:
     def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
 
-    def lpop(self, key):
-        lst = self.lists.get(key)
+    def lmove(self, src, dst, src_pos="LEFT", dst_pos="RIGHT"):
+        lst = self.lists.get(src)
         if not lst:
             return None
-        return lst.pop(0)
+        value = lst.pop(0) if str(src_pos).upper() == "LEFT" else lst.pop()
+        dest = self.lists.setdefault(dst, [])
+        if str(dst_pos).upper() == "RIGHT":
+            dest.append(value)
+        else:
+            dest.insert(0, value)
+        return value
 
-    def sadd(self, key, value):
-        self.sets.setdefault(key, set()).add(value)
+    def lrange(self, key, start, end):
+        lst = self.lists.get(key, [])
+        stop = len(lst) if end == -1 else end + 1
+        return list(lst[start:stop])
 
-    def srem(self, key, value):
-        self.sets.get(key, set()).discard(value)
+    def lrem(self, key, count, value):
+        lst = self.lists.get(key)
+        if not lst:
+            return 0
+        assert count == 0, "jobs.py only ever calls lrem with count=0"
+        kept = [x for x in lst if x != value]
+        removed = len(lst) - len(kept)
+        self.lists[key] = kept
+        return removed
 
-    def smembers(self, key):
-        return set(self.sets.get(key, set()))
+    def pipeline(self, transaction=True):
+        return _FakePipeline(self)
 
 
 class _RaisingRedis:
@@ -75,16 +117,16 @@ class _RaisingRedis:
     def rpush(self, key, value):
         raise self._Down("redis unreachable")
 
-    def lpop(self, key):
+    def lmove(self, src, dst, src_pos="LEFT", dst_pos="RIGHT"):
         raise self._Down("redis unreachable")
 
-    def sadd(self, key, value):
+    def lrange(self, key, start, end):
         raise self._Down("redis unreachable")
 
-    def srem(self, key, value):
+    def lrem(self, key, count, value):
         raise self._Down("redis unreachable")
 
-    def smembers(self, key):
+    def pipeline(self, transaction=True):
         raise self._Down("redis unreachable")
 
 
@@ -184,7 +226,9 @@ def test_dequeue_claims_the_job_and_sets_a_lease():
     assert claimed.job_id == created.job_id
     assert claimed.status == JobStatus.RUNNING
     assert claimed.lease_expires_at == NOW + timedelta(seconds=30)
-    assert claimed.job_id in redis.sets[INFLIGHT_KEY]
+    # Atomically moved off the queue and into the processing list.
+    assert redis.lists.get(QUEUE_KEY, []) == []
+    assert redis.lists[PROCESSING_KEY] == [created.job_id]
 
 
 def test_dequeue_on_empty_queue_returns_none():
@@ -193,27 +237,46 @@ def test_dequeue_on_empty_queue_returns_none():
     assert store.dequeue() is None
 
 
-def test_dequeue_rolls_back_to_queued_if_inflight_tracking_fails():
-    # If the job can't be recorded as in-flight, it must not be silently
-    # left as an untracked, un-reclaimable RUNNING job — see _mark_running's
-    # docstring. The claim is rolled back: requeued, record untouched.
-    class _SaddFailsRedis(_FakeRedis):
-        def sadd(self, key, value):
-            raise ConnectionError("redis down for this one call")
+def test_dequeue_crash_before_running_write_leaves_a_recoverable_processing_entry():
+    # Crash window: the atomic LMOVE claim succeeded (job is in the processing
+    # list) but the RUNNING/lease write then failed. The job must NOT be lost:
+    # it stays in the processing list with its prior QUEUED record (no lease),
+    # which reclaim_expired re-drives — the new design's replacement for the
+    # old sadd-based rollback.
+    class _RunningWriteFailsRedis(_FakeRedis):
+        def set(self, key, value, ex=None):
+            if key.startswith(RECORD_PREFIX):
+                raise ConnectionError("redis down for the RUNNING write")
+            super().set(key, value, ex=ex)
 
-    redis = _SaddFailsRedis()
+    redis = _FakeRedis()
     store = _store(redis)
     created = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
 
-    claimed = store.dequeue()
+    # Swap in the failing client only for the claim, so creation above still
+    # persisted the QUEUED record.
+    failing = _RunningWriteFailsRedis()
+    failing.strings = redis.strings
+    failing.ttls = redis.ttls
+    failing.lists = redis.lists
+    failing_store = _store(failing)
 
-    assert claimed is None
-    assert redis.lists[QUEUE_KEY] == [created.job_id]  # back on the queue
-    stored = store.get(created.job_id)
-    assert stored.status == JobStatus.QUEUED  # never transitioned to a stuck RUNNING
+    claimed = failing_store.dequeue()
+
+    assert claimed is None  # never raises; RUNNING write failed
+    assert redis.lists.get(QUEUE_KEY, []) == []  # off the queue (LMOVE happened)
+    assert redis.lists[PROCESSING_KEY] == [created.job_id]  # but recoverable here
+    assert store.get(created.job_id).status == JobStatus.QUEUED  # no stuck RUNNING
+
+    # A later worker's reclaim finds the orphan (no live lease) and re-drives it.
+    later = _store(redis, now=lambda: NOW + timedelta(seconds=60))
+    reclaimed = later.reclaim_expired()
+    assert [j.job_id for j in reclaimed] == [created.job_id]
+    assert redis.lists[QUEUE_KEY] == [created.job_id]  # back on the queue — not lost
+    assert redis.lists.get(PROCESSING_KEY, []) == []  # cleared from processing
 
 
-def test_mark_succeeded_records_result_and_clears_inflight():
+def test_mark_succeeded_records_result_and_clears_processing_entry():
     redis = _FakeRedis()
     store = _store(redis)
     created = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
@@ -225,7 +288,7 @@ def test_mark_succeeded_records_result_and_clears_inflight():
     assert stored.status == JobStatus.SUCCEEDED
     assert stored.result_status == "active"
     assert stored.result_checked_at == NOW
-    assert stored.job_id not in redis.sets.get(INFLIGHT_KEY, set())
+    assert created.job_id not in redis.lists.get(PROCESSING_KEY, [])
 
 
 def test_failed_attempt_under_max_retries_becomes_retryable_and_is_requeued():
@@ -239,7 +302,7 @@ def test_failed_attempt_under_max_retries_becomes_retryable_and_is_requeued():
     assert result.status == JobStatus.RETRYABLE
     assert result.retry_count == 1
     assert redis.lists[QUEUE_KEY] == [created.job_id]  # back on the queue
-    assert created.job_id not in redis.sets.get(INFLIGHT_KEY, set())
+    assert created.job_id not in redis.lists.get(PROCESSING_KEY, [])
 
 
 def test_retry_count_is_bounded_then_dead_letters():
@@ -269,6 +332,62 @@ def test_dead_lettered_job_is_never_requeued_again():
     store.mark_failed_or_retry(job, error_type="err")
 
     assert redis.lists.get(QUEUE_KEY, []) == []  # not requeued
+
+
+def test_retry_requeue_is_atomic_no_strand_between_processing_and_queue():
+    # The record write, processing-list removal, and re-enqueue must all land
+    # together (one MULTI/EXEC), so the job is never observably in neither the
+    # queue nor the processing list.
+    redis = _FakeRedis()
+    store = _store(redis, max_retries=3)
+    created = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
+    store.dequeue()
+
+    store.mark_failed_or_retry(store.get(created.job_id), error_type="err")
+
+    assert redis.lists[QUEUE_KEY] == [created.job_id]  # requeued
+    assert redis.lists.get(PROCESSING_KEY, []) == []  # and off processing
+    assert store.get(created.job_id).status == JobStatus.RETRYABLE
+
+
+def test_retry_requeue_crash_before_commit_leaves_job_running_and_recoverable():
+    # Finding 2: a crash/Redis error during the retry transition must not
+    # strand the job. Because the transition is a single MULTI/EXEC, a failure
+    # at EXEC applies NONE of it — the job is still a RUNNING record in the
+    # processing list (in neither-limbo is impossible), so reclaim re-drives it.
+    class _PipelineExecFailsRedis(_FakeRedis):
+        def pipeline(self, transaction=True):
+            pipe = _FakePipeline(self)
+
+            def _boom():
+                raise ConnectionError("redis down at EXEC")
+
+            pipe.execute = _boom
+            return pipe
+
+    redis = _PipelineExecFailsRedis()
+    store = _store(redis, max_retries=3)
+    created = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
+    running = store.dequeue()
+    assert running.status == JobStatus.RUNNING
+
+    with pytest.raises(Exception):
+        store.mark_failed_or_retry(running, error_type="err")
+
+    # Nothing applied: record still RUNNING, still only in processing.
+    assert store.get(created.job_id).status == JobStatus.RUNNING
+    assert redis.lists[PROCESSING_KEY] == [created.job_id]
+    assert redis.lists.get(QUEUE_KEY, []) == []
+
+    # A later worker (healthy Redis over the same data) reclaims it — not lost.
+    healthy = _FakeRedis()
+    healthy.strings, healthy.ttls, healthy.lists = redis.strings, redis.ttls, redis.lists
+    healthy_store = _store(healthy, max_retries=3, now=lambda: NOW + timedelta(seconds=60))
+    reclaimed = healthy_store.reclaim_expired()
+
+    assert [j.job_id for j in reclaimed] == [created.job_id]
+    assert healthy.lists[QUEUE_KEY] == [created.job_id]  # back on the queue
+    assert healthy.lists.get(PROCESSING_KEY, []) == []  # cleared from processing
 
 
 # --- controlled manual retry ---------------------------------------------------
@@ -385,6 +504,32 @@ def test_reclaim_eventually_dead_letters_a_job_that_keeps_expiring_its_lease():
 
     assert reclaimed[0].job_id == created.job_id
     assert reclaimed[0].status == JobStatus.DEAD_LETTER
+
+
+def test_reclaim_leaves_a_job_in_processing_when_its_record_read_transiently_fails():
+    # A transient read error for one job must NOT be misread as "record gone"
+    # and cause the job to be dropped from the processing list — it stays put
+    # for the next reclaim tick.
+    redis = _FakeRedis()
+    store = _store(redis)
+    created = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
+    store.dequeue()  # -> RUNNING, in processing
+
+    class _RecordReadFailsRedis(_FakeRedis):
+        def get(self, key):
+            if key.startswith(RECORD_PREFIX):
+                raise ConnectionError("redis blip on this read")
+            return super().get(key)
+
+    flaky = _RecordReadFailsRedis()
+    flaky.strings, flaky.ttls, flaky.lists = redis.strings, redis.ttls, redis.lists
+    flaky_store = _store(flaky, now=lambda: NOW + timedelta(seconds=60))
+
+    reclaimed = flaky_store.reclaim_expired()
+
+    assert reclaimed == []  # nothing re-driven this tick
+    assert redis.lists[PROCESSING_KEY] == [created.job_id]  # still recoverable
+    assert store.get(created.job_id).status == JobStatus.RUNNING  # record intact
 
 
 def test_reclaim_on_redis_outage_degrades_to_empty_not_an_exception():

@@ -19,18 +19,40 @@ worker_mod = load_module("services/eligibility-service/worker.py", "eligibility_
 RedisEligibilityJobStore = jobs_mod.RedisEligibilityJobStore
 JobStatus = jobs_mod.JobStatus
 QUEUE_KEY = jobs_mod.QUEUE_KEY
-INFLIGHT_KEY = jobs_mod.INFLIGHT_KEY
+PROCESSING_KEY = jobs_mod.PROCESSING_KEY
 process_one = worker_mod.process_one
 run_worker_loop = worker_mod.run_worker_loop
 
 NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
 
 
+class _FakePipeline:
+    def __init__(self, redis):
+        self._redis = redis
+        self._ops = []
+
+    def set(self, *args, **kwargs):
+        self._ops.append(("set", args, kwargs))
+        return self
+
+    def lrem(self, *args, **kwargs):
+        self._ops.append(("lrem", args, kwargs))
+        return self
+
+    def rpush(self, *args, **kwargs):
+        self._ops.append(("rpush", args, kwargs))
+        return self
+
+    def execute(self):
+        results = [getattr(self._redis, name)(*a, **k) for name, a, k in self._ops]
+        self._ops = []
+        return results
+
+
 class _FakeRedis:
     def __init__(self):
         self.strings = {}
         self.lists = {}
-        self.sets = {}
 
     def get(self, key):
         return self.strings.get(key)
@@ -41,18 +63,31 @@ class _FakeRedis:
     def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
 
-    def lpop(self, key):
+    def lmove(self, src, dst, src_pos="LEFT", dst_pos="RIGHT"):
+        lst = self.lists.get(src)
+        if not lst:
+            return None
+        value = lst.pop(0) if str(src_pos).upper() == "LEFT" else lst.pop()
+        dest = self.lists.setdefault(dst, [])
+        dest.append(value) if str(dst_pos).upper() == "RIGHT" else dest.insert(0, value)
+        return value
+
+    def lrange(self, key, start, end):
+        lst = self.lists.get(key, [])
+        stop = len(lst) if end == -1 else end + 1
+        return list(lst[start:stop])
+
+    def lrem(self, key, count, value):
         lst = self.lists.get(key)
-        return lst.pop(0) if lst else None
+        if not lst:
+            return 0
+        kept = [x for x in lst if x != value]
+        removed = len(lst) - len(kept)
+        self.lists[key] = kept
+        return removed
 
-    def sadd(self, key, value):
-        self.sets.setdefault(key, set()).add(value)
-
-    def srem(self, key, value):
-        self.sets.get(key, set()).discard(value)
-
-    def smembers(self, key):
-        return set(self.sets.get(key, set()))
+    def pipeline(self, transaction=True):
+        return _FakePipeline(self)
 
 
 class _FakeStatus:
@@ -140,6 +175,70 @@ def test_process_one_never_raises_even_if_check_fn_blows_up():
     assert stored.status == JobStatus.RETRYABLE
     assert stored.error_type == "RuntimeError"
     assert "unexpected bug" not in (stored.error_type or "")
+
+
+def test_process_one_never_raises_even_if_the_outcome_write_fails():
+    # Finding 2: a Redis error while recording the outcome must be contained,
+    # not propagated (which would kill the worker loop). The job is left in the
+    # processing list for reclaim rather than lost.
+    class _CommitFailsRedis(_FakeRedis):
+        def pipeline(self, transaction=True):
+            raise ConnectionError("redis down for the transition")
+
+    redis = _CommitFailsRedis()
+    store = _store(redis)
+    created = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
+
+    async def fake_check(insurance_id):
+        return _FakeResult("active", checked_at=NOW)
+
+    result = asyncio.run(process_one(store, check_fn=fake_check))  # must not raise
+
+    assert result is None
+    # Nothing committed, so the claim's RUNNING record is still in processing —
+    # recoverable, never dropped.
+    assert store.get(created.job_id).status == JobStatus.RUNNING
+    assert redis.lists[PROCESSING_KEY] == [created.job_id]
+
+
+def test_loop_survives_a_store_write_failure_and_keeps_processing():
+    # One job whose outcome-write fails must not stop the worker: a later job
+    # still gets processed on a subsequent iteration.
+    fail_ids = set()
+
+    class _SelectiveFailPipeline(_FakePipeline):
+        def execute(self):
+            # Model a MULTI/EXEC crash-before-commit for a targeted job: raise
+            # before applying ANY buffered op (atomic — nothing lands).
+            for _name, args, _kwargs in self._ops:
+                if any(fid in str(a) for a in args for fid in fail_ids):
+                    raise ConnectionError("redis down for this transition")
+            return super().execute()
+
+    class _SelectiveFailRedis(_FakeRedis):
+        def pipeline(self, transaction=True):
+            return _SelectiveFailPipeline(self)
+
+    redis = _SelectiveFailRedis()
+    store = _store(redis, max_retries=3)
+    first = store.create_or_reuse(insurance_id="MEM1", idempotency_key="k1")
+    fail_ids.add(first.job_id)
+    second = store.create_or_reuse(insurance_id="MEM2", idempotency_key="k2")
+
+    async def fake_check(insurance_id):
+        return _FakeResult("active", checked_at=NOW)
+
+    async def fake_sleep(seconds):
+        pass
+
+    # Iter 1: first job claimed, commit fails -> left RUNNING in processing,
+    # loop survives. Iter 2: second job claimed and succeeds.
+    asyncio.run(
+        run_worker_loop(store, check_fn=fake_check, sleep=fake_sleep, max_iterations=2)
+    )
+
+    assert store.get(first.job_id).status == JobStatus.RUNNING  # stuck for reclaim, not lost
+    assert store.get(second.job_id).status == JobStatus.SUCCEEDED  # loop kept going
 
 
 # --- run_worker_loop: restart safety ----------------------------------------------

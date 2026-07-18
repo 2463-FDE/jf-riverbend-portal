@@ -37,25 +37,38 @@ async def process_one(
     store: RedisEligibilityJobStore, *, check_fn: Callable = _default_check
 ) -> Optional[EligibilityJob]:
     """Claim and process exactly one job. Returns the completed job, or None
-    if the queue was empty. Never raises: an unexpected failure from
-    check_fn (which itself should not raise — Stage 1's check() always
-    degrades gracefully — but a worker must not trust that blindly) is
-    caught and routed through the same bounded retry-or-dead-letter path as
-    an ordinary `unknown` result."""
+    if the queue was empty. Never raises: two failure modes are contained
+    here so neither can escape and kill the worker loop —
+      * an unexpected failure from check_fn (which itself should not raise —
+        Stage 1's check() always degrades gracefully — but a worker must not
+        trust that blindly) is routed through the same bounded
+        retry-or-dead-letter path as an ordinary `unknown` result;
+      * a Redis/store failure while recording the outcome (mark_succeeded /
+        mark_failed_or_retry) is swallowed after logging the error TYPE. The
+        job is still in the processing list with a lease that will expire, so
+        reclaim_expired re-drives it — far better than propagating and
+        terminating the background task, which would stop ALL later jobs."""
     job = store.dequeue()
     if job is None:
         return None
 
     try:
-        result = await check_fn(job.insurance_id)
-    except Exception as exc:
-        log.warning("eligibility worker check_fn raised (error_type=%s)", type(exc).__name__)
-        return store.mark_failed_or_retry(job, error_type=type(exc).__name__)
+        try:
+            result = await check_fn(job.insurance_id)
+        except Exception as exc:
+            log.warning("eligibility worker check_fn raised (error_type=%s)", type(exc).__name__)
+            return store.mark_failed_or_retry(job, error_type=type(exc).__name__)
 
-    if result.status.value in _SUCCESS_STATUSES:
-        store.mark_succeeded(job, result_status=result.status.value, result_checked_at=result.checked_at)
-        return job
-    return store.mark_failed_or_retry(job, error_type=result.error_type)
+        if result.status.value in _SUCCESS_STATUSES:
+            store.mark_succeeded(job, result_status=result.status.value, result_checked_at=result.checked_at)
+            return job
+        return store.mark_failed_or_retry(job, error_type=result.error_type)
+    except Exception as exc:
+        log.warning(
+            "eligibility worker could not persist job outcome, leaving for reclaim (error_type=%s)",
+            type(exc).__name__,
+        )
+        return None
 
 
 async def run_worker_loop(
@@ -75,7 +88,7 @@ async def run_worker_loop(
     external stop signal. Recovery (reclaim_expired) runs once immediately,
     then again every `reclaim_interval_seconds` of loop time.
     """
-    store.reclaim_expired()
+    _safe_reclaim(store)
     elapsed_since_reclaim = 0.0
     iterations = 0
 
@@ -84,11 +97,27 @@ async def run_worker_loop(
             return
         iterations += 1
 
-        job = await process_one(store, check_fn=check_fn)
+        # process_one already contains its own failures, but wrap the call as
+        # a defence-in-depth backstop so nothing unforeseen can terminate the
+        # loop and stop all future eligibility jobs.
+        try:
+            job = await process_one(store, check_fn=check_fn)
+        except Exception as exc:
+            log.warning("eligibility worker iteration failed (error_type=%s)", type(exc).__name__)
+            job = None
         if job is None:
             await sleep(poll_interval_seconds)
             elapsed_since_reclaim += poll_interval_seconds
 
         if elapsed_since_reclaim >= reclaim_interval_seconds:
-            store.reclaim_expired()
+            _safe_reclaim(store)
             elapsed_since_reclaim = 0.0
+
+
+def _safe_reclaim(store: RedisEligibilityJobStore) -> None:
+    """reclaim_expired is already documented as never-raising, but call it
+    through this backstop so a bug there can never bring down the loop."""
+    try:
+        store.reclaim_expired()
+    except Exception as exc:
+        log.warning("eligibility job reclaim failed (error_type=%s)", type(exc).__name__)

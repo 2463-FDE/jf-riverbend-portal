@@ -14,13 +14,18 @@ last-known-good cache: "elig:lkg:{insurance_id}"; Stage 2's visit memory:
     so a job's state is available for polling but does not accumulate
     forever.
   * `elig:job:queue`            — a Redis LIST of job_ids waiting to be
-    (re)claimed by a worker. FIFO via RPUSH/LPOP.
+    (re)claimed by a worker. FIFO: RPUSH to enqueue, and a worker claims the
+    head atomically with LMOVE (see dequeue below).
   * `elig:job:idem:{key}`       — idempotency_key -> job_id, same TTL as a
     job record, so a repeated create request within that window returns the
     SAME job (and never triggers a second live payer call) instead of
     silently creating a duplicate.
-  * `elig:job:inflight`         — a Redis SET of job_ids currently RUNNING,
-    used only for worker-restart recovery (see reclaim_expired below).
+  * `elig:job:processing`       — a Redis LIST of job_ids a worker has
+    claimed but not yet finished (SUCCEEDED / DEAD_LETTER / re-queued). A job
+    is moved here from the queue by the SAME atomic LMOVE that claims it, so
+    it is never in neither structure, and it stays here until a terminal or
+    re-queue transition removes it in one atomic step. This is the ONLY
+    structure worker-restart recovery scans (see reclaim_expired below).
 
 Job IDs are `uuid.uuid4().hex` — safe, opaque, non-guessable, and never
 derived from a patient/member identifier (mirrors gateway session tokens in
@@ -40,12 +45,25 @@ result SUMMARY (status + checked_at + error TYPE). It never carries a
 patient name/dob/ssn/notes, a raw payer response body, or any other PHI.
 
 Worker-restart safety: because the queue, every job record, and the
-in-flight set all live in Redis (not in the worker process's memory), a
-container restart never silently loses a job. reclaim_expired() is the
-recovery step a freshly-started worker runs before entering its normal loop
-(and periodically thereafter): any RUNNING job whose lease has expired (the
-previous worker died mid-processing without completing it) is requeued or
-dead-lettered through the exact same bounded-retry path a live failure uses.
+processing list all live in Redis (not in the worker process's memory), a
+container restart never silently loses a job. Two properties make this
+crash-safe rather than best-effort:
+  * The claim is atomic — a single LMOVE moves a job_id from the queue to
+    the processing list, so no crash window can leave it in neither.
+  * Every lifecycle transition (succeed / retry / dead-letter) writes the
+    record, removes the job from the processing list, and (on retry)
+    re-enqueues it as ONE Redis MULTI/EXEC transaction, so a crash can never
+    strand a job between structures: either the whole transition happened or
+    none of it did (the job is still a RUNNING record in the processing
+    list, which recovery re-drives).
+reclaim_expired() is the recovery step a freshly-started worker runs before
+entering its normal loop (and periodically thereafter): it scans the
+processing list and re-drives every entry a live worker does not currently
+own (no RUNNING record with an unexpired lease) through the exact same
+bounded-retry path a live failure uses. Under this stack's documented one-
+instance-per-region model (ARCHITECTURE.md; breaker.py makes the same call),
+claim and recovery never run concurrently, so an orphan in the processing
+list is always a dead predecessor's, never a live peer's.
 
 Best-effort reads mirror the Stage 1 Hardening Fix already applied to
 cache.py/memory.py: a status *read* degrades to None on a Redis outage
@@ -68,7 +86,7 @@ log = logging.getLogger(__name__)
 RECORD_PREFIX = "elig:job:record:"
 QUEUE_KEY = "elig:job:queue"
 IDEMPOTENCY_PREFIX = "elig:job:idem:"
-INFLIGHT_KEY = "elig:job:inflight"
+PROCESSING_KEY = "elig:job:processing"
 
 
 class JobStatus(str, Enum):
@@ -172,46 +190,40 @@ class RedisEligibilityJobStore:
     # ---- worker-side lifecycle --------------------------------------------------
 
     def dequeue(self) -> Optional[EligibilityJob]:
-        """Pop the next job_id and claim it (-> RUNNING, lease set). Returns
+        """Atomically claim the next job (-> RUNNING, lease set). Returns
         None on an empty queue, a vanished record, or a Redis failure —
-        never raises, so the worker loop can just try again next tick."""
+        never raises, so the worker loop can just try again next tick.
+
+        The claim is a single LMOVE from the queue to the processing list, so
+        there is no window in which the job is in neither structure: the
+        instant it leaves the queue it is recoverable from the processing
+        list. Writing the RUNNING status + lease is a separate step; if it
+        fails, the job simply sits in the processing list with its prior
+        (QUEUED) record and no live lease, which reclaim_expired re-drives —
+        it is never lost."""
         try:
-            job_id = self._redis.lpop(QUEUE_KEY)
+            job_id = self._redis.lmove(QUEUE_KEY, PROCESSING_KEY, "LEFT", "RIGHT")
             if not job_id:
                 return None
             job = self._get_record(job_id)
             if job is None:
+                # Record expired out from under us (status TTL). Nothing to
+                # run — drop the dangling processing-list entry.
+                self._safe_lrem(job_id)
                 return None
             return self._mark_running(job)
         except Exception as exc:
             log.warning("eligibility job dequeue failed (error_type=%s)", type(exc).__name__)
             return None
 
-    def _mark_running(self, job: EligibilityJob) -> Optional[EligibilityJob]:
-        # Order matters: record this job as in-flight BEFORE writing the
-        # RUNNING status. If the inflight-set write fails, the job's record
-        # is untouched (still whatever it was — QUEUED/RETRYABLE) and it's
-        # simply requeued; if we wrote RUNNING first and only then failed to
-        # track it as in-flight, reclaim_expired's startup/periodic scan
-        # (which only looks at the inflight set, not every record) could
-        # never find it again — an untracked, permanently "running" job.
-        # This does not close every conceivable interleaving (the inflight
-        # add succeeding immediately followed by the status write itself
-        # failing is still possible, and Redis single-node write ordering
-        # makes the residual window small — the same best-effort, single-
-        # instance posture breaker.py already takes for circuit-breaker
-        # state), but it removes the far more likely failure mode of a
-        # completely untracked, un-reclaimable job.
-        try:
-            self._redis.sadd(INFLIGHT_KEY, job.job_id)
-        except Exception as exc:
-            log.warning(
-                "eligibility job inflight-set add failed, leaving job queued (error_type=%s)",
-                type(exc).__name__,
-            )
-            self._redis.rpush(QUEUE_KEY, job.job_id)
-            return None
-
+    def _mark_running(self, job: EligibilityJob) -> EligibilityJob:
+        # The atomic LMOVE in dequeue already moved this job into the
+        # processing list, so there is no separate in-flight tracking to keep
+        # in sync here — just stamp the RUNNING status and lease. If this
+        # write fails the exception propagates to dequeue's handler; the job
+        # stays in the processing list with its prior QUEUED record (lease
+        # None), and reclaim_expired treats a no-live-lease processing entry
+        # as an orphan to re-drive. Nothing is lost either way.
         now = self._now()
         job = job.model_copy(
             update={
@@ -236,15 +248,17 @@ class RedisEligibilityJobStore:
                 "updated_at": self._now(),
             }
         )
-        self._put_record(job)
-        self._safe_srem(job.job_id)
+        self._commit_transition(job, requeue=False)
 
     def mark_failed_or_retry(self, job: EligibilityJob, *, error_type: Optional[str] = None) -> EligibilityJob:
         """A single attempt produced no usable result (check() degraded to
         `unknown`, or the worker hit an unexpected exception). Bumps
         retry_count; requeues (RETRYABLE) while under max_retries, else
         dead-letters. Either way the job record survives — nothing is
-        dropped."""
+        dropped. The record write, processing-list removal, and (on retry)
+        re-enqueue happen as one atomic MULTI/EXEC (see _commit_transition),
+        so a crash can never leave the job in neither the queue nor the
+        processing list."""
         retry_count = job.retry_count + 1
         terminal = retry_count > job.max_retries
         job = job.model_copy(
@@ -256,10 +270,7 @@ class RedisEligibilityJobStore:
                 "updated_at": self._now(),
             }
         )
-        self._put_record(job)
-        self._safe_srem(job.job_id)
-        if not terminal:
-            self._redis.rpush(QUEUE_KEY, job.job_id)
+        self._commit_transition(job, requeue=not terminal)
         return job
 
     def retry_manually(self, job_id: str) -> Optional[EligibilityJob]:
@@ -283,35 +294,71 @@ class RedisEligibilityJobStore:
                 "updated_at": self._now(),
             }
         )
-        self._put_record(job)
-        self._redis.rpush(QUEUE_KEY, job.job_id)
+        # The job is DEAD_LETTER here (already off the processing list), so the
+        # LREM inside _commit_transition is a harmless no-op; the record write
+        # and re-enqueue still land atomically together.
+        self._commit_transition(job, requeue=True)
         return job
 
     # ---- worker-restart recovery -------------------------------------------------
 
     def reclaim_expired(self) -> List[EligibilityJob]:
-        """Find RUNNING jobs whose lease has expired — the worker that
-        claimed them died mid-processing (crash, container restart) — and
-        push them through the same bounded mark_failed_or_retry path a live
-        failure uses. Call once on worker startup and periodically
-        thereafter. Never raises: a Redis failure here just means recovery
-        waits for the next tick."""
+        """Scan the processing list and re-drive every entry a live worker
+        does not currently own. Call once on worker startup and periodically
+        thereafter. Never raises: any failure here just means recovery waits
+        for the next tick.
+
+        An entry is "owned" only if its record is RUNNING with an unexpired
+        lease. Everything else is an orphan left by a crashed predecessor:
+          * missing record (status TTL expired) or already-terminal
+            (SUCCEEDED/DEAD_LETTER) -> just drop the dangling entry;
+          * RUNNING with an expired lease (died mid-check), or a QUEUED entry
+            with no lease (died between the claiming LMOVE and the RUNNING
+            write) -> push through the same bounded mark_failed_or_retry path
+            a live failure uses, which also removes it from the processing
+            list and re-enqueues it atomically.
+        Under this stack's one-instance-per-region model an orphan is always
+        a dead worker's, never a live peer's, so re-driving it is safe."""
         reclaimed: List[EligibilityJob] = []
         try:
-            job_ids = list(self._redis.smembers(INFLIGHT_KEY) or [])
+            job_ids = self._redis.lrange(PROCESSING_KEY, 0, -1) or []
         except Exception as exc:
             log.warning("eligibility job reclaim scan failed (error_type=%s)", type(exc).__name__)
             return reclaimed
 
         now = self._now()
+        seen: set = set()
         for job_id in job_ids:
-            job = self.get(job_id)
-            if job is None or job.status != JobStatus.RUNNING:
-                self._safe_srem(job_id)
+            if job_id in seen:
+                # A crash between the claiming LMOVE and the following LREM in
+                # a later transition can leave a duplicate entry; process each
+                # job_id once.
                 continue
-            if job.lease_expires_at is not None and job.lease_expires_at > now:
-                continue  # still within its lease — a live worker owns it
-            reclaimed.append(self.mark_failed_or_retry(job, error_type="WorkerLeaseExpired"))
+            seen.add(job_id)
+            try:
+                # Use _get_record (which RAISES on a Redis read error) rather
+                # than get (which swallows it and returns None): a transient
+                # read failure must NOT be misread as "record absent" and
+                # cause us to LREM a still-existing job out of the processing
+                # list — that would lose it. A raise here falls to the except
+                # below and leaves the entry for the next reclaim tick; only a
+                # genuinely-absent record (None) is dropped.
+                job = self._get_record(job_id)
+                if job is None or job.status in (JobStatus.SUCCEEDED, JobStatus.DEAD_LETTER):
+                    self._safe_lrem(job_id)
+                    continue
+                if (
+                    job.status == JobStatus.RUNNING
+                    and job.lease_expires_at is not None
+                    and job.lease_expires_at > now
+                ):
+                    continue  # still within its lease — a live worker owns it
+                reclaimed.append(self.mark_failed_or_retry(job, error_type="WorkerLeaseExpired"))
+            except Exception as exc:
+                # One job's transition failing (e.g. a Redis blip) must not
+                # abort recovery of the rest — it stays in the processing list
+                # and is retried on the next reclaim tick.
+                log.warning("eligibility job reclaim step failed (error_type=%s)", type(exc).__name__)
         return reclaimed
 
     # ---- internals ---------------------------------------------------------------
@@ -325,11 +372,30 @@ class RedisEligibilityJobStore:
     def _put_record(self, job: EligibilityJob) -> None:
         self._redis.set(self._record_key(job.job_id), job.model_dump_json(), ex=self._status_ttl_seconds)
 
-    def _safe_srem(self, job_id: str) -> None:
+    def _commit_transition(self, job: EligibilityJob, *, requeue: bool) -> None:
+        """Persist a job's new state, remove it from the processing list, and
+        (if requeue) re-enqueue it — as ONE Redis MULTI/EXEC transaction.
+
+        Atomicity is what makes retries crash-safe: the three writes either
+        all land or none do. There is no observable "record updated + removed
+        from processing but not yet re-queued" state for a crash to strand, so
+        a job can never end up in neither the queue nor the processing list.
+        A client crash before EXEC leaves the job as a RUNNING record still in
+        the processing list, which reclaim_expired re-drives. The only residual
+        effect is at-least-once delivery (a job may be re-driven after a crash
+        window), which is safe here — the payer check() is a read."""
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.set(self._record_key(job.job_id), job.model_dump_json(), ex=self._status_ttl_seconds)
+        pipe.lrem(PROCESSING_KEY, 0, job.job_id)
+        if requeue:
+            pipe.rpush(QUEUE_KEY, job.job_id)
+        pipe.execute()
+
+    def _safe_lrem(self, job_id: str) -> None:
         try:
-            self._redis.srem(INFLIGHT_KEY, job_id)
+            self._redis.lrem(PROCESSING_KEY, 0, job_id)
         except Exception as exc:
-            log.warning("eligibility job inflight-set remove failed (error_type=%s)", type(exc).__name__)
+            log.warning("eligibility job processing-list remove failed (error_type=%s)", type(exc).__name__)
 
     @staticmethod
     def _record_key(job_id: str) -> str:
