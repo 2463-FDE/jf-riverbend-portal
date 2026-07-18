@@ -40,6 +40,17 @@ jobs:
         run: pip install -r services/${{ matrix.service }}/requirements.txt
       - name: Import smoke test
         working-directory: services/${{ matrix.service }}
+        # Some services (intake-service, eligibility-service) import the shared
+        # libs/ package that lives at the repo root, outside the service dir.
+        # It's on the path in Docker (copied into /app, see each Dockerfile) and
+        # in pytest (conftest.py adds the repo root), but `python -c` from the
+        # service dir only puts the cwd on sys.path — so libs.* won't resolve
+        # without the repo root here too. Sibling imports (config, check, ...)
+        # still resolve via the cwd. No top-level module at the repo root
+        # collides with a service's same-named sibling, so this is safe for the
+        # services that don't use libs/ as well.
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: python -c "import app; print('${{ matrix.service }} ok')"
 
   tests:
