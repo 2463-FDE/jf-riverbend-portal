@@ -1,0 +1,8 @@
+# Real OpenTelemetry SDK — only needed by a service that actually wires up
+# tracing (Stage 3: intake-service, eligibility-service). Deliberately NOT
+# referenced by the root requirements-dev.txt, so CI's unit-test job (which
+# only exercises the no-op fallback path in libs/tracing/spans.py) never
+# installs or requires it. Mirrors libs/llm_client/requirements.txt and
+# libs/eligibility_agent/requirements.txt.
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0

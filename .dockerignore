@@ -1,0 +1,33 @@
+# Root-level .dockerignore — applies only to services whose docker-compose
+# build context is the repo root (Stage 3: intake-service and eligibility-
+# service, the only two services that import libs/ — see
+# adr/0005-eligibility-agent-runtime-and-resilience.md). Every other service
+# still builds from its own directory with its own local .dockerignore,
+# untouched.
+.git/
+.github/
+frontend/
+node_modules/
+docs/
+adr/
+tests/
+.claude/
+.codex_tmp/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# Sibling services not needed in intake-service's/eligibility-service's own
+# build context (each still builds independently from its own directory).
+services/gateway/
+services/records-service/
+services/scheduling-service/
+services/interop-service/
+services/roi-service/
+
+# db/ is mounted into the Postgres container at runtime (docker-compose.yml);
+# it is not part of any Python service's build.
+db/

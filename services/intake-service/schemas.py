@@ -39,4 +39,10 @@ class IntakeRequest(BaseModel):
 class IntakeResponse(BaseModel):
     patient_id: int
     elapsed_seconds: float
+    # Kept for backward compatibility with any existing caller that reads
+    # this dict directly. Stage 3: when insurance is present it now describes
+    # the async job's pending/degraded state rather than a completed check —
+    # see eligibility_status/eligibility_job_id for the async-aware shape.
     eligibility: Optional[dict[str, Any]] = None
+    eligibility_status: Optional[str] = None
+    eligibility_job_id: Optional[str] = None

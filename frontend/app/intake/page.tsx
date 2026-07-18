@@ -3,7 +3,9 @@
 import { useState } from "react";
 import Link from "next/link";
 import Card from "../components/Card";
+import EligibilityStatus from "../components/EligibilityStatus";
 import { apiFetch } from "../lib/session";
+import type { IntakeResponse } from "../lib/types";
 
 interface Demographics {
   first_name: string;
@@ -59,6 +61,7 @@ export default function IntakePage() {
 
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [eligibilityJobId, setEligibilityJobId] = useState<string | null>(null);
 
   const consentsOk = consents.treatment && consents.privacy;
   const demoOk = demo.first_name && demo.last_name && demo.dob;
@@ -80,17 +83,16 @@ export default function IntakePage() {
       consents,
     };
     try {
-      // NOTE: /api/intake is intentionally slow (~4-5s, RIV-088) — it "spins"
-      // before confirming. See app/api/intake/route.ts.
       const res = await apiFetch("/api/intake", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const data: IntakeResponse & { error?: string } = await res.json();
       if (!res.ok || data?.error) {
         setResult({ ok: false, text: data?.error || "Submission failed." });
       } else {
+        setEligibilityJobId(data.eligibility_job_id ?? null);
         setResult({
           ok: true,
           text: data.patient_id
@@ -115,6 +117,7 @@ export default function IntakePage() {
           <div className="rb-alert rb-alert--ok" role="status" style={{ marginBottom: 16 }}>
             {result.text}
           </div>
+          {eligibilityJobId && <EligibilityStatus jobId={eligibilityJobId} />}
           <p className="rb-muted">
             Thank you. Riverbend front-desk staff will review your intake before your first visit.
           </p>
