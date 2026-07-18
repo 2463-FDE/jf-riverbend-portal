@@ -189,6 +189,88 @@ then immediately re-touching the tool's error-handling assumptions.
 - OTel deps go in the consuming service's requirements only.
 - Suggested commit: `feat(intake): decouple eligibility with graceful degradation and document runtime choice`
 
+### Stage 3 Hardening Fix — make the Redis job queue crash-safe (REQUIRED)
+
+**Why this is a hardening fix, not scope creep.** Same rationale as the Stage 1
+Hardening Fix: this is a correction to a defect in code Stage 3 already shipped,
+surfaced by adversarial review (Codex) after the commit — not new feature
+scope. Stage 3's own headline promise (ADR 0005 §3: "a container restart never
+silently loses a job") is contradicted by the shipped implementation, so this
+restores an invariant the stage already claims rather than adding a new one.
+Folding it into unrelated work would mix a resilience bugfix with a feature in
+one commit, breaking the plan's per-commit-reviewable discipline. The repo's
+own `feat(...)` → `fix(...)` history (e.g. `a4bafe6`/`e4ef08a`) is the
+precedent.
+
+Two HIGH-severity findings, both a genuine "accepted registration silently
+loses its payer check" path (the exact RIV-088/RIV-141 failure the async queue
+exists to prevent):
+
+- Finding 1 — claim is not crash-safe (`services/eligibility-service/jobs.py`,
+  `dequeue`/`_mark_running`). The old claim did `LPOP` from the queue, then a
+  *separate* `SADD` into an `inflight` SET, then wrote `RUNNING`. A crash in the
+  window after the pop but before the job is durably tracked leaves the job in
+  **neither** the queue nor `inflight`, with its record still `QUEUED` —
+  invisible to `reclaim_expired()`, which only scans `inflight` for
+  lease-expired `RUNNING` jobs. Permanently dropped.
+- Finding 2 — retry transition strands jobs and can kill the worker
+  (`jobs.py::mark_failed_or_retry`; `worker.py::process_one`/`run_worker_loop`).
+  The old transition wrote `RETRYABLE`, then `SREM`'d `inflight`, then `RPUSH`'d
+  the queue as three separate ops: a crash between the last two strands the job
+  in neither structure. The `RPUSH` was also uncaught by `process_one`/
+  `run_worker_loop`, so one Redis blip during a retry terminates the background
+  worker and stops ALL future eligibility jobs — violating both methods'
+  "never raises" docstrings.
+
+**Required design (atomic claim + atomic transitions + worker resilience):**
+
+- Replace the `inflight` SET (`elig:job:inflight`) with a **processing LIST**
+  (`elig:job:processing`) — a *recoverable* structure the reclaim path scans.
+- Claim atomically: `dequeue` uses a single `LMOVE elig:job:queue
+  elig:job:processing LEFT RIGHT` (redis-py 5.x `lmove`; FIFO preserved) so the
+  job is never in limbo — the instant it leaves the queue it is in
+  `processing`. Then set `RUNNING` + lease on the record. A crash before the
+  `RUNNING`/lease write leaves a `QUEUED`-record entry sitting in `processing`,
+  which reclaim treats as an orphan (no live lease) and re-drives.
+- Make every lifecycle transition atomic with a Redis transaction pipeline
+  (`redis.pipeline(transaction=True)` → MULTI/EXEC): `mark_succeeded` =
+  set(record) + `LREM` processing; `mark_failed_or_retry` (retryable) =
+  set(record) + `LREM` processing + `RPUSH` queue; (dead-letter) = set(record) +
+  `LREM` processing; `retry_manually` = set(record) + `RPUSH` queue. MULTI/EXEC
+  removes the observable "committed one op, crashed before the next" state: the
+  transition either fully happened or did not happen at all (record still
+  `RUNNING` in `processing` → reclaimed). This may double-deliver in a
+  narrow window (at-least-once, standard for a reliable Redis queue) but never
+  loses a job; the payer `check()` is a read and safe to repeat.
+- `reclaim_expired()` scans the `processing` LIST (`LRANGE 0 -1`): an entry is
+  "owned by a live worker" ONLY if its record is `RUNNING` with a lease in the
+  future — everything else (missing record, `QUEUED`/no-lease orphan,
+  lease-expired `RUNNING`) is re-driven through the same bounded
+  `mark_failed_or_retry` path or `LREM`'d if terminal. This is sound under the
+  single-instance-per-region assumption already documented (ARCHITECTURE.md;
+  breaker.py) — reclaim and claim never run concurrently.
+- Worker resilience: wrap the post-dequeue store transitions in `process_one`
+  (and defensively the `process_one`/`reclaim_expired` calls in
+  `run_worker_loop`) so a Redis write failure logs the error TYPE only and
+  returns — the job stays in `processing`, its lease expires, and reclaim
+  re-drives it — instead of propagating and terminating the loop.
+- Tests: inject a failure between EACH step (after `LMOVE` before `RUNNING`;
+  after `RUNNING` before terminal write; after record write before `LREM`;
+  during the retry `RPUSH`) and assert the job is still recoverable (reclaim
+  requeues or dead-letters it, never drops it). Assert the worker loop survives
+  a store-write exception and keeps processing later jobs. Extend the in-memory
+  Redis test double to cover `lmove`/`lrange`/`lrem`/`pipeline` (transaction),
+  mirroring the existing `_FakeRedis` in `tests/test_eligibility_jobs.py`.
+- Definition of Done: `pytest -m "not integration" -q` passes including the new
+  crash-injection cases; no reachable interleaving of a crash/Redis error can
+  leave an accepted registration's job unrecoverable; a store-write error can no
+  longer terminate the worker loop. Update ADR 0005 §3 to describe the
+  `processing`-list + atomic-transition mechanism (it currently describes the
+  `inflight` set).
+- Suggested commit: `fix(eligibility): make async job queue crash-safe with atomic claim and transitions`
+- Follows the same per-run workflow as any stage (re-inspect, implement, test,
+  self-review, completion report, STOP for manual commit).
+
 ## Hard Rules
 
 - Implement ONLY the current stage. No unrelated refactoring. No scope
@@ -227,9 +309,9 @@ exact commands they can run manually; the user runs them.
 ## Per-Run Workflow (one stage)
 
 1. Run the Re-Inspection Gate above.
-2. Confirm which unit is next. Stage 1 is committed; the Stage 1 Hardening Fix
-   is next and MUST land before Stage 2, unless the user explicitly says
-   otherwise.
+2. Confirm which unit is next. Stages 1–3 and the Stage 1 Hardening Fix are all
+   committed; the **Stage 3 Hardening Fix** (crash-safe job queue) is the
+   current unit, unless the user explicitly says otherwise.
 3. Implement only that unit per the approved plan.
 4. Add or update tests (success + failure paths; fakes only).
 5. Run `pytest -m "not integration" -q` (and, for Stage 3, the integration

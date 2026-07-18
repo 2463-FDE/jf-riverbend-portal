@@ -3,3 +3,15 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 httpx==0.28.1
 redis==5.2.1
+# Stage 3: metadata-only tracing (libs/tracing) — real OTel SDK, only needed
+# because this service now imports libs.tracing. See libs/tracing/requirements.txt.
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0
+# Stage 2/3: this service now imports libs.eligibility_agent (visit-chat
+# endpoint). boto3 is intentionally NOT pinned here — the default raw_bedrock
+# runtime only imports it lazily inside a real Converse call, and this repo's
+# own config has no live Bedrock credential (BEDROCK_MODEL_ID=changeme). A
+# deployment that actually enables real Bedrock calls must add
+# libs/eligibility_agent/requirements.txt's boto3 pin here — see
+# adr/0005-eligibility-agent-runtime-and-resilience.md's "unresolved
+# production deployment" section.

@@ -59,7 +59,13 @@ services:
       retries: 5
 
   intake-service:
-    build: ./services/intake-service
+    # Stage 3: build context is the repo root (not ./services/intake-service)
+    # so the Dockerfile can COPY libs/ (libs.tracing) in alongside this
+    # service's own files — see services/intake-service/Dockerfile and
+    # adr/0005-eligibility-agent-runtime-and-resilience.md.
+    build:
+      context: .
+      dockerfile: services/intake-service/Dockerfile
     env_file: .env
     environment:
       ELIGIBILITY_URL: http://eligibility-service:8072
@@ -75,7 +81,14 @@ services:
       retries: 5
 
   eligibility-service:
-    build: ./services/eligibility-service
+    # Stage 3: build context is the repo root (not ./services/eligibility-service)
+    # so the Dockerfile can COPY libs/ (libs.tracing, libs.eligibility_agent,
+    # libs.safe_logging, libs.llm_client) in alongside this service's own
+    # files — see services/eligibility-service/Dockerfile and
+    # adr/0005-eligibility-agent-runtime-and-resilience.md.
+    build:
+      context: .
+      dockerfile: services/eligibility-service/Dockerfile
     env_file: .env
     ports:
       - "8072:8072"

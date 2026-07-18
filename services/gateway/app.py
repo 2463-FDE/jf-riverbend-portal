@@ -10,10 +10,12 @@ Inherited shortcomings (left as-is from the handoff):
   * Sessions never expire (see security.create_session / auth.yaml).
   * One role for everyone; no per-action authorization beyond "is logged in".
 """
+import uuid
 from typing import Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -116,6 +118,44 @@ def proxy_eligibility(insurance_id: str, session: dict = Depends(require_session
 
 
 # --------------------------------------------------------------------------- #
+# Stage 3: async eligibility job status/retry + visit-scoped assistant turns
+#
+# Same auth posture as every other route here: Depends(require_session) only
+# — no new unauthenticated internal-service exposure is introduced. These
+# routes carry the SAME limitation as the rest of the gateway: a valid
+# session is required, but it is never checked against the specific
+# job_id/visit_id being requested (see the IDOR note on proxy_records above)
+# because every account maps to the single flat "staff" role
+# (config/roles.yaml) — there is no per-action authorization to scope this
+# to. That is documented, existing debt (RIV-201), not something Stage 3
+# widens or attempts to fix.
+# --------------------------------------------------------------------------- #
+@app.get("/eligibility/jobs/{job_id}")
+def proxy_eligibility_job_status(job_id: str, session: dict = Depends(require_session)):
+    return _get(
+        "eligibility", f"/eligibility/jobs/{job_id}", headers=_correlation_headers(), forward_status=True
+    )
+
+
+@app.post("/eligibility/jobs/{job_id}/retry")
+def proxy_eligibility_job_retry(job_id: str, session: dict = Depends(require_session)):
+    return _post(
+        "eligibility", f"/eligibility/jobs/{job_id}/retry", {}, headers=_correlation_headers(), forward_status=True
+    )
+
+
+@app.post("/visits/{visit_id}/messages")
+def proxy_visit_message(visit_id: str, payload: dict, session: dict = Depends(require_session)):
+    return _post(
+        "eligibility",
+        f"/visits/{visit_id}/messages",
+        payload,
+        headers=_correlation_headers(),
+        forward_status=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # patients / records
 # --------------------------------------------------------------------------- #
 @app.get("/patients")
@@ -205,19 +245,51 @@ def _clean(params: Optional[dict]) -> dict:
     return {k: v for k, v in (params or {}).items() if v is not None}
 
 
-def _post(service: str, path: str, payload: dict):
+def _correlation_headers() -> dict:
+    # A safe, opaque correlation id (mirrors session tokens in security.py's
+    # own uuid4().hex) — never derived from the session, a patient id, or any
+    # other identifier — forwarded so intake-service/eligibility-service can
+    # tie their own spans/logs for this request together.
+    return {"X-Request-Id": uuid.uuid4().hex}
+
+
+def _post(service: str, path: str, payload: dict, *, headers: Optional[dict] = None, forward_status: bool = False):
     try:
-        r = httpx.post(f"{SERVICES[service]}{path}", json=payload, timeout=30)
-        return r.json()
+        r = httpx.post(f"{SERVICES[service]}{path}", json=payload, headers=headers, timeout=30)
+        data = _safe_json(r)
+        if forward_status:
+            return JSONResponse(status_code=r.status_code, content=data)
+        return data
     except Exception as e:
         log.error("proxy POST %s%s failed: %s", service, path, e)
+        if forward_status:
+            return JSONResponse(status_code=502, content={"error": str(e)})
         return {"error": str(e)}
 
 
-def _get(service: str, path: str, params: Optional[dict] = None):
+def _get(
+    service: str,
+    path: str,
+    params: Optional[dict] = None,
+    *,
+    headers: Optional[dict] = None,
+    forward_status: bool = False,
+):
     try:
-        r = httpx.get(f"{SERVICES[service]}{path}", params=_clean(params), timeout=30)
-        return r.json()
+        r = httpx.get(f"{SERVICES[service]}{path}", params=_clean(params), headers=headers, timeout=30)
+        data = _safe_json(r)
+        if forward_status:
+            return JSONResponse(status_code=r.status_code, content=data)
+        return data
     except Exception as e:
         log.error("proxy GET %s%s failed: %s", service, path, e)
+        if forward_status:
+            return JSONResponse(status_code=502, content={"error": str(e)})
         return {"error": str(e)}
+
+
+def _safe_json(response: httpx.Response):
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw": response.text}

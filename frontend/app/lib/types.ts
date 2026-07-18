@@ -79,6 +79,37 @@ export interface Appointment {
   status: string;
 }
 
+// Stage 3: async eligibility job lifecycle (services/eligibility-service/jobs.py).
+export type EligibilityJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "retryable"
+  | "dead_letter";
+
+export interface EligibilityJobResponse {
+  job_id: string;
+  status: EligibilityJobStatus;
+  retry_count: number;
+  max_retries: number;
+  manual_retry_count: number;
+  max_manual_retries: number;
+  result_status?: "active" | "inactive" | "unknown" | "pending" | "stale";
+  result_checked_at?: string;
+  error?: string; // exception TYPE name only, never a raw message
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntakeResponse {
+  patient_id: number;
+  elapsed_seconds: number;
+  eligibility?: Record<string, unknown> | null;
+  eligibility_status?: string | null;
+  eligibility_job_id?: string | null;
+}
+
 export interface RoiRequest {
   id: number;
   patient_id: number;

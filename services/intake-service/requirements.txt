@@ -4,3 +4,7 @@ SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 pydantic==2.10.4
 httpx==0.28.1
+# Stage 3: metadata-only tracing (libs/tracing) — real OTel SDK, only needed
+# because this service now imports libs.tracing. See libs/tracing/requirements.txt.
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0

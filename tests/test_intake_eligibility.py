@@ -1,9 +1,11 @@
-"""Unit tests for intake-service's eligibility fallback (app.py::_verify_eligibility).
+"""Unit tests for intake-service's Stage 3 async eligibility enqueue
+(app.py::_start_eligibility_check).
 
-Stage 1 bug fix: a failure to REACH eligibility-service (a transport failure)
-must map to status "unknown", never to "active": False on its own, and must
-never leak a raw exception message (which can echo the request URL,
-including the member_id) into a log line or the returned dict.
+Stage 3 replaces the old inline, unbounded payer call (RIV-088/RIV-141) with
+one bounded HTTP call that only asks eligibility-service to enqueue a job —
+never the payer round-trip itself. A failure to even enqueue must still map
+to "unknown", never "inactive", and must never leak a raw exception message
+(which can echo the request URL, including the member_id).
 """
 import httpx
 import pytest
@@ -13,61 +15,119 @@ from conftest import load_module
 app_mod = load_module("services/intake-service/app.py", "intake_app")
 
 Insurance = app_mod.Insurance
-_verify_eligibility = app_mod._verify_eligibility
+_start_eligibility_check = app_mod._start_eligibility_check
 
 
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
-    # The 4.2s artificial delay (RIV-088) is out of Stage 1's scope to remove,
-    # but tests shouldn't have to wait for it.
-    monkeypatch.setattr(app_mod.time, "sleep", lambda seconds: None)
+def test_no_insurance_returns_all_none():
+    eligibility, status, job_id = _start_eligibility_check(None, patient_id=1, coverage_id=None, correlation_id="c1")
+
+    assert eligibility is None
+    assert status is None
+    assert job_id is None
 
 
-def test_no_insurance_returns_none():
-    assert _verify_eligibility(None) is None
+def test_no_member_id_returns_all_none():
+    ins = Insurance(payer_name="Aetna")
+
+    eligibility, status, job_id = _start_eligibility_check(ins, patient_id=1, coverage_id=None, correlation_id="c1")
+
+    assert eligibility is None
+    assert status is None
+    assert job_id is None
 
 
-def test_no_member_id_returns_none():
-    assert _verify_eligibility(Insurance(payer_name="Aetna")) is None
-
-
-def test_happy_path_passes_through_eligibility_service_response(monkeypatch):
-    upstream = {"insurance_id": "MEM1", "active": True, "status": "active", "checked_at": "2026-07-17T12:00:00Z"}
+def test_happy_path_enqueues_and_returns_pending(monkeypatch):
+    ins = Insurance(payer_name="Aetna", member_id="MEM1")
+    captured = {}
 
     class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
         def json(self):
-            return upstream
+            return {"job_id": "abc123", "status": "queued"}
 
-    monkeypatch.setattr(app_mod.httpx, "get", lambda *a, **k: _FakeResponse())
+    def _fake_post(url, *, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return _FakeResponse()
 
-    result = _verify_eligibility(Insurance(payer_name="Aetna", member_id="MEM1"))
+    monkeypatch.setattr(app_mod.httpx, "post", _fake_post)
 
-    assert result == upstream
+    eligibility, status, job_id = _start_eligibility_check(
+        ins, patient_id=7, coverage_id=42, correlation_id="corr-1"
+    )
+
+    assert status == "pending"
+    assert job_id == "abc123"
+    assert eligibility["status"] == "pending"
+    assert eligibility["insurance_id"] == "MEM1"
+    assert captured["url"].endswith("/eligibility/jobs")
+    assert captured["json"]["insurance_id"] == "MEM1"
+    assert captured["json"]["idempotency_key"] == "patient:7:coverage:42"
+    assert captured["headers"]["X-Request-Id"] == "corr-1"
+    # Bounded — never the unbounded old inline call.
+    assert captured["timeout"] == app_mod.settings.eligibility_job_enqueue_timeout_seconds
 
 
-def test_transport_failure_maps_to_unknown_not_inactive(monkeypatch, caplog):
+def test_enqueue_call_is_bounded_never_the_old_unbounded_style(monkeypatch):
+    # Regression guard for RIV-088/RIV-141: the new call must always pass an
+    # explicit timeout, never rely on httpx's default (which is not "no
+    # timeout" for the underlying old bug, but this asserts the new code path
+    # never regresses to an unbounded call either).
+    calls = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"job_id": "j1", "status": "queued"}
+
+    def _fake_post(url, *, json, headers, timeout):
+        calls["timeout"] = timeout
+        return _FakeResponse()
+
+    monkeypatch.setattr(app_mod.httpx, "post", _fake_post)
+
+    _start_eligibility_check(
+        Insurance(payer_name="Aetna", member_id="MEM1"), patient_id=1, coverage_id=1, correlation_id="c1"
+    )
+
+    assert calls["timeout"] is not None
+    assert calls["timeout"] <= 10  # sanity bound, nowhere near "spin ~4-5s" let alone RIV-141's ~20 min
+
+
+def test_transport_failure_maps_to_unknown_not_inactive(monkeypatch):
     def _raise(*a, **k):
-        raise httpx.ConnectError(f"connection refused to host with member_id=MEM1-SECRET")
+        raise httpx.ConnectError("connection refused to host with member_id=MEM1-SECRET")
 
-    monkeypatch.setattr(app_mod.httpx, "get", _raise)
+    monkeypatch.setattr(app_mod.httpx, "post", _raise)
 
-    result = _verify_eligibility(Insurance(payer_name="Aetna", member_id="MEM1-SECRET"))
+    eligibility, status, job_id = _start_eligibility_check(
+        Insurance(payer_name="Aetna", member_id="MEM1-SECRET"), patient_id=1, coverage_id=1, correlation_id="c1"
+    )
 
-    assert result["status"] == "unknown"
-    assert result["status"] != "inactive"
-    assert result["active"] is False
+    assert status == "unknown"
+    assert status != "inactive"
+    assert job_id is None
+    assert eligibility["active"] is False
 
 
 def test_transport_failure_error_field_is_exception_type_only(monkeypatch):
     def _raise(*a, **k):
         raise httpx.ConnectError("connection refused to host with member_id=MEM1-SECRET")
 
-    monkeypatch.setattr(app_mod.httpx, "get", _raise)
+    monkeypatch.setattr(app_mod.httpx, "post", _raise)
 
-    result = _verify_eligibility(Insurance(payer_name="Aetna", member_id="MEM1-SECRET"))
+    eligibility, _, _ = _start_eligibility_check(
+        Insurance(payer_name="Aetna", member_id="MEM1-SECRET"), patient_id=1, coverage_id=1, correlation_id="c1"
+    )
 
-    assert result["error"] == "ConnectError"
-    assert "MEM1-SECRET" not in result["error"]
+    assert eligibility["error"] == "ConnectError"
+    assert "MEM1-SECRET" not in eligibility["error"]
 
 
 def test_transport_failure_does_not_log_raw_exception_message(monkeypatch, caplog):
@@ -78,21 +138,43 @@ def test_transport_failure_does_not_log_raw_exception_message(monkeypatch, caplo
     def _raise(*a, **k):
         raise httpx.ConnectError("connection refused to host with member_id=MEM1-SECRET")
 
-    monkeypatch.setattr(app_mod.httpx, "get", _raise)
+    monkeypatch.setattr(app_mod.httpx, "post", _raise)
 
-    _verify_eligibility(Insurance(payer_name="Aetna", member_id="MEM1-SECRET"))
+    _start_eligibility_check(
+        Insurance(payer_name="Aetna", member_id="MEM1-SECRET"), patient_id=1, coverage_id=1, correlation_id="c1"
+    )
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert "MEM1-SECRET" not in log_text
     assert "ConnectError" in log_text
 
 
+def test_http_error_status_from_eligibility_service_maps_to_unknown(monkeypatch):
+    def _fake_post(url, *, json, headers, timeout):
+        request = httpx.Request("POST", url)
+        response = httpx.Response(503, request=request)
+        raise httpx.HTTPStatusError("service unavailable", request=request, response=response)
+
+    monkeypatch.setattr(app_mod.httpx, "post", _fake_post)
+
+    eligibility, status, job_id = _start_eligibility_check(
+        Insurance(payer_name="Aetna", member_id="MEM1"), patient_id=1, coverage_id=1, correlation_id="c1"
+    )
+
+    assert status == "unknown"
+    assert job_id is None
+
+
 def test_transport_failure_fallback_has_the_shared_contract_shape(monkeypatch):
-    monkeypatch.setattr(app_mod.httpx, "get", lambda *a, **k: (_ for _ in ()).throw(httpx.TimeoutException("t")))
+    monkeypatch.setattr(
+        app_mod.httpx, "post", lambda *a, **k: (_ for _ in ()).throw(httpx.TimeoutException("t"))
+    )
 
-    result = _verify_eligibility(Insurance(payer_name="Aetna", member_id="MEM1"))
+    eligibility, _, _ = _start_eligibility_check(
+        Insurance(payer_name="Aetna", member_id="MEM1"), patient_id=1, coverage_id=1, correlation_id="c1"
+    )
 
-    assert set(result.keys()) == {
+    assert set(eligibility.keys()) == {
         "insurance_id",
         "active",
         "status",
@@ -102,6 +184,6 @@ def test_transport_failure_fallback_has_the_shared_contract_shape(monkeypatch):
         "stale",
         "error",
     }
-    assert result["stale"] is False
-    assert result["insurance_id"] == "MEM1"
-    assert result["payer"] == "Aetna"
+    assert eligibility["stale"] is False
+    assert eligibility["insurance_id"] == "MEM1"
+    assert eligibility["payer"] == "Aetna"

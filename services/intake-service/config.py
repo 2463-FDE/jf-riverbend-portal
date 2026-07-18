@@ -14,8 +14,14 @@ class Settings:
     db_user = os.getenv("DB_USER", "riverbend_app")
     db_password = os.getenv("DB_PASSWORD", "")
 
-    # downstream eligibility verification (called inline from /intake — RIV-088)
+    # downstream eligibility verification: Stage 3 enqueues an async job on
+    # eligibility-service instead of blocking /intake on the payer round-trip
+    # (RIV-088 / RIV-141). This timeout only bounds the fast enqueue call
+    # itself, never the payer check.
     eligibility_url = os.getenv("ELIGIBILITY_URL", "http://eligibility-service:8072")
+    eligibility_job_enqueue_timeout_seconds = float(
+        os.getenv("ELIGIBILITY_JOB_ENQUEUE_TIMEOUT_SECONDS", "3")
+    )
 
     # payer settings kept for parity with the legacy module; the real X12 270/271
     # round-trip is owned by eligibility-service.

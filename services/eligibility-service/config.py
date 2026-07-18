@@ -24,5 +24,15 @@ class Settings:
     cache_fresh_ttl_seconds = int(os.getenv("ELIGIBILITY_CACHE_FRESH_TTL_SECONDS", "300"))
     cache_stale_ttl_seconds = int(os.getenv("ELIGIBILITY_CACHE_STALE_TTL_SECONDS", "3600"))
 
+    # Stage 3: Redis-backed eligibility job lifecycle (async /intake path,
+    # RIV-088 / RIV-141). See jobs.py for the state machine and worker.py for
+    # the in-process consumer.
+    job_max_retries = int(os.getenv("ELIGIBILITY_JOB_MAX_RETRIES", "3"))
+    job_max_manual_retries = int(os.getenv("ELIGIBILITY_JOB_MAX_MANUAL_RETRIES", "1"))
+    job_status_ttl_seconds = int(os.getenv("ELIGIBILITY_JOB_STATUS_TTL_SECONDS", "3600"))
+    job_lease_seconds = int(os.getenv("ELIGIBILITY_JOB_LEASE_SECONDS", "30"))
+    worker_poll_interval_seconds = float(os.getenv("ELIGIBILITY_WORKER_POLL_INTERVAL_SECONDS", "0.5"))
+    worker_reclaim_interval_seconds = float(os.getenv("ELIGIBILITY_WORKER_RECLAIM_INTERVAL_SECONDS", "15"))
+
 
 settings = Settings()
