@@ -65,14 +65,20 @@ as an agent tool at all, and this note does not propose fixing it.
 ## 2. Proposed joined/eager read model (design only — not implemented here)
 
 For the **existing production endpoint**, the standard fix (not applied in
-this document) would be a single query using SQLAlchemy eager loading, e.g.:
+this document) would collapse the per-encounter loop into a bounded number of
+queries. **Caveat (verify before copying):** the current `Encounter`/`Record`
+models (`services/records-service/models.py`) are plain `Column`-based with
+**no SQLAlchemy relationship** — `Record.encounter_id` is a bare `Column`, not
+a `relationship()`. So the `selectinload` form below only works **after adding
+an ORM relationship** (e.g. `Encounter.records = relationship("Record", ...)`).
+With that relationship in place:
 
 ```python
 encounters = (
     db.execute(
         select(Encounter)
         .where(Encounter.patient_id == patient_id)
-        .options(selectinload(Encounter.records))
+        .options(selectinload(Encounter.records))  # requires Encounter.records relationship (not present today)
         .order_by(Encounter.id)
     )
     .scalars()
@@ -80,7 +86,33 @@ encounters = (
 )
 ```
 
-`selectinload` would still issue 2 queries total (one for encounters, one
+Without adding a relationship — i.e. against the models exactly as they exist
+today — the same 2-query result is achievable with an explicit second query,
+which is the more faithful sketch for this repo's current schema:
+
+```python
+encounters = (
+    db.execute(
+        select(Encounter)
+        .where(Encounter.patient_id == patient_id)
+        .order_by(Encounter.id)
+    )
+    .scalars()
+    .all()
+)
+records = (
+    db.execute(
+        select(Record)
+        .where(Record.encounter_id.in_([e.id for e in encounters]))
+        .order_by(Record.id)
+    )
+    .scalars()
+    .all()
+)
+# group records by encounter_id in Python — no per-encounter query
+```
+
+Either form issues 2 queries total (one for encounters, one
 `WHERE encounter_id IN (...)` for all their records) rather than 1 — this is
 the standard, well-understood SQLAlchemy tradeoff (avoids a fan-out JOIN's
 row duplication) and would already be a fixed, low constant instead of
@@ -96,8 +128,10 @@ a single joined/eager result set into encounters and records without calling
 the existing N+1 endpoint." Concretely, that means Stage 2's repository
 adapter should either:
 
-- run one `selectinload`-based query (or equivalent single/2-query fixture
-  read) directly against seed-derived rows, then group in Python; or
+- run a bounded 1-or-2-query read directly against seed-derived rows, then
+  group in Python — either add an `Encounter.records` relationship and use
+  `selectinload`, or (no model change) issue an explicit
+  `select(Record).where(Record.encounter_id.in_(...))` second query; or
 - read pre-joined fixture rows (e.g., a flat list of `(encounter, record)`
   tuples) and group them in memory with no per-encounter query at all.
 
