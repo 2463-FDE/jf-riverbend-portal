@@ -320,6 +320,20 @@ only runnable path.
 **Security considerations**
 
 - Authorization remains code-owned and precedes all agent work.
+- **Adversarial-review disposition — do NOT "fix" by crossing the boundary.**
+  A Stage 2 review flagged (critical) that the graph boundary is not on the
+  live path and that `GET /patients/{id}` and `/patients/{id}/records` remain
+  exploitable. This is OUT OF SCOPE FOR WEEK 4 BY DESIGN: the prototype is
+  defense in depth, not the RIV-201 remediation. Do NOT wire
+  `build_patient_graph` into gateway/records-service, do NOT add a production
+  route, and do NOT flip the RIV-201 integration xfail in this stage. The real
+  per-patient authorization fix at the service boundary is separate,
+  explicitly-authorized future work (see Completion report → recommended next
+  work; belongs with Week 9 RBAC/ownership), not Stage 3.
+- Obtain scopes only via `build_patient_graph()` (the single public entrypoint,
+  which calls `AuthorizationPort.authorize()` immediately before any read).
+  `AuthorizedScope` is forgery-guarded and is not a public export (resolved in
+  Stage 2); never construct one directly in specialist/supervisor code.
 - Enforce fixed tool allowlists, strict schemas, time/turn/tool/row caps, and
   evidence-patient equality after every specialist.
 - Persist no raw conversation or chart body. Do not trace prompts or responses.
