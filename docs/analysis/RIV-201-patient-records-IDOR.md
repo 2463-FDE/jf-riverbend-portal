@@ -11,10 +11,16 @@
   are end-user-reported symptoms. RIV-201 is the internal ID the codebase and
   audits already use for this specific authorization gap; this document is the
   first dedicated write-up of it rather than a passing mention.
-- **Severity:** Critical (per system audit AUD-02) — full-chart PHI exposure
-  (demographics, SSN, DOB, clinical notes, lab results) to any authenticated
-  account, for any patient, with no per-patient authorization check anywhere
-  in the request path.
+- **Severity:** Critical (per system audit AUD-02) — full patient-record PHI
+  exposure to any authenticated account, for any patient, with no per-patient
+  authorization check anywhere in the request path. The exposure spans two
+  sibling, equally IDOR-able endpoints (both session-only, neither bound to the
+  requested `patient_id`): `GET /patients/{id}` returns demographics, SSN, DOB,
+  address, and clinical `notes` (`PatientDetail`), and `GET /patients/{id}/records`
+  returns encounter summaries, allergies/medications, and clinical record bodies
+  (`PatientChart`). This write-up's reproduction (§3) exercises the records
+  endpoint; the demographics/SSN/DOB fields are leaked by the sibling
+  `/patients/{id}` endpoint, not by the records response itself.
 
 ## 1. Authentication vs. authorization (kept separate deliberately)
 
@@ -72,6 +78,7 @@ These are two different, independently-verified properties. RIV-201 is an
 | 7 | `tests/integration/test_records_flow.py:41-50` | `test_user_cannot_read_other_patients_chart` is `xfail(strict=False)` — the test that should catch this is present, documented, and expected to fail; not silently missing. |
 | 8 | `.github/workflows/ci.yml:56-69` | Integration tests (where the above `xfail` lives) are excluded from CI (`pytest -m "not integration"`) — this gap does not run on every push. |
 | 9 | `docs/analysis/system-audit-07-01-2026.md`, `-07-18-2026.md` | Finding AUD-02, confirmed Critical, confirmed unchanged across two audit passes (2026-07-01 → 2026-07-18). |
+| 10 | `services/gateway/app.py:171-173`, `services/records-service/app.py:72-84`, `services/records-service/schemas.py` (`PatientDetail`) | Sibling endpoint `GET /patients/{id}` (`proxy_patient` → `get_patient`) has the same session-only, no-ownership posture as `proxy_records`; `PatientDetail` is the response that actually carries SSN/DOB/demographics/`notes`. Confirms the IDOR is two endpoints, and that demographics/SSN/DOB come from here, not from the records chart. |
 
 ## 3. Sanitized reproduction (seeded data only)
 
@@ -124,10 +131,17 @@ verified independently, using only committed seed fixtures.
   (front desk, billing, ROI clerks, clinicians — `config/roles.yaml` gives
   all of them the same permissions), reachable simply by incrementing an
   integer in a URL.
-- **Data exposed:** full chart — demographics, SSN, DOB (`patients` table,
-  plaintext per `adr/0002`), encounter summaries, allergies/medications
-  free text, and every clinical record body (lab results, notes, imaging
-  reports) tied to that patient.
+- **Data exposed (mapped to the endpoint that leaks it — both share the same
+  session-only, no-ownership posture, `services/gateway/app.py:171-180`):**
+  - `GET /patients/{id}` → `PatientDetail`
+    (`services/records-service/schemas.py`): demographics, SSN, DOB, address,
+    phone, email, and clinical `notes` — `patients` table, plaintext per
+    `adr/0002`.
+  - `GET /patients/{id}/records` → `PatientChart`: `patient_id`, encounter
+    summaries, allergies/medications free text, and every clinical record body
+    (lab results, notes, imaging reports) tied to that patient. This response
+    does **not** itself contain SSN/DOB/demographics — those are leaked by the
+    `/patients/{id}` endpoint above.
 - **No detection:** `audit_logs` (`db/schema.sql:131-137`) is a mutable
   request-dump table with no per-patient access accounting; per
   `docs/handover/auditor-questionnaire.md`, staff were already unable to
