@@ -91,13 +91,65 @@ def test_provider_nodes_are_labeled_as_projections():
         assert n.provenance and "free text" in n.provenance
 
 
-def test_cross_patient_record_is_rejected_fail_closed():
-    # A record that claims a different patient than the one it hangs off of.
+def test_repository_excludes_cross_patient_records():
+    # A record whose encounter_id matches the patient's encounter but whose
+    # patient_id is a DIFFERENT patient must be excluded at the repository
+    # boundary (defense in depth) — not surfaced to the graph for rejection,
+    # and without failing the legitimate request.
     encounters = [EncounterRow(id=1, patient_id=1042, provider="Dr. Patel")]
-    records = [RecordRow(id=99, encounter_id=1, patient_id=1043, kind="note", title="x", status="final")]
-    repo = SeededChartRepository(encounters, records)
+    records = [
+        RecordRow(id=10, encounter_id=1, patient_id=1042, kind="note", title="ok", status="final"),
+        RecordRow(id=99, encounter_id=1, patient_id=1043, kind="note", title="leak", status="final"),
+    ]
+    result = SeededChartRepository(encounters, records).load_chart(1042)
+    ids = {r.id for r in result.records}
+    assert 10 in ids  # legitimate same-patient record kept
+    assert 99 not in ids  # cross-patient record excluded at the repository
+    assert all(r.patient_id == 1042 for r in result.records)
+
+
+class _UntrustedRepo(ChartRepositoryPort):
+    """A repository that does NOT enforce the patient scope (e.g. a future DB
+    adapter with a wrong predicate). Proves the graph's own cross-patient
+    tripwire still fails closed independently of SeededChartRepository."""
+
+    def __init__(self, chart: ChartResult):
+        self._chart = chart
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        return self._chart
+
+
+def test_graph_fails_closed_on_cross_patient_record_from_untrusted_repo():
+    chart = ChartResult(
+        patient_id=1042,
+        encounters=[EncounterRow(id=1, patient_id=1042, provider="Dr. Patel")],
+        records=[RecordRow(id=99, encounter_id=1, patient_id=1043, kind="note", title="x", status="final")],
+        reads=2,
+    )
     with pytest.raises(CrossPatientEvidenceError):
-        PatientGraphReader(scope(1042), repo).build()
+        PatientGraphReader(scope(1042), _UntrustedRepo(chart)).build()
+
+
+def test_graph_fails_closed_on_cross_patient_encounter_from_untrusted_repo():
+    chart = ChartResult(
+        patient_id=1042,
+        encounters=[EncounterRow(id=1, patient_id=1043, provider="Dr. Patel")],  # wrong patient
+        records=[],
+        reads=2,
+    )
+    with pytest.raises(CrossPatientEvidenceError):
+        PatientGraphReader(scope(1042), _UntrustedRepo(chart)).build()
+
+
+def test_graph_limits_reject_non_positive_values():
+    from pydantic import ValidationError
+
+    for kwargs in ({"max_encounters": 0}, {"max_records": -1}, {"max_nodes": 0}, {"max_edges": -5}):
+        with pytest.raises(ValidationError):
+            GraphLimits(**kwargs)
+    # a positive minimum is accepted
+    assert GraphLimits(max_encounters=1, max_records=1, max_nodes=1, max_edges=1).max_nodes == 1
 
 
 class _OrphanRepo(ChartRepositoryPort):

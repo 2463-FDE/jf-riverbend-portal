@@ -71,10 +71,17 @@ class SeededChartRepository(ChartRepositoryPort):
             truncated = True
         encounter_ids = {e.id for e in encounters}
 
-        # read 2 — records for those encounters in a single IN-style pass.
+        # read 2 — records for those encounters, scoped to this patient in a
+        # single IN-style pass. The `patient_id` predicate is defense in depth:
+        # even if an encounter id were duplicated or corrupted, another
+        # patient's record cannot enter the result set. Enforcing it HERE (not
+        # only at the graph) keeps the repository's promise to return exactly
+        # one patient's chart, and prevents a single bad cross-patient row from
+        # tripping the graph's fail-closed check and denying an otherwise
+        # legitimate request.
         reads += 1
         records = sorted(
-            (r for r in self._records if r.encounter_id in encounter_ids),
+            (r for r in self._records if r.encounter_id in encounter_ids and r.patient_id == patient_id),
             key=lambda r: r.id,
         )
         if len(records) > self._limits.max_records:

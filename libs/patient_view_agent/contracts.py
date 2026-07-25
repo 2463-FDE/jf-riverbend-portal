@@ -74,12 +74,16 @@ class DenialReason(str, Enum):
 # Limits (bounded by construction)
 # --------------------------------------------------------------------------- #
 class GraphLimits(BaseModel):
+    # Every limit has a positive lower bound: a zero or negative value would
+    # silently defeat the "bounded by construction" guarantee (negative slicing
+    # returns nearly the whole list; max_nodes=0 yields a graph with no patient
+    # root). Invalid config fails validation instead of changing behavior.
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    max_encounters: int = 50
-    max_records: int = 500
-    max_nodes: int = 750
-    max_edges: int = 1500
+    max_encounters: int = Field(default=50, ge=1)
+    max_records: int = Field(default=500, ge=1)
+    max_nodes: int = Field(default=750, ge=1)
+    max_edges: int = Field(default=1500, ge=1)
 
 
 # --------------------------------------------------------------------------- #
