@@ -103,9 +103,25 @@ class AuthorizationRequest(BaseModel):
     correlation_id: Optional[str] = None
 
 
+# Module-private sentinel. Only code inside this package (i.e. an
+# AuthorizationPort) can pass it, so an AuthorizedScope cannot be minted by an
+# outside caller who skipped authorization. Python has no true access control,
+# so this is a strong tripwire (direct construction raises loudly), not a
+# cryptographic guarantee — the token is deliberately not exported.
+_SCOPE_ISSUER_TOKEN = object()
+
+
 class AuthorizedScope(BaseModel):
     """The trusted result of an ALLOW decision — the only key that unlocks
-    retrieval. Immutable; a reader/repository binds to `patient_id` from here."""
+    retrieval. Immutable; a reader/repository binds to `patient_id` from here.
+
+    Forgery guard: construction requires the module-private issuer token, so a
+    scope can only come from `AuthorizationPort.authorize()`. This turns
+    "authorization is the only way to unlock retrieval" into an ENFORCED
+    invariant rather than a convention a future caller could copy around. This
+    type is intentionally not part of the package's public surface; production
+    callers use `build_patient_graph()` (authorize-then-read) instead.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -114,6 +130,14 @@ class AuthorizedScope(BaseModel):
     action: Action
     purpose: Purpose
     correlation_id: str
+
+    def __init__(self, **data):
+        if data.pop("issuer_token", None) is not _SCOPE_ISSUER_TOKEN:
+            raise PermissionError(
+                "AuthorizedScope may only be minted by AuthorizationPort.authorize(); "
+                "use build_patient_graph() to obtain a bounded patient graph."
+            )
+        super().__init__(**data)
 
 
 class Denial(BaseModel):

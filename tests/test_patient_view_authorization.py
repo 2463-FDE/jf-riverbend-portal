@@ -12,15 +12,17 @@ from libs.patient_view_agent import (
     Action,
     AuthorizationDenied,
     AuthorizationRequest,
-    AuthorizedScope,
     DenialReason,
     FakePolicyAuthorization,
-    GraphLimits,
     Purpose,
     SeededChartRepository,
     build_patient_graph,
     seed_derived_sample,
 )
+
+# AuthorizedScope is an internal, forgery-guarded type (not a public export);
+# imported here from the submodule only for an isinstance check.
+from libs.patient_view_agent.contracts import AuthorizedScope
 
 FIXED_CID = "corrid-deadbeef"
 

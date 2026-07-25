@@ -32,6 +32,7 @@ from typing import Iterable, Mapping, Optional
 from libs.safe_logging import get_safe_logger
 
 from .contracts import (
+    _SCOPE_ISSUER_TOKEN,
     Action,
     AuthorizationRequest,
     AuthorizedScope,
@@ -109,6 +110,7 @@ class FakePolicyAuthorization(AuthorizationPort):
             cid,
         )
         return AuthorizedScope(
+            issuer_token=_SCOPE_ISSUER_TOKEN,
             actor_id=request.actor_id,
             patient_id=request.patient_id,
             action=request.action,

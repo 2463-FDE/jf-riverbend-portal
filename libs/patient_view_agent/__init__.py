@@ -15,7 +15,6 @@ from .authorization import AuthorizationDenied, AuthorizationPort, FakePolicyAut
 from .contracts import (
     Action,
     AuthorizationRequest,
-    AuthorizedScope,
     ChartResult,
     Denial,
     DenialReason,
@@ -29,9 +28,15 @@ from .contracts import (
     Purpose,
     RecordRow,
 )
-from .graph import CrossPatientEvidenceError, PatientGraphReader, build_patient_graph
+from .graph import CrossPatientEvidenceError, build_patient_graph
 from .repository import ChartRepositoryPort, SeededChartRepository, seed_derived_sample
 
+# `build_patient_graph()` is the single public retrieval entrypoint: it takes an
+# AuthorizationRequest + an AuthorizationPort and authorizes immediately before
+# any repository access. `AuthorizedScope` (forgery-guarded) and
+# `PatientGraphReader` are deliberately NOT exported — they are internal
+# building blocks, reachable via submodules only for white-box tests, so no
+# caller is handed an API that accepts a self-minted scope.
 __all__ = [
     # enums
     "Action",
@@ -41,7 +46,6 @@ __all__ = [
     "DenialReason",
     # contracts
     "AuthorizationRequest",
-    "AuthorizedScope",
     "Denial",
     "GraphLimits",
     "EncounterRow",
@@ -58,8 +62,7 @@ __all__ = [
     "ChartRepositoryPort",
     "SeededChartRepository",
     "seed_derived_sample",
-    # graph
-    "PatientGraphReader",
+    # graph — single public entrypoint + the fail-closed error type
     "CrossPatientEvidenceError",
     "build_patient_graph",
 ]

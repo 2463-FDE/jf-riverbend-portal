@@ -9,29 +9,59 @@ import pytest
 
 from libs.patient_view_agent import (
     Action,
-    AuthorizedScope,
+    AuthorizationRequest,
     ChartRepositoryPort,
     ChartResult,
-    CrossPatientEvidenceError,
     EncounterRow,
+    FakePolicyAuthorization,
     GraphLimits,
     NodeType,
-    PatientGraphReader,
     Purpose,
     RecordRow,
     SeededChartRepository,
     seed_derived_sample,
 )
 
+# Internal building blocks — reached via submodules for white-box tests only;
+# they are intentionally not part of the package's public surface.
+from libs.patient_view_agent.contracts import AuthorizedScope
+from libs.patient_view_agent.graph import CrossPatientEvidenceError, PatientGraphReader
+
 
 def scope(pid=1042, cid="cid-graph"):
-    return AuthorizedScope(
-        actor_id="actor",
-        patient_id=pid,
-        action=Action.VIEW_PATIENT_CHART,
-        purpose=Purpose.TREATMENT,
-        correlation_id=cid,
+    """Mint a real scope THROUGH the authorizer (never by direct construction),
+    modelling how every legitimate caller obtains one."""
+    authz = FakePolicyAuthorization({"actor": {pid}}, id_factory=lambda: cid)
+    return authz.authorize(
+        AuthorizationRequest(
+            actor_id="actor",
+            patient_id=pid,
+            action=Action.VIEW_PATIENT_CHART,
+            purpose=Purpose.TREATMENT,
+        )
     )
+
+
+def test_authorized_scope_cannot_be_forged():
+    # Only AuthorizationPort.authorize() may mint a scope; a direct construction
+    # that skips authorization must fail loudly (closes the bypass a future
+    # caller could otherwise copy).
+    with pytest.raises(PermissionError):
+        AuthorizedScope(
+            actor_id="attacker",
+            patient_id=1043,
+            action=Action.VIEW_PATIENT_CHART,
+            purpose=Purpose.TREATMENT,
+            correlation_id="forged",
+        )
+
+
+def test_scope_and_reader_are_not_public_exports():
+    import libs.patient_view_agent as pkg
+
+    assert not hasattr(pkg, "AuthorizedScope")
+    assert not hasattr(pkg, "PatientGraphReader")
+    assert hasattr(pkg, "build_patient_graph")  # the single public entrypoint
 
 
 def _ids(graph):
