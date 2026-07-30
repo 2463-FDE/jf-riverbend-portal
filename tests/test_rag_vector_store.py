@@ -90,12 +90,16 @@ class _FakeConnection:
         self.stored = {}
         self.select_response = []
         self.committed = False
+        self.rolled_back = False
 
     def cursor(self):
         return _FakeCursor(self)
 
     def commit(self):
         self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
 
 
 def _pgvector_store(dimension=3, provider="fake", model="", connection=None):
@@ -294,6 +298,8 @@ def test_pgvector_store_query_is_scoped_to_its_own_provider_and_model():
     conn = _FakeConnection()
     model_a = _pgvector_store(dimension=2, provider="ollama", model="model-a", connection=conn)
     model_b = _pgvector_store(dimension=2, provider="ollama", model="model-b", connection=conn)
+    model_a.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+    model_b.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
     conn.select_response = [("r1",)]
 
     model_a.retrieve_top_k([1.0, 0.0], k=1)
@@ -318,7 +324,76 @@ def test_pgvector_store_query_carries_no_patient_filter_when_unscoped():
 
     sql, params = store._conn.executed[-1]
     assert "patient_id" not in sql
-    assert params == ["fake", "", [1.0, 0.0], 1]  # provider, model, query_vector, limit — no patient filter
+    # provider, model, eligible_ids, query_vector, limit — no patient filter
+    assert params == ["fake", "", ["r1"], [1.0, 0.0], 1]
+
+
+# --- PgVectorStore (fake connection): constrained to the active corpus -----
+
+
+def test_pgvector_store_query_constrains_to_this_instances_indexed_record_ids():
+    # Reviewer finding: rag_embeddings never deletes rows on its own, so a
+    # stale row from an older run could otherwise rank inside LIMIT and get
+    # silently dropped. The SQL itself must restrict to this instance's
+    # currently-indexed corpus, not filter after the fact.
+    store = _pgvector_store(dimension=2)
+    store.index([_record("r1", 1, "a"), _record("r2", 1, "b")], {"r1": [1.0, 0.0], "r2": [0.0, 1.0]})
+    store._conn.select_response = [("r1",)]
+
+    store.retrieve_top_k([1.0, 0.0], k=1)
+
+    sql, params = store._conn.executed[-1]
+    assert "record_id = ANY(%s)" in sql
+    eligible_ids_param = params[2]
+    assert set(eligible_ids_param) == {"r1", "r2"}
+
+
+def test_pgvector_store_retrieve_on_a_store_with_nothing_indexed_returns_empty_without_querying():
+    store = _pgvector_store(dimension=2)
+
+    result = store.retrieve_top_k([1.0, 0.0], k=5)
+
+    assert result == []
+    assert store._conn.executed == []  # never even reaches the DB
+
+
+def test_pgvector_store_raises_rather_than_silently_dropping_an_unexpected_record_id():
+    # If the DB ever returned a record_id outside this instance's own
+    # eligible_ids (it shouldn't, given the ANY() constraint above, but this
+    # documents the contract), that must raise loudly, never be dropped.
+    store = _pgvector_store(dimension=2)
+    store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+    store._conn.select_response = [("some-other-id-not-in-this-corpus",)]
+
+    with pytest.raises(KeyError):
+        store.retrieve_top_k([1.0, 0.0], k=1)
+
+
+# --- PgVectorStore (fake connection): SET LOCAL never leaks past a read ----
+
+
+def test_pgvector_store_rolls_back_after_a_scoped_read():
+    store = _pgvector_store(dimension=2)
+    store.index([_record("r1", 7, "a")], {"r1": [1.0, 0.0]})
+    store._conn.select_response = [("r1",)]
+
+    store.retrieve_top_k([1.0, 0.0], k=1, patient_id=7)
+
+    assert store._conn.rolled_back is True
+
+
+def test_pgvector_store_rolls_back_after_an_unscoped_read_too():
+    # Reviewer finding: without this, a scoped read's SET LOCAL (disabled
+    # indexes) would leak into every later read on the same connection,
+    # including unscoped ones, since SET LOCAL lasts until end of
+    # transaction, not end of cursor.
+    store = _pgvector_store(dimension=2)
+    store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+    store._conn.select_response = [("r1",)]
+
+    store.retrieve_top_k([1.0, 0.0], k=1)
+
+    assert store._conn.rolled_back is True
 
 
 def test_pgvector_store_unscoped_query_does_not_force_an_exact_scan():

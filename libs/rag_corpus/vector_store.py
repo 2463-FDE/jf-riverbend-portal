@@ -40,6 +40,20 @@ Two correctness properties this module holds itself to, per PR #14 review
   vector (OLLAMA_EMBED_MODEL can change independently). `model` is part of
   the persisted identity (UNIQUE key) and the retrieval filter so a retired
   model's vectors are never compared against a new model's query vectors.
+- A stale persisted row must never silently consume a LIMIT slot: rag_embeddings
+  never deletes rows on its own (an older corpus run, a since-lowered
+  RAG_CORPUS_MAX_RECORDS, a renamed/removed seed record), so ranking over
+  every row for a provider/model and only mapping the survivors back through
+  `_corpus_by_id` could return fewer than k results even when k+ CURRENT
+  records exist — a stale row could occupy a top-k slot and then get dropped.
+  retrieve_top_k constrains the SQL itself to `record_id = ANY(:eligible_ids)`
+  (this instance's own indexed corpus) instead of filtering after LIMIT.
+- A scoped read's `SET LOCAL` must never leak into a later read: it lasts
+  until end of TRANSACTION, not end of cursor, and psycopg2 connections don't
+  autocommit — so without an explicit rollback, an unscoped query issued
+  after a scoped one on the same connection would inherit the scoped query's
+  disabled indexes. retrieve_top_k rolls back (a plain read has nothing to
+  commit) in a `finally` after every call.
 """
 import hashlib
 import os
@@ -257,8 +271,20 @@ class PgVectorStore(VectorStore):
         self, query_vector: List[float], k: int, *, patient_id: Optional[int] = None
     ) -> List[CorpusRecord]:
         self._check_dimension("<query>", query_vector)
-        sql = "SELECT record_id FROM rag_embeddings WHERE provider = %s AND model = %s"
-        params: List = [self._provider, self._model]
+
+        # Constrain the ranked set to records THIS instance has actually
+        # indexed. rag_embeddings is persistent and never deletes rows on its
+        # own (e.g. an older corpus run, a since-lowered RAG_CORPUS_MAX_RECORDS,
+        # or a renamed/removed seed record can all leave rows behind) — without
+        # this, a stale row can occupy a LIMIT slot and get silently dropped
+        # below, so a caller asking for k results can quietly get fewer even
+        # though k+ CURRENT records exist elsewhere in the ranked order.
+        eligible_ids = list(self._corpus_by_id.keys())
+        if not eligible_ids:
+            return []
+
+        sql = "SELECT record_id FROM rag_embeddings WHERE provider = %s AND model = %s AND record_id = ANY(%s)"
+        params: List = [self._provider, self._model, eligible_ids]
         if patient_id is not None:
             sql += " AND patient_id = %s"
             params.append(patient_id)
@@ -266,22 +292,30 @@ class PgVectorStore(VectorStore):
         query_vector_param = self._vector_cast(query_vector) if self._vector_cast else query_vector
         params += [query_vector_param, k]
 
-        with self._conn.cursor() as cur:
-            if patient_id is not None:
-                # pgvector's HNSW index applies a WHERE filter AFTER the
-                # approximate graph search, so a selective patient_id
-                # predicate can silently return fewer than k rows even when
-                # k+ exist for that patient. Verified `hnsw.iterative_scan`
-                # does not reliably fix this (see this module's docstring);
-                # forcing an exact scan does. This is the patient-scope
-                # security boundary, so correctness wins over ANN speed —
-                # and this corpus is demonstration-sized (adr/0006), so the
-                # O(n) cost is cheap.
-                cur.execute("SET LOCAL enable_indexscan = off")
-                cur.execute("SET LOCAL enable_bitmapscan = off")
-                cur.execute("SET LOCAL enable_indexonlyscan = off")
-            cur.execute(sql, params)
-            record_ids = [row[0] for row in cur.fetchall()]
+        try:
+            with self._conn.cursor() as cur:
+                if patient_id is not None:
+                    # pgvector's HNSW index applies a WHERE filter AFTER the
+                    # approximate graph search, so a selective patient_id
+                    # predicate can silently return fewer than k rows even when
+                    # k+ exist for that patient. Verified `hnsw.iterative_scan`
+                    # does not reliably fix this (see this module's docstring);
+                    # forcing an exact scan does. This is the patient-scope
+                    # security boundary, so correctness wins over ANN speed —
+                    # and this corpus is demonstration-sized (adr/0006), so the
+                    # O(n) cost is cheap.
+                    cur.execute("SET LOCAL enable_indexscan = off")
+                    cur.execute("SET LOCAL enable_bitmapscan = off")
+                    cur.execute("SET LOCAL enable_indexonlyscan = off")
+                cur.execute(sql, params)
+                record_ids = [row[0] for row in cur.fetchall()]
+        finally:
+            # SET LOCAL lasts until end of transaction, not end of cursor —
+            # without this, a scoped read's exact-scan settings would leak
+            # into every later read on this same connection (including
+            # unscoped ones), degrading them for no reason. Also avoids
+            # leaving the connection idle-in-transaction after a pure read.
+            self._conn.rollback()
 
         log.info(
             "pgvector_store retrieve_top_k ok (provider=%s, k=%s, patient_scoped=%s, returned=%s)",
@@ -290,7 +324,10 @@ class PgVectorStore(VectorStore):
             patient_id is not None,
             len(record_ids),
         )
-        return [self._corpus_by_id[record_id] for record_id in record_ids if record_id in self._corpus_by_id]
+        # Every record_id here came from `ANY(eligible_ids)` above, so this
+        # lookup can never miss — a KeyError would mean that invariant broke,
+        # and should raise loudly rather than silently drop a result.
+        return [self._corpus_by_id[record_id] for record_id in record_ids]
 
 
 def build_vector_store(name: str = None, **kwargs) -> VectorStore:
