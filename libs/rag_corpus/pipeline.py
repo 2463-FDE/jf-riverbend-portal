@@ -15,7 +15,7 @@ from libs.embedding_client import EmbeddingClient
 from .config import CorpusConfig
 from .corpus import CorpusRecord, build_corpus
 from .embedding_cache import EmbeddingCache
-from .vector_store import IndexResult, VectorStore
+from .vector_store import IndexResult, VectorStore, model_tag_for_provider
 
 
 @dataclass
@@ -36,7 +36,15 @@ def run_pipeline(
     embedding_client = embedding_client or EmbeddingClient()
 
     corpus = build_corpus(config.max_records)
-    cache = EmbeddingCache(cache_dir=config.cache_dir, provider=embedding_client.provider_name)
+    # model_tag_for_provider is the same function PgVectorStore uses to derive
+    # its own persisted identity — reusing it here (rather than re-deriving
+    # independently) is what keeps the disk cache and the DB row agreeing on
+    # "which model made this vector" after a model swap (e.g. OLLAMA_EMBED_MODEL).
+    cache = EmbeddingCache(
+        cache_dir=config.cache_dir,
+        provider=embedding_client.provider_name,
+        model=model_tag_for_provider(embedding_client.provider_name),
+    )
 
     vectors_by_record_id, cache_hits, newly_embedded = cache.get_or_embed_all(corpus, embedding_client)
 

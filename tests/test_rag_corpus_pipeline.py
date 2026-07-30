@@ -72,6 +72,33 @@ def test_embedding_cache_persists_to_disk_across_separate_cache_instances(tmp_pa
     assert len(provider.calls) == calls_after_first_load
 
 
+def test_run_pipeline_reembeds_when_the_active_model_changes_even_with_unchanged_text(monkeypatch, tmp_path):
+    # Reviewer finding: the disk cache was namespaced by provider only
+    # ("ollama.json"), keyed solely by content_hash — so swapping
+    # OLLAMA_EMBED_MODEL while corpus text stayed the same would still hit
+    # the cache and hand back the OLD model's vector, which PgVectorStore
+    # would then persist under the NEW model's identity. provider_name
+    # reports "ollama" while the actual embed calls stay on the
+    # deterministic fake provider (dependency injection) — no real Ollama
+    # server needed to prove this.
+    provider = FakeEmbeddingProvider()
+    client = EmbeddingClient(config=EmbeddingConfig(provider="ollama"), provider=provider)
+    config = CorpusConfig(max_records=2, cache_dir=str(tmp_path))
+    monkeypatch.setenv("OLLAMA_EMBED_MODEL", "model-a")
+
+    first = run_pipeline(config=config, embedding_client=client)
+    assert first.newly_embedded == len(first.corpus)
+    assert first.cache_hits == 0
+    calls_after_first = len(provider.calls)
+
+    monkeypatch.setenv("OLLAMA_EMBED_MODEL", "model-b")
+    second = run_pipeline(config=config, embedding_client=client)
+
+    assert second.newly_embedded == len(second.corpus)  # re-embedded, not served from model-a's cache
+    assert second.cache_hits == 0
+    assert len(provider.calls) > calls_after_first
+
+
 def test_only_records_with_changed_text_are_reembedded(tmp_path):
     provider = FakeEmbeddingProvider()
     client = _client(provider)
