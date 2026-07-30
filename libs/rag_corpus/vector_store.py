@@ -15,6 +15,31 @@ Every pgvector query that accepts a `patient_id` filters
 `WHERE patient_id = %s` — the retrieval-path analogue of the RIV-201
 boundary (adr/0006 §2). This is defense in depth for retrieval specifically;
 it does not remediate that unresolved gateway/records IDOR.
+
+Two correctness properties this module holds itself to, per PR #14 review
+(see .claude/skills/langgraph-imp-planner/SKILL.md, "Lessons learned"):
+
+- A patient-scoped query must never under-return: pgvector's HNSW index
+  applies `patient_id = %s` AFTER the approximate graph search, so a plain
+  `ORDER BY embedding <=> %s LIMIT k` can silently return fewer than k rows
+  even when k+ eligible rows exist for that patient (this is pgvector's own
+  documented filtered-ANN limitation, not a bug in Postgres). Verified by
+  hand against a live pgvector 0.8.0 database: enabling
+  `hnsw.iterative_scan = strict_order` did NOT reliably fix this for an
+  adversarially-clustered patient (it still returned 0 of 5 true matches in
+  one reproduction — iterative scan's own graph-traversal termination can
+  give up before reaching a poorly-connected cluster). Forcing an exact scan
+  for scoped queries (disabling index/bitmap scan methods for that query)
+  DID reliably return the correct, complete result in the same
+  reproduction — see retrieve_top_k below. Exactness over ANN speed is the
+  right trade for this specific path: it is the security-scoped query, and
+  this corpus is demonstration-sized by design (adr/0006), so an O(n)
+  filtered scan is cheap.
+- A model change under the same provider must never mix embedding spaces:
+  `provider` alone (e.g. "ollama") does not capture *which* model produced a
+  vector (OLLAMA_EMBED_MODEL can change independently). `model` is part of
+  the persisted identity (UNIQUE key) and the retrieval filter so a retired
+  model's vectors are never compared against a new model's query vectors.
 """
 import hashlib
 import os
@@ -49,6 +74,17 @@ def _content_hash(text: str) -> str:
     # Mirrors libs/rag_corpus/embedding_cache.py::_content_hash — same
     # rationale for duplication as _cosine_similarity above.
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def model_tag_for_provider(provider: str) -> str:
+    """The model/version half of the persisted embedding identity (the other
+    half is `provider`) — folded into rag_embeddings so a model change under
+    the same provider (e.g. a different OLLAMA_EMBED_MODEL) is never confused
+    with an unchanged embedding space. Empty for "fake": FakeEmbeddingProvider
+    has no model concept (see its own docstring)."""
+    if provider == "ollama":
+        return os.getenv("OLLAMA_EMBED_MODEL", "")
+    return ""
 
 
 @dataclass(frozen=True)
@@ -125,10 +161,16 @@ class PgVectorStore(VectorStore):
         config: Optional[VectorStoreConfig] = None,
         dimension: int = 16,
         provider: str = "fake",
+        model: Optional[str] = None,
         connection=None,
     ):
         self._dimension = dimension
         self._provider = provider
+        # Auto-derived from `provider` when not given explicitly, so a caller
+        # that only passes `provider="ollama"` still gets the active
+        # OLLAMA_EMBED_MODEL folded into the persisted identity rather than
+        # silently defaulting to "no model tracking".
+        self._model = model if model is not None else model_tag_for_provider(provider)
         self._corpus_by_id: Dict[str, CorpusRecord] = {}
         # Real psycopg2 needs each vector parameter wrapped as pgvector.Vector
         # (register_vector's adapter otherwise only fires for that wrapper —
@@ -175,20 +217,23 @@ class PgVectorStore(VectorStore):
                 cur.execute(
                     """
                     INSERT INTO rag_embeddings
-                        (record_id, patient_id, provider, dimension, content_hash, embedding, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, now())
-                    ON CONFLICT (record_id, provider) DO UPDATE
+                        (record_id, patient_id, provider, model, dimension, content_hash, embedding, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (record_id, provider, model) DO UPDATE
                         SET patient_id = EXCLUDED.patient_id,
                             dimension = EXCLUDED.dimension,
                             content_hash = EXCLUDED.content_hash,
                             embedding = EXCLUDED.embedding,
                             updated_at = now()
                         WHERE rag_embeddings.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                           OR rag_embeddings.dimension IS DISTINCT FROM EXCLUDED.dimension
+                           OR rag_embeddings.patient_id IS DISTINCT FROM EXCLUDED.patient_id
                     """,
                     (
                         record.record_id,
                         record.patient_id,
                         self._provider,
+                        self._model,
                         self._dimension,
                         _content_hash(record.text),
                         vector_param,
@@ -212,8 +257,8 @@ class PgVectorStore(VectorStore):
         self, query_vector: List[float], k: int, *, patient_id: Optional[int] = None
     ) -> List[CorpusRecord]:
         self._check_dimension("<query>", query_vector)
-        sql = "SELECT record_id FROM rag_embeddings WHERE provider = %s"
-        params: List = [self._provider]
+        sql = "SELECT record_id FROM rag_embeddings WHERE provider = %s AND model = %s"
+        params: List = [self._provider, self._model]
         if patient_id is not None:
             sql += " AND patient_id = %s"
             params.append(patient_id)
@@ -222,6 +267,19 @@ class PgVectorStore(VectorStore):
         params += [query_vector_param, k]
 
         with self._conn.cursor() as cur:
+            if patient_id is not None:
+                # pgvector's HNSW index applies a WHERE filter AFTER the
+                # approximate graph search, so a selective patient_id
+                # predicate can silently return fewer than k rows even when
+                # k+ exist for that patient. Verified `hnsw.iterative_scan`
+                # does not reliably fix this (see this module's docstring);
+                # forcing an exact scan does. This is the patient-scope
+                # security boundary, so correctness wins over ANN speed —
+                # and this corpus is demonstration-sized (adr/0006), so the
+                # O(n) cost is cheap.
+                cur.execute("SET LOCAL enable_indexscan = off")
+                cur.execute("SET LOCAL enable_bitmapscan = off")
+                cur.execute("SET LOCAL enable_indexonlyscan = off")
             cur.execute(sql, params)
             record_ids = [row[0] for row in cur.fetchall()]
 

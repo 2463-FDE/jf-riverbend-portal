@@ -7,7 +7,14 @@ from .config import CorpusConfig, VectorStoreConfig
 from .corpus import CorpusRecord, build_corpus
 from .embedding_cache import EmbeddingCache
 from .pipeline import PipelineResult, run_pipeline
-from .vector_store import IndexResult, InMemoryCosineStore, PgVectorStore, VectorStore, build_vector_store
+from .vector_store import (
+    IndexResult,
+    InMemoryCosineStore,
+    PgVectorStore,
+    VectorStore,
+    build_vector_store,
+    model_tag_for_provider,
+)
 
 __all__ = [
     "CorpusConfig",
@@ -22,4 +29,5 @@ __all__ = [
     "PgVectorStore",
     "IndexResult",
     "build_vector_store",
+    "model_tag_for_provider",
 ]

@@ -184,12 +184,13 @@ CREATE TABLE IF NOT EXISTS rag_embeddings (
     record_id    TEXT NOT NULL,             -- CorpusRecord.record_id, e.g. seed-enc-0001
     patient_id   INTEGER NOT NULL REFERENCES patients(id),
     provider     TEXT NOT NULL,             -- embedding provider tag (fake | ollama)
+    model        TEXT NOT NULL DEFAULT '',  -- e.g. OLLAMA_EMBED_MODEL; '' for the fake provider
     dimension    INTEGER NOT NULL,
     content_hash TEXT NOT NULL,             -- sha256 of the embedded text; drives re-embed/re-write skip
     embedding    VECTOR(16) NOT NULL,       -- fixed to FakeEmbeddingProvider's dimension; see migration 010
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (record_id, provider)
+    UNIQUE (record_id, provider, model)
 );
 
 CREATE INDEX IF NOT EXISTS rag_embeddings_patient_id_idx ON rag_embeddings (patient_id);
