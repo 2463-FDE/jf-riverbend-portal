@@ -504,3 +504,53 @@ def test_run_pipeline_indexes_into_the_given_vector_store(tmp_path):
     indexed_corpus, indexed_vectors = store.indexed
     assert indexed_corpus == result.corpus
     assert indexed_vectors == result.vectors_by_record_id
+
+
+# --- harness wiring: the vector store must reflect the ACTIVE embedding provider
+
+
+def test_run_eval_wires_the_active_embedding_provider_into_the_vector_store(monkeypatch, tmp_path):
+    # Reviewer finding: run_eval() must not let build_vector_store() default
+    # to "fake" regardless of the actual EMBEDDING_PROVIDER — a real
+    # EMBEDDING_PROVIDER=ollama + RAG_VECTOR_STORE=pgvector run would
+    # otherwise persist/query vectors mislabeled as "fake", or fail with a
+    # dimension mismatch attributed to the wrong provider.
+    from libs.rag_eval import harness
+
+    captured = {}
+
+    def spy_build_vector_store(name=None, **kwargs):
+        captured["kwargs"] = kwargs
+        return InMemoryCosineStore()  # avoid needing a real Postgres for this test
+
+    monkeypatch.setattr(harness, "build_vector_store", spy_build_vector_store)
+
+    # provider_name reports "ollama" (what a real EMBEDDING_PROVIDER=ollama
+    # config would report) while the actual embedding object stays the
+    # deterministic fake provider — this test is about the WIRING (what
+    # build_vector_store gets called with), not a real Ollama network call.
+    # RAG_VECTOR_STORE itself is resolved inside the real build_vector_store
+    # (bypassed here by the spy), so it's not this test's concern.
+    embedding_client = EmbeddingClient(config=EmbeddingConfig(provider="ollama"), provider=FakeEmbeddingProvider())
+    config = CorpusConfig(max_records=2, cache_dir=str(tmp_path))
+
+    harness.run_eval(corpus_config=config, embedding_client=embedding_client)
+
+    assert captured["kwargs"].get("provider") == "ollama"
+
+
+def test_run_eval_still_wires_fake_when_that_is_the_active_provider(monkeypatch, tmp_path):
+    from libs.rag_eval import harness
+
+    captured = {}
+
+    def spy_build_vector_store(name=None, **kwargs):
+        captured["kwargs"] = kwargs
+        return InMemoryCosineStore()
+
+    monkeypatch.setattr(harness, "build_vector_store", spy_build_vector_store)
+    config = CorpusConfig(max_records=2, cache_dir=str(tmp_path))
+
+    harness.run_eval(corpus_config=config, embedding_client=_client())
+
+    assert captured["kwargs"].get("provider") == "fake"

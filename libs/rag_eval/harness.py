@@ -45,7 +45,18 @@ def run_eval(
     # record for another duplicate's query. The patient-scope filter itself
     # is exercised directly in tests/test_rag_vector_store.py and
     # tests/integration/test_pgvector_retrieval.py, not here.
-    store = vector_store or build_vector_store()
+    #
+    # `provider` must come from the ACTUAL embedding_client, not
+    # PgVectorStore's own default ("fake") — otherwise a real
+    # EMBEDDING_PROVIDER=ollama run would persist/query vectors mislabeled as
+    # "fake", or fail with a dimension mismatch attributed to the wrong
+    # provider. `model` and `dimension` are not threaded through here: the
+    # rag_embeddings column is a fixed vector(16) sized to
+    # FakeEmbeddingProvider (see migration 010 / adr/0006's revisit trigger),
+    # so a non-fake provider whose output dimension differs still fails —
+    # correctly and loudly, via PgVectorStore's own dimension check — rather
+    # than silently under a mislabeled identity.
+    store = vector_store or build_vector_store(provider=embedding_client.provider_name)
 
     pipeline_result = run_pipeline(config=corpus_config, embedding_client=embedding_client, vector_store=store)
     gold_cases = load_goldset(eval_config.goldset_path)
