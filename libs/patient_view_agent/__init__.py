@@ -1,15 +1,20 @@
 """Week 4 patient-view graph core — a deterministic, fail-closed, read-only
-boundary that turns an AUTHORIZED scope into a bounded patient knowledge graph.
+boundary that turns an AUTHORIZED scope into a bounded patient knowledge graph,
+plus (Stage 3) a bounded, fixed-sequence supervisor that assembles a cited
+patient view on top of it.
 
 Authorization happens first and owns access decisions (`authorization.py`);
 retrieval is bound to the authorized patient at construction (`graph.py`,
-`repository.py`); nothing here is a model responsibility. This is Stage 2 of
-the Week 4 plan — the graph/authorization core. The bounded multi-agent
-supervisor (Stage 3) is not part of this package yet.
+`repository.py`); the supervisor (`runtime.py`) runs a fixed
+authorize -> chart specialist + graph specialist -> evidence validator ->
+composer -> final validator sequence with no peer delegation. Nothing here is
+a model responsibility except optionally phrasing already-validated evidence
+in `composer.py`.
 
 This boundary is DEFENSE IN DEPTH for the new prototype code path only. It does
 not touch, and does not remediate, the RIV-201 IDOR in
-services/gateway/app.py or services/records-service/app.py.
+services/gateway/app.py or services/records-service/app.py, and the Stage 3
+supervisor adds no production HTTP route.
 """
 from .authorization import AuthorizationDenied, AuthorizationPort, FakePolicyAuthorization
 from .contracts import (
@@ -30,6 +35,8 @@ from .contracts import (
 )
 from .graph import CrossPatientEvidenceError, build_patient_graph
 from .repository import ChartRepositoryPort, SeededChartRepository, seed_derived_sample
+from .runtime import ExecutionMetadata, PatientViewOutcome, PatientViewResult, run_patient_view
+from .specialists import EvidenceIntegrityError, SpecialistError, ViewReason
 
 # `build_patient_graph()` is the single public retrieval entrypoint: it takes an
 # AuthorizationRequest + an AuthorizationPort and authorizes immediately before
@@ -65,4 +72,12 @@ __all__ = [
     # graph — single public entrypoint + the fail-closed error type
     "CrossPatientEvidenceError",
     "build_patient_graph",
+    # Stage 3 — bounded supervisor
+    "ViewReason",
+    "SpecialistError",
+    "EvidenceIntegrityError",
+    "PatientViewOutcome",
+    "ExecutionMetadata",
+    "PatientViewResult",
+    "run_patient_view",
 ]
