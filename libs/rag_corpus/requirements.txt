@@ -1,0 +1,8 @@
+# Optional dependencies for libs/rag_corpus/vector_store.py::PgVectorStore.
+# NOT installed by default and NOT part of requirements-dev.txt or any
+# service's requirements.txt — RAG_VECTOR_STORE defaults to "memory"
+# (InMemoryCosineStore), which needs neither of these. Install only to run
+# against a live Postgres with the pgvector extension
+# (db/migrations/010_pgvector_embeddings.sql, adr/0006).
+pgvector==0.4.2
+psycopg2-binary==2.9.10

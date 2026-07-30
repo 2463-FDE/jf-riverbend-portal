@@ -166,3 +166,33 @@ CREATE TABLE IF NOT EXISTS disclosures (
     disclosed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     -- no authorization_id, no purpose, no restriction tracking
 );
+
+-- ---------------------------------------------------------------------------
+-- RAG corpus embeddings (see db/migrations/010_pgvector_embeddings.sql)
+-- ---------------------------------------------------------------------------
+-- Persists libs/rag_corpus's embed-once pipeline output behind a pgvector ANN
+-- retrieval path (libs/rag_corpus/vector_store.py::PgVectorStore). patient_id
+-- lives on the same row as its embedding so the ANN search and the
+-- patient-scope predicate are one filtered query under the existing Postgres
+-- ACLs (adr/0006 §2) — defense in depth for this retrieval path specifically,
+-- not a fix for the unresolved RIV-201 gateway/records IDOR. No record text
+-- or other PHI is stored here, only the vector and its identifiers.
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS rag_embeddings (
+    id           SERIAL PRIMARY KEY,
+    record_id    TEXT NOT NULL,             -- CorpusRecord.record_id, e.g. seed-enc-0001
+    patient_id   INTEGER NOT NULL REFERENCES patients(id),
+    provider     TEXT NOT NULL,             -- embedding provider tag (fake | ollama)
+    dimension    INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,             -- sha256 of the embedded text; drives re-embed/re-write skip
+    embedding    VECTOR(16) NOT NULL,       -- fixed to FakeEmbeddingProvider's dimension; see migration 010
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (record_id, provider)
+);
+
+CREATE INDEX IF NOT EXISTS rag_embeddings_patient_id_idx ON rag_embeddings (patient_id);
+
+CREATE INDEX IF NOT EXISTS rag_embeddings_hnsw_idx
+    ON rag_embeddings USING hnsw (embedding vector_cosine_ops);

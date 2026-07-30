@@ -1,0 +1,252 @@
+"""Swappable retrieval interface: the pure-Python cosine ranker and a
+pgvector-backed ANN store sit behind the same VectorStore contract, selected
+via a fail-closed factory that mirrors
+libs/eligibility_agent/runtime.py::build_agent_runtime — same shape,
+same reason (config-only selection, no silent fallback to an unrecognized
+name).
+
+PgVectorStore's psycopg2/pgvector imports are deferred into __init__ (and
+skipped entirely when a `connection` is injected, as tests do) so importing
+this module — and everything that depends on it, including the default
+in-memory path — never requires psycopg2 or the pgvector package installed.
+Only actually connecting to Postgres does.
+
+Every pgvector query that accepts a `patient_id` filters
+`WHERE patient_id = %s` — the retrieval-path analogue of the RIV-201
+boundary (adr/0006 §2). This is defense in depth for retrieval specifically;
+it does not remediate that unresolved gateway/records IDOR.
+"""
+import hashlib
+import os
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+from libs.safe_logging import get_safe_logger
+
+from .config import VectorStoreConfig
+from .corpus import CorpusRecord
+
+log = get_safe_logger(__name__)
+
+_KNOWN_STORES = ("memory", "pgvector")
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    # Mirrors libs/rag_eval/similarity.py::cosine_similarity exactly.
+    # Duplicated rather than imported to avoid a reverse dependency from this
+    # package (libs/rag_corpus) onto libs/rag_eval, which already depends on
+    # libs/rag_corpus.
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _content_hash(text: str) -> str:
+    # Mirrors libs/rag_corpus/embedding_cache.py::_content_hash — same
+    # rationale for duplication as _cosine_similarity above.
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class IndexResult:
+    written: int
+    skipped: int
+
+
+class VectorStore(ABC):
+    @abstractmethod
+    def index(self, corpus: List[CorpusRecord], vectors_by_record_id: Dict[str, List[float]]) -> IndexResult:
+        """Make `corpus`/`vectors_by_record_id` available to retrieve_top_k.
+        Must be safe to call repeatedly over the same records: a record whose
+        embedding is unchanged (same content_hash) must be skipped, not
+        rewritten."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def retrieve_top_k(
+        self, query_vector: List[float], k: int, *, patient_id: Optional[int] = None
+    ) -> List[CorpusRecord]:
+        """Return up to k CorpusRecords ranked by similarity to query_vector.
+        When patient_id is given, only that patient's records are eligible —
+        a cross-patient query must return an empty list, never another
+        patient's record."""
+        raise NotImplementedError
+
+
+class InMemoryCosineStore(VectorStore):
+    """The no-infrastructure default and fallback: wraps the existing
+    pure-Python cosine ranker. Nothing here is persisted anywhere — index()
+    just keeps corpus/vectors in memory for the lifetime of this instance."""
+
+    def __init__(self):
+        self._corpus_by_id: Dict[str, CorpusRecord] = {}
+        self._vectors_by_record_id: Dict[str, List[float]] = {}
+
+    def index(self, corpus: List[CorpusRecord], vectors_by_record_id: Dict[str, List[float]]) -> IndexResult:
+        for record in corpus:
+            self._corpus_by_id[record.record_id] = record
+            self._vectors_by_record_id[record.record_id] = vectors_by_record_id[record.record_id]
+        log.info("in_memory_cosine_store indexed corpus (total=%s)", len(corpus))
+        return IndexResult(written=len(corpus), skipped=0)
+
+    def retrieve_top_k(
+        self, query_vector: List[float], k: int, *, patient_id: Optional[int] = None
+    ) -> List[CorpusRecord]:
+        candidates = [
+            record
+            for record in self._corpus_by_id.values()
+            if patient_id is None or record.patient_id == patient_id
+        ]
+        scored = [
+            (_cosine_similarity(query_vector, self._vectors_by_record_id[record.record_id]), record)
+            for record in candidates
+        ]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [record for _, record in scored[:k]]
+
+
+class PgVectorStore(VectorStore):
+    """ANN retrieval over the `rag_embeddings` table
+    (db/migrations/010_pgvector_embeddings.sql). The patient_id filter and
+    the ANN search are one query under the existing Postgres ACLs.
+
+    `connection` is dependency-injectable so tests can drive this class
+    against a fake psycopg2-shaped double with no real Postgres or pgvector
+    package present — see tests/test_rag_vector_store.py. In production
+    (connection=None), a real connection is opened lazily here, and only here.
+    """
+
+    def __init__(
+        self,
+        config: Optional[VectorStoreConfig] = None,
+        dimension: int = 16,
+        provider: str = "fake",
+        connection=None,
+    ):
+        self._dimension = dimension
+        self._provider = provider
+        self._corpus_by_id: Dict[str, CorpusRecord] = {}
+        # Real psycopg2 needs each vector parameter wrapped as pgvector.Vector
+        # (register_vector's adapter otherwise only fires for that wrapper —
+        # a plain Python list is sent as a numeric[] and the vector <=>
+        # operator doesn't exist for that type). The fake connection used by
+        # tests/test_rag_vector_store.py has no such requirement, so this
+        # stays None there and vectors pass through as plain lists.
+        self._vector_cast = None
+
+        if connection is not None:
+            self._conn = connection
+        else:
+            import psycopg2
+            from pgvector import Vector
+            from pgvector.psycopg2 import register_vector
+
+            cfg = config or VectorStoreConfig()
+            self._conn = psycopg2.connect(
+                host=cfg.db_host,
+                port=cfg.db_port,
+                dbname=cfg.db_name,
+                user=cfg.db_user,
+                password=cfg.db_password,
+            )
+            register_vector(self._conn)
+            self._vector_cast = Vector
+
+    def _check_dimension(self, record_id: str, vector: List[float]) -> None:
+        if len(vector) != self._dimension:
+            raise ValueError(
+                f"embedding dimension mismatch for {record_id}: "
+                f"expected {self._dimension}, got {len(vector)}"
+            )
+
+    def index(self, corpus: List[CorpusRecord], vectors_by_record_id: Dict[str, List[float]]) -> IndexResult:
+        written = 0
+        skipped = 0
+        with self._conn.cursor() as cur:
+            for record in corpus:
+                self._corpus_by_id[record.record_id] = record
+                vector = vectors_by_record_id[record.record_id]
+                self._check_dimension(record.record_id, vector)
+                vector_param = self._vector_cast(vector) if self._vector_cast else vector
+                cur.execute(
+                    """
+                    INSERT INTO rag_embeddings
+                        (record_id, patient_id, provider, dimension, content_hash, embedding, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (record_id, provider) DO UPDATE
+                        SET patient_id = EXCLUDED.patient_id,
+                            dimension = EXCLUDED.dimension,
+                            content_hash = EXCLUDED.content_hash,
+                            embedding = EXCLUDED.embedding,
+                            updated_at = now()
+                        WHERE rag_embeddings.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                    """,
+                    (
+                        record.record_id,
+                        record.patient_id,
+                        self._provider,
+                        self._dimension,
+                        _content_hash(record.text),
+                        vector_param,
+                    ),
+                )
+                if cur.rowcount:
+                    written += 1
+                else:
+                    skipped += 1
+        self._conn.commit()
+        log.info(
+            "pgvector_store indexed corpus (provider=%s, total=%s, written=%s, skipped=%s)",
+            self._provider,
+            len(corpus),
+            written,
+            skipped,
+        )
+        return IndexResult(written=written, skipped=skipped)
+
+    def retrieve_top_k(
+        self, query_vector: List[float], k: int, *, patient_id: Optional[int] = None
+    ) -> List[CorpusRecord]:
+        self._check_dimension("<query>", query_vector)
+        sql = "SELECT record_id FROM rag_embeddings WHERE provider = %s"
+        params: List = [self._provider]
+        if patient_id is not None:
+            sql += " AND patient_id = %s"
+            params.append(patient_id)
+        sql += " ORDER BY embedding <=> %s LIMIT %s"
+        query_vector_param = self._vector_cast(query_vector) if self._vector_cast else query_vector
+        params += [query_vector_param, k]
+
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params)
+            record_ids = [row[0] for row in cur.fetchall()]
+
+        log.info(
+            "pgvector_store retrieve_top_k ok (provider=%s, k=%s, patient_scoped=%s, returned=%s)",
+            self._provider,
+            k,
+            patient_id is not None,
+            len(record_ids),
+        )
+        return [self._corpus_by_id[record_id] for record_id in record_ids if record_id in self._corpus_by_id]
+
+
+def build_vector_store(name: str = None, **kwargs) -> VectorStore:
+    """Fail closed: an unset/unrecognized RAG_VECTOR_STORE raises rather than
+    silently falling back to any default, mirroring
+    libs/eligibility_agent/runtime.py::build_agent_runtime. `memory` must be
+    requested explicitly (by name or via the env var) — it is the configured
+    default, not an implicit fallback for an unrecognized value."""
+    name = name or os.getenv("RAG_VECTOR_STORE", "memory")
+
+    if name == "memory":
+        return InMemoryCosineStore()
+
+    if name == "pgvector":
+        return PgVectorStore(**kwargs)
+
+    raise ValueError(f"Unknown RAG_VECTOR_STORE '{name}' — expected one of: {', '.join(_KNOWN_STORES)}")
