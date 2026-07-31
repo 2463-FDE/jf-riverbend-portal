@@ -186,7 +186,7 @@ class LangGraphPatientViewRuntime:
                 graph_result = run_specialist(
                     GRAPH_READ_TOOL, PatientGraphReader(scope, repository, limits=limits).build
                 )
-            except CrossPatientEvidenceError:
+            except CrossPatientEvidenceError as exc:
                 # The graph specialist's OWN internal cross-patient tripwire
                 # (graph.py's `_reject`) fired — this is a security-relevant
                 # integrity failure, not a generic node failure, and must be
@@ -194,9 +194,16 @@ class LangGraphPatientViewRuntime:
                 # and recovery paths that key off the refusal reason still
                 # see it. Deliberately NOT appended to specialists_run, same
                 # as evidence_node's EvidenceIntegrityError handling below:
-                # the call was rejected, not completed.
+                # the call was rejected, not completed. `exc.reads`/
+                # `exc.truncated` carry the repository read that already
+                # happened inside `PatientGraphReader.build()` before it
+                # rejected — stashed in state (there is no `PatientGraph`
+                # object to read them from) so the refusal below doesn't
+                # understate access in the audit trail.
                 state["refused"] = True
                 state["refuse_reasons"] = [ViewReason.CROSS_PATIENT_EVIDENCE]
+                state["graph_reads"] = exc.reads
+                state["graph_truncated"] = exc.truncated
                 return state
             completed["graph"] = graph_result
             state["graph"] = graph_result
@@ -309,19 +316,21 @@ class LangGraphPatientViewRuntime:
         if final_state.get("refused"):
             # `graph` is only in state if graph_node itself succeeded — a
             # refusal routed straight from graph_node (CrossPatientEvidenceError)
-            # never set it, so graph_reads/graph_truncated must fall back to
-            # 0/False rather than KeyError, same "report only what actually
-            # completed" principle as node_failure_result() above.
+            # never set it, but DOES stash the read it already performed in
+            # state["graph_reads"]/state["graph_truncated"] (see graph_node)
+            # rather than letting these silently default to 0/False.
             graph_result = final_state.get("graph")
+            graph_reads = graph_result.reads if graph_result else final_state.get("graph_reads", 0)
+            graph_truncated = graph_result.truncated if graph_result else final_state.get("graph_truncated", False)
             return refused_result(
                 correlation_id=scope.correlation_id,
                 patient_id=scope.patient_id,
                 specialists_run=specialists_run,
                 reasons=final_state["refuse_reasons"],
                 chart_reads=chart.reads,
-                graph_reads=graph_result.reads if graph_result else 0,
+                graph_reads=graph_reads,
                 chart_truncated=chart.truncated,
-                graph_truncated=graph_result.truncated if graph_result else False,
+                graph_truncated=graph_truncated,
                 elapsed_seconds=clock() - start,
             )
 

@@ -61,10 +61,19 @@ _PROVIDER_PROVENANCE = (
 
 class CrossPatientEvidenceError(Exception):
     """Raised when a row/node's patient id differs from the bound scope. The
-    message carries only the correlation id — never a patient id."""
+    message carries only the correlation id — never a patient id.
 
-    def __init__(self, correlation_id: str):
+    Carries `reads`/`truncated` from the `ChartResult` that was already
+    loaded by `load_chart()` before the mismatch was found — the repository
+    read happened regardless of whether `_reject()` fires, so a caller
+    turning this into a refusal (rather than letting it propagate) can
+    still report accurate audit metadata instead of silently claiming zero
+    reads for a specialist call that did perform one."""
+
+    def __init__(self, correlation_id: str, *, reads: int = 0, truncated: bool = False):
         self.correlation_id = correlation_id
+        self.reads = reads
+        self.truncated = truncated
         super().__init__("cross-patient evidence rejected")
 
 
@@ -99,7 +108,7 @@ class PatientGraphReader:
 
         chart = self._repository.load_chart(pid, correlation_id=cid)
         if chart.patient_id != pid:
-            self._reject(cid)
+            self._reject(cid, reads=chart.reads, truncated=chart.truncated)
 
         nodes: dict[str, GraphNode] = {}
         edges: list[Edge] = []
@@ -132,7 +141,7 @@ class PatientGraphReader:
         encounter_ids: set[int] = set()
         for enc in chart.encounters:
             if enc.patient_id != pid:
-                self._reject(cid)  # defense in depth over the repository's own filter
+                self._reject(cid, reads=chart.reads, truncated=truncated)  # defense in depth over the repository's own filter
             enc_node_id = f"encounter:{enc.id}"
             if not add_node(
                 GraphNode(
@@ -164,7 +173,7 @@ class PatientGraphReader:
 
         for rec in chart.records:
             if rec.patient_id != pid:
-                self._reject(cid)
+                self._reject(cid, reads=chart.reads, truncated=truncated)
             if rec.encounter_id not in encounter_ids:
                 # Record points at an encounter not in this patient's scope
                 # (missing node). Drop it safely — never fabricate a phantom
@@ -209,12 +218,12 @@ class PatientGraphReader:
             dropped_dangling=dropped_dangling,
         )
 
-    def _reject(self, correlation_id: str) -> None:
+    def _reject(self, correlation_id: str, *, reads: int, truncated: bool) -> None:
         log.warning(
             "patient_view evidence rejected (reason=cross_patient, correlation_id=%s)",
             correlation_id,
         )
-        raise CrossPatientEvidenceError(correlation_id)
+        raise CrossPatientEvidenceError(correlation_id, reads=reads, truncated=truncated)
 
 
 def build_patient_graph(
