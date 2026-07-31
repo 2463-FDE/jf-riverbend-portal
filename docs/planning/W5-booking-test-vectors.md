@@ -32,7 +32,7 @@ appointment or patient data.
 | C2 | V5 |
 | C3 | V7 |
 | C4 | V6 |
-| A1 | V3, V11 (malformed key) |
+| A1 | V3, V11 (malformed key), V13 (actor scope) |
 | A2 | V3, V5, V11, V8 |
 | A3 | V5, V3 |
 | M1 | V10 |
@@ -43,7 +43,7 @@ appointment or patient data.
 | B1 | V6 |
 | B2 | Not testable yet — no vector; the required-after-migration transition (`docs/planning/W5-booking-idempotency-design.md` §1, missing-header row) has no stated date/trigger to test against. |
 
-Three criteria (F6, M2/M3, O2, B2) are intentionally not mapped to an
+Five criteria (F6, M2, M3, O2, B2) are intentionally not mapped to an
 application-level test vector — each is either an unresolved business
 decision, a migration-mechanics property better verified by inspection than
 a booking-flow test, or an operational/documentation follow-up. This is
@@ -184,11 +184,26 @@ explicit, not an oversight.
 - **Requests:** `POST /appointments` for `S1` and `POST /appointments` for
   `S2` at the same time, any combination of keyed/unkeyed.
 - **Expected HTTP results:** both `201`.
-- **Database assertions:** one confirmed row each for `S1` and `S2`; no
-  detectable serialization delay attributable to lock contention between
-  the two (rules out a fix that takes a table-wide lock, C3).
+- **Database assertions:** one confirmed row each for `S1` and `S2`.
+- **Static/implementation assertion (deterministic, not timing-based):** the
+  transaction issued for a booking request contains no table-level lock
+  statement (e.g. no `LOCK TABLE appointments`) and no `SELECT ... FOR
+  UPDATE` against a row set wider than the single `slot_id` being booked —
+  verified by inspecting the exact SQL the implementation issues (or by a
+  fixture that fails the test if such a statement appears), not by
+  measuring elapsed time. This is what actually rules out a fix that
+  takes a table-wide lock (C3) — a timing measurement could not
+  distinguish "no interference" from "coincidentally fast interference,"
+  which is why this vector does not rely on one.
+- **Separate, explicitly-bounded perf/integration check (not part of this
+  vector's pass/fail):** if a future load test wants to additionally assert
+  latency, it must state its own concrete threshold (e.g. "P99 booking
+  latency for `S2` does not exceed 1.5× its latency when `S1` is idle") in
+  that check's own definition — no such threshold is set by this document,
+  and this vector's correctness does not depend on one existing.
 - **Unacceptable outcomes:** either request failing due to contention with
-  the other; a measurable latency spike suggesting cross-slot blocking.
+  the other; the implementation's SQL containing a table-level lock or an
+  overly-broad `FOR UPDATE`.
 
 ### V8 — Database failure, before and after commit
 
@@ -297,6 +312,42 @@ explicit, not an oversight.
 - **Unacceptable outcomes:** a `patient_id`, key value, or exception message
   appearing in any log line emitted during conflict or replay handling.
 
+### V13 — Same key value, different actors, does not cross-replay
+
+- **Setup:** slot `S1` open. Actor `A1` (session resolves `X-Actor-Id:
+  A1`) successfully books it with key `K1`
+  (`docs/planning/W5-booking-idempotency-design.md` §1.5) — this is V1's
+  scenario, already committed. A **different** actor, `A2`, later sends a
+  request using the **identical** key value `K1` (not a guess in the
+  cryptographic sense — this vector assumes `A2` somehow has or reuses the
+  literal string `K1`, e.g. a buggy client library reusing a constant, or a
+  key deliberately observed/guessed) for a different booking (`patient_id:
+  P2, slot_id: S2`, chosen so this is not also a same-key-different-payload
+  case against `A1`'s row).
+- **Interleaving:** sequential — `A2`'s request happens strictly after
+  `A1`'s has committed.
+- **Request:** `POST /appointments` with `Idempotency-Key: K1`,
+  `X-Actor-Id: A2` (as the gateway would set it from `A2`'s own session —
+  never client-supplied), body targeting `S2`/`P2`.
+- **Expected HTTP result:** `201`, `status="confirmed"`, a **new**
+  `appointment_id` for `S2` — `A2`'s request is **not** treated as a replay
+  of `A1`'s `K1` claim, because the idempotency scope is
+  `(actor_id, operation, idempotency_key)` (§1 of the idempotency design),
+  not `(operation, idempotency_key)` alone. `A2` gets a fresh
+  `idempotency_keys` row scoped to `(A2, 'book_appointment', K1)` — a
+  distinct row from `A1`'s `(A1, 'book_appointment', K1)`, even though the
+  `idempotency_key` string is identical.
+- **Database assertions:** two separate `idempotency_keys` rows exist for
+  key value `K1` — one per actor; two separate confirmed `appointments`
+  rows exist, one for `S1` (patient `P1`) and one for `S2` (patient `P2`).
+- **Unacceptable outcomes:** `A2`'s request replays `A1`'s stored `201`
+  outcome (wrong `appointment_id`, wrong slot) instead of proceeding as its
+  own, independent booking — this is exactly the cross-actor collision the
+  reviewer that requested this vector was concerned about, and is precisely
+  what scoping by `actor_id` (not the key alone) exists to prevent; a
+  single shared `idempotency_keys` row keyed only on `idempotency_key`
+  would fail this vector.
+
 ## Retention expiry and later key reuse — not yet a testable vector
 
 `docs/planning/W5-booking-idempotency-design.md` §3.1 proposes a 24-hour
@@ -313,24 +364,28 @@ number here.
 Per `docs/planning/W5-RIV-175-problem-scope.md` §3.4, patient-to-actor
 authorization is a related but separate defect from RIV-175. No vector here
 tests "can actor `A1` book on behalf of `patient_id` they're not authorized
-for" — that is Week 4 authorization scope. The one authorization-adjacent
-property this design does own — that an idempotency key is scoped to the
-actor who created it (`docs/planning/W5-booking-idempotency-design.md` §1,
-scope row) so a different, unrelated actor guessing or observing a key
-cannot replay or inspect someone else's booking outcome through the
-idempotency mechanism itself — is worth a dedicated note for the handoff
-(`docs/planning/W5-booking-implementation-handoff.md` §3) as a boundary to
-test once real per-action authorization exists, but is not written as a
-numbered vector here because this repository has no per-action authorization
-today to test it against (`config/roles.yaml`'s single flat `staff` role) —
-writing the vector now would require fabricating an authorization model this
-fix does not introduce.
+for" — that is Week 4 authorization scope, and this repository has no
+per-action authorization today to test it against (`config/roles.yaml`'s
+single flat `staff` role); writing that vector now would require fabricating
+an authorization model this fix does not introduce.
+
+The one authorization-*adjacent* property this design does own — that an
+idempotency key is scoped to the actor who created it
+(`docs/planning/W5-booking-idempotency-design.md` §1, scope row) so a
+different, unrelated actor reusing a key value cannot replay or inspect
+someone else's booking outcome through the idempotency mechanism itself —
+**is** written as a numbered vector (V13, above), because unlike per-action
+patient authorization, testing it needs nothing beyond two already-logged-in
+actors, which the existing login flow already supports. Do not conflate the
+two: V13 proves the idempotency *scope* is correct; it proves nothing about
+whether either actor was allowed to book for the `patient_id` in their own
+request.
 
 ## Mapping to future test layers
 
 | Vector(s) | Future test layer |
 |---|---|
-| V1, V2, V3, V6, V9, V11 | Unit/API tests against `services/scheduling-service` with a real (test) Postgres — sequential, no concurrency harness needed. |
+| V1, V2, V3, V6, V9, V11, V13 | Unit/API tests against `services/scheduling-service` with a real (test) Postgres — sequential, no concurrency harness needed. |
 | V4, V5, V7 | Integration tests requiring a genuine concurrency harness (threads/processes + a barrier synchronizing both requests' arrival at the relevant transaction step) against a live Postgres — cannot be simulated with mocks, since the behavior under test is PostgreSQL's own lock/unique-index semantics. |
 | V8 | Integration tests with fault injection (killed connections/processes) — the hardest layer to automate reliably; may start as a documented manual procedure before a fully automated harness exists. |
 | V10 | Migration test — run against a database seeded from `db/seed/seed.sql` (or an equivalent fixture reproducing known duplicates), not a unit test. |

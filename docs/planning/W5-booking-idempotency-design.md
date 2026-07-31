@@ -19,9 +19,54 @@ migration safety. Read both before implementing either.
 |---|---|
 | Header name | `Idempotency-Key` |
 | Format | Opaque string, ASCII printable (0x20–0x7E), 1–255 bytes. The server does not require a specific format (e.g. UUID) beyond this — only length and charset are validated — but clients SHOULD generate a UUIDv4 per booking intent to get uniform, collision-resistant keys for free. |
-| Scope | `(actor_id, operation, idempotency_key)` — **not the key alone**. `actor_id` comes from the already-authenticated session (`services/gateway/app.py`'s `require_session`), never from the request body. `operation` is a fixed literal (e.g. `"book_appointment"`), reserved so a future second idempotent endpoint cannot collide with booking keys. This is what stops a different actor from using a guessed or observed key to replay or inspect someone else's booking (Security considerations, §5). |
+| Scope | `(actor_id, operation, idempotency_key)` — **not the key alone**. `actor_id` originates from the already-authenticated gateway session (`services/gateway/app.py`'s `require_session`, which resolves to a Redis-backed dict containing `username`/`role` — `services/gateway/security.py:52-59`), never from the request body. `operation` is a fixed literal (e.g. `"book_appointment"`), reserved so a future second idempotent endpoint cannot collide with booking keys. This is what stops a different actor from using a guessed or observed key to replay or inspect someone else's booking (Security considerations, §5) — **but only if `actor_id` actually reaches the transaction that claims the key, which runs in scheduling-service, not the gateway.** §1.5 below specifies exactly how it gets there; this is a genuinely new touchpoint, not something the existing gateway→scheduling-service call already does. |
 | Missing header | Request proceeds with **no** idempotency record — see §1.4. Not currently rejected; see §6, B2 for the planned transition to required. |
 | Malformed header (empty string, >255 bytes, non-printable bytes) | `422` — treated as invalid input, the same class of error as a `BookingRequest` field failing Pydantic validation today. |
+
+### 1.5 Actor identity: the missing link between authentication and the idempotency table
+
+The idempotency claim (`docs/planning/W5-booking-database-transaction-design.md`
+§2, Step 1) runs inside **scheduling-service**, which has no session or
+authentication mechanism of its own — it is an internal service the gateway
+calls directly, and (per `CLAUDE.md`'s "Known Risks / Debt") there is no
+authentication between the gateway and internal domain services today.
+`require_session` resolves `actor_id` at the **gateway**, but
+`services/gateway/app.py`'s `proxy_book` (lines 205-207) currently forwards only
+the JSON `payload` to scheduling-service via `_post(...)` — no actor
+identity crosses that boundary today, and neither does the
+`Idempotency-Key` header (§6). Specifying the header contract without also
+specifying how `actor_id` gets from the gateway's already-authenticated
+session into scheduling-service's `idempotency_keys.actor_id` column left no
+implementable source of truth for the scope this design depends on — a
+future implementer literally could not populate `actor_id` correctly from
+this document alone.
+
+**Design:** the gateway forwards a second, new internal-trust header,
+`X-Actor-Id`, set to `session["username"]` (the same field
+`services/gateway/app.py`'s existing `/me` endpoint already returns to
+clients at line 104 — a stable, already-used-elsewhere per-account
+identifier, not new PHI-adjacent surface). This is deliberately **not** the
+same mechanism as `_correlation_headers()`'s `X-Request-Id`
+(`services/gateway/app.py:248-253`), whose own comment explicitly states it
+is "never derived from the session" for a different, unrelated purpose
+(request tracing) — `X-Actor-Id` is a new, distinct header with a new,
+distinct purpose. Scheduling-service treats `X-Actor-Id` as authoritative
+because, in this repository's existing trust model, only the gateway is
+ever the caller (`services/gateway/app.py`'s `SERVICES` map is the only
+place scheduling-service's internal URL is used) — this design does not
+change or improve that trust model (`CLAUDE.md`'s "Known Risks / Debt"
+broader gap remains exactly as-is), it only relies on it for one already-
+authenticated field, the same way the rest of this design already relies on
+`require_session` having run before any of this logic starts.
+
+If `X-Actor-Id` is absent (a malformed or bypassed internal call — should
+not happen given the trust model above, but must degrade safely rather than
+silently misattributing the claim): treat the request as if no
+`Idempotency-Key` was supplied either (§1.4) — a missing actor identity
+means the idempotency scope cannot be correctly constructed, so this
+request gets no replay protection, but the database invariant
+(`docs/planning/W5-booking-database-transaction-design.md` §1) still
+applies regardless, exactly as for any other unkeyed request.
 
 ### 1.1 Same key, same payload (the replay case)
 
@@ -212,7 +257,11 @@ assumed.
   used for scoping comes from the already-validated session
   (`require_session`); the idempotency table is never queried with an
   unauthenticated actor value, so it cannot become an oracle an unauthenticated
-  caller can probe by guessing keys.
+  caller can probe by guessing keys. This property depends on `X-Actor-Id`
+  (§1.5) only ever being set by the gateway after `require_session` succeeds
+  — scheduling-service does not, and should not, independently re-validate
+  it, consistent with this repository's existing (documented, unchanged)
+  gateway-trusts-services-and-vice-versa model.
 - **No raw request bodies, headers, or database exception text are stored or
   logged.** `request_fingerprint` is a one-way hash; `response_body` stores
   only the minimal replay fields listed in §3, not the original request.
@@ -230,8 +279,8 @@ assumed.
 
 | Area | File(s) | What will need to change |
 |---|---|---|
-| Gateway header forwarding | `services/gateway/app.py` (`proxy_book`, `_post`) | `proxy_book` currently takes `payload: dict` with no access to request headers; it will need the incoming `Idempotency-Key` header and to forward it via `_post`'s existing (already-present, currently unused for this call) `headers` parameter (`services/gateway/app.py:256`). |
-| Scheduling endpoint / schema / booking path | `services/scheduling-service/app.py`, `schemas.py`, `book.py` | `create_appointment` needs to read the header (FastAPI `Header(...)`), compute the fingerprint, and run the new transaction (`docs/planning/W5-booking-database-transaction-design.md` §2) in place of `book()`'s current check-then-insert. `BookingRequest`/`BookingResponse` need no new body field — the key travels as a header, per convention (§1). |
+| Gateway header forwarding | `services/gateway/app.py` (`proxy_book`, `_post`) | `proxy_book` currently takes `payload: dict` with no access to request headers or the resolved `session`; it will need the incoming `Idempotency-Key` header AND a new `X-Actor-Id: session["username"]` header (§1.5), both forwarded via `_post`'s existing (already-present, currently unused for this call) `headers` parameter (`services/gateway/app.py:256`). |
+| Scheduling endpoint / schema / booking path | `services/scheduling-service/app.py`, `schemas.py`, `book.py` | `create_appointment` needs to read both headers (FastAPI `Header(...)`), compute the fingerprint, and run the new transaction (`docs/planning/W5-booking-database-transaction-design.md` §2) in place of `book()`'s current check-then-insert. `BookingRequest`/`BookingResponse` need no new body field — both the key and the actor identity travel as headers, per convention (§1, §1.5). |
 | Frontend key generation | `frontend/app/appointments/page.tsx` (`book()`) | Must generate one key per booking *intent* (one per "Book" click for a given slot) and **reuse the same key** across any client-side retry of that same intent — never mint a fresh key on retry, or the whole design is defeated at the source. |
 | Database schema / migration | `db/schema.sql`, a future `db/migrations/011_*.sql` (next available number after `010_pgvector_embeddings.sql`) | New `idempotency_keys` table (§3) and the partial unique index — full detail in `docs/planning/W5-booking-database-transaction-design.md`. |
 | Tests | `tests/` (new booking test module + concurrency harness) | Stage 3 (`docs/planning/W5-booking-test-vectors.md`) turns this design into concrete vectors; no test exists yet (`tests/README.md:26-27`). |

@@ -16,7 +16,7 @@ in it is scheduled or started by this document.**
 | `docs/planning/W5-booking-acceptance-criteria.md` | Twenty observable criteria (F1–F6, C1–C4, A1–A3, M1–M3, O1–O2, B1–B2) plus five recorded open business decisions. |
 | `docs/planning/W5-booking-idempotency-design.md` | The `Idempotency-Key` API contract, request fingerprint, `idempotency_keys` table, error mapping, retention default, future touchpoints. |
 | `docs/planning/W5-booking-database-transaction-design.md` | The partial unique index, the one-transaction/`SAVEPOINT` design, concurrency/locking analysis, migration mechanics, and a real duplicate-row count from this repo's own seed data. |
-| `docs/planning/W5-booking-test-vectors.md` | Twelve numbered vectors (V1–V12) covering every testable criterion, each with setup/interleaving/expected result/database assertion/unacceptable outcomes. |
+| `docs/planning/W5-booking-test-vectors.md` | Thirteen numbered vectors (V1–V13) covering every testable criterion, each with setup/interleaving/expected result/database assertion/unacceptable outcomes. |
 | This document | Sequencing, remaining touchpoints, and what still needs a decision. |
 
 ## 2. Future implementation sequence (small, independently reviewable steps)
@@ -36,20 +36,31 @@ before the next step adds more surface area.
    check-then-insert with the `SAVEPOINT`-based transaction
    (`docs/planning/W5-booking-database-transaction-design.md` §2); update
    `services/scheduling-service/app.py`'s `create_appointment` to read the
-   `Idempotency-Key` header (optional — F4), compute the fingerprint
-   (`docs/planning/W5-booking-idempotency-design.md` §2), and narrow the
-   existing broad `except Exception → 503`
+   `Idempotency-Key` header (optional — F4) **and** the new `X-Actor-Id`
+   header (required to correctly populate `idempotency_keys.actor_id` — see
+   step 3 and `docs/planning/W5-booking-idempotency-design.md` §1.5),
+   compute the fingerprint (`docs/planning/W5-booking-idempotency-design.md`
+   §2), and narrow the existing broad `except Exception → 503`
    (`services/scheduling-service/app.py:109-113`) so the two `409` paths
    (key misuse, slot conflict) are caught and mapped before it, not
-   swallowed by it. Testable against V1, V2, V3, V6, V9, V11 with a single
-   test-database connection — no concurrency harness needed yet.
+   swallowed by it. Testable against V1, V2, V3, V6, V9, V11, V13 with a
+   single test-database connection — no concurrency harness needed yet.
 3. **Gateway header forwarding.** `services/gateway/app.py`'s `proxy_book`
-   reads the incoming `Idempotency-Key` header and passes it to `_post`'s
+   currently takes `payload: dict` with no access to the incoming request's
+   headers or its already-resolved `session` — it needs both changed so it
+   can read the incoming `Idempotency-Key` header, derive a new
+   `X-Actor-Id: session["username"]` header, and forward both via `_post`'s
    existing (already-present, currently unused for this call) `headers`
    parameter (`services/gateway/app.py:256`;
-   `docs/planning/W5-booking-idempotency-design.md` §6). Small, mechanical,
-   low-risk — no new design decision, just wiring already-specified behavior
-   through an existing parameter.
+   `docs/planning/W5-booking-idempotency-design.md` §1.5, §6). This step
+   is what makes step 2's `idempotency_keys.actor_id` column populatable at
+   all — without it, scheduling-service has no source of truth for who the
+   actor is, since it has no session/authentication mechanism of its own.
+   Mechanical once specified, but not "no new design decision" — the
+   `X-Actor-Id` header itself, and the internal-trust assumption it rides
+   on, is a real design choice this step depends on, not just wiring an
+   already-fully-specified behavior through an existing parameter (a gap
+   this document did not originally flag clearly enough).
 4. **Frontend key generation.** `frontend/app/appointments/page.tsx`'s
    `book()` generates one key per booking intent and reuses it across
    retries of that same intent (`docs/planning/W5-booking-idempotency-design.md`
@@ -96,17 +107,18 @@ decision gates:
 
 ## 4. Boundaries this fix does not cross (restated so a future implementer doesn't over-scope)
 
-- **Authorization.** Idempotency-key scoping (`docs/planning/W5-booking-idempotency-design.md`
-  §1) prevents a different actor from replaying or inspecting *this
-  mechanism's* outcomes — it is not, and must not be described as, a fix for
-  who is allowed to book for which patient
+- **Authorization.** Idempotency-key scoping
+  (`docs/planning/W5-booking-idempotency-design.md` §1, §1.5) prevents a
+  different actor from replaying or inspecting *this mechanism's* outcomes —
+  verified by `docs/planning/W5-booking-test-vectors.md` V13, which needs
+  nothing beyond two already-logged-in actors — but this is not, and must
+  not be described as, a fix for who is allowed to book for which patient
   (`docs/planning/W5-RIV-175-problem-scope.md` §3.4). This repository has no
   per-action authorization today (`config/roles.yaml`'s single flat `staff`
-  role) to test an authorization boundary against; once one exists, a future
-  vector should verify that an actor cannot use a guessed/observed
-  `Idempotency-Key` belonging to a different, unrelated actor to learn that
-  actor's booking outcome — not written now, because the authorization model
-  it depends on doesn't exist yet.
+  role) to test *that* boundary against; once one exists, a future vector
+  should verify that an actor cannot book or view outcomes for a `patient_id`
+  they aren't authorized for — a different, still-unwritten vector from V13,
+  which only proves the idempotency scope itself is correct.
 - **The RIV-201 IDOR.** Entirely unrelated defect (cross-patient chart reads,
   `docs/analysis/RIV-201-patient-records-IDOR.md`); this fix does not touch
   it, and the existing `xfail` documenting it must not be flipped as a side
