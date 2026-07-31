@@ -456,8 +456,33 @@ def test_langgraph_runtime_degrades_safely_when_invoke_raises(monkeypatch):
     result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
 
     assert result.outcome == PatientViewOutcome.ESCALATED
-    assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
+    # invoke() failing is classified as NODE_FAILURE, not RUNTIME_UNAVAILABLE
+    # — see the module docstring's "Dependency/framework-failure policy":
+    # invoke() is where reads actually happen, so its failures must be able
+    # to report partial reads (proven by the dedicated test below), unlike
+    # import/construction/compile failures where zero reads are guaranteed.
+    assert ViewReason.NODE_FAILURE in result.reasons
     assert result.evidence_ids == []
+
+
+def test_langgraph_runtime_reports_partial_reads_when_a_node_fails_after_chart_read(monkeypatch):
+    _install_fake_langgraph(monkeypatch)
+    import libs.patient_view_agent.runtimes.langgraph_runtime as lgr
+
+    def _broken_validate_evidence(scope, chart, graph):
+        raise RuntimeError("simulated node failure")
+
+    monkeypatch.setattr(lgr, "validate_evidence", _broken_validate_evidence)
+
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.execution.specialists_run == ["chart_read", "graph_read"]
+    assert result.execution.reads == 4  # the chart + graph reads that DID happen
 
 
 # --------------------------------------------------------------------------- #

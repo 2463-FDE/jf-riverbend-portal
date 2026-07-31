@@ -77,6 +77,7 @@ _ESCALATE_REASONS = frozenset(
         ViewReason.TIMEOUT,
         ViewReason.COMPOSE_FELL_BACK,
         ViewReason.RUNTIME_UNAVAILABLE,
+        ViewReason.NODE_FAILURE,
     }
 )
 _REFUSE_REASONS = frozenset({ViewReason.CROSS_PATIENT_EVIDENCE, ViewReason.UNSUPPORTED_EVIDENCE})
@@ -84,6 +85,9 @@ _REFUSE_REASONS = frozenset({ViewReason.CROSS_PATIENT_EVIDENCE, ViewReason.UNSUP
 _SAFE_REFUSAL_SUMMARY = "This request could not be completed safely and has been refused. No chart content is shown."
 _SAFE_RUNTIME_UNAVAILABLE_SUMMARY = (
     "This view requires human review before use: the selected orchestration runtime is unavailable right now."
+)
+_SAFE_NODE_FAILURE_SUMMARY = (
+    "This view requires human review before use: an unexpected error interrupted this request after authorization."
 )
 _SAFE_ESCALATION_PREFIX = "This view requires human review before use: "
 
@@ -237,8 +241,18 @@ def runtime_unavailable_result(
     `build_runtime()` time — the dependency is only actually needed once a
     request tries to run — so this degrades to a safe ESCALATED result
     instead of raising, satisfying `PatientViewRuntime.run()`'s contract that
-    nothing downstream of authorization may raise. Zero reads have occurred
-    by construction: this only ever fires before any specialist runs.
+    nothing downstream of authorization may raise.
+
+    Callers MUST only use this for a failure that happens BEFORE any
+    specialist has run (e.g. the framework import, graph construction, or
+    `compile()`) — `specialists_run`/`tool_calls`/`reads` are hardcoded to
+    zero/empty here, by construction, not derived from anything. A failure
+    that happens AFTER one or more specialists already performed real reads
+    (e.g. `compiled.invoke()` failing partway through) must use
+    `node_failure_result()` instead, which reports the reads that actually
+    happened — using this function for that case would silently understate
+    completed chart/graph access in the audit trail.
+
     `error_type` is the exception's TYPE only (e.g. "ModuleNotFoundError"),
     never a message — this can otherwise be the one place free-text from an
     external library's exception could leak into a PHI-safe log."""
@@ -259,6 +273,54 @@ def runtime_unavailable_result(
             tool_calls=0,
             reads=0,
             truncated=False,
+            compose_attempts=0,
+            elapsed_seconds=elapsed_seconds,
+        ),
+    )
+
+
+def node_failure_result(
+    *,
+    correlation_id: str,
+    patient_id: int,
+    specialists_run: list[str],
+    chart_reads: int,
+    graph_reads: int,
+    chart_truncated: bool,
+    graph_truncated: bool,
+    error_type: str,
+    elapsed_seconds: float,
+) -> PatientViewResult:
+    """Shared by any runtime whose specialist/node execution itself raised
+    unexpectedly AFTER one or more specialists already completed real reads
+    — distinct from `runtime_unavailable_result()`, which is reserved for
+    failures BEFORE any specialist runs. Reports the specialists/reads that
+    actually happened rather than hardcoding zero, so audit/access
+    accounting never understates what was read just because a LATER step
+    failed. `tool_calls` counts the failed dispatch even though it is not
+    appended to `specialists_run` (it never completed), mirroring
+    `refused_result()`'s identical accounting. `error_type` is the
+    exception's TYPE only, never a message."""
+    log.error(
+        "patient_view node failure (correlation_id=%s, specialists_run=%s, error_type=%s)",
+        correlation_id,
+        specialists_run,
+        error_type,
+    )
+    return PatientViewResult(
+        outcome=PatientViewOutcome.ESCALATED,
+        summary=_SAFE_NODE_FAILURE_SUMMARY,
+        evidence_ids=[],
+        limitations=[],
+        escalation=True,
+        reasons=[ViewReason.NODE_FAILURE],
+        correlation_id=correlation_id,
+        patient_id=patient_id,
+        execution=ExecutionMetadata(
+            specialists_run=specialists_run,
+            tool_calls=len(specialists_run) + 1,
+            reads=chart_reads + graph_reads,
+            truncated=chart_truncated or graph_truncated,
             compose_attempts=0,
             elapsed_seconds=elapsed_seconds,
         ),

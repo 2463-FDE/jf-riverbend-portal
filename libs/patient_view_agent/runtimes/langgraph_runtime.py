@@ -53,14 +53,28 @@ Dependency/framework-failure policy (explicit, per review): missing
 framework-internal failure is **not** configuration-fatal at
 `build_runtime("langgraph")` selection time — this class has no `__init__`
 and touches nothing until a request actually runs `run()`. At request time,
-authorization still happens first (see above); everything from the
-`langgraph.graph` import through `compiled.invoke()` is wrapped in one
-`except Exception`, degrading to a safe ESCALATED `PatientViewResult`
-(`runtime.runtime_unavailable_result`, logging the exception TYPE only)
-rather than propagating — this is the same "never raise downstream of
-authorization" contract `PatientViewRuntime.run()` already documents for
-evidence/composer failures, now also covering the runtime's own framework
-plumbing. This is broader than `runtimes/custom.py`, which does NOT wrap its
+authorization still happens first (see above); every failure downstream of
+that degrades to a safe ESCALATED `PatientViewResult` rather than
+propagating — the same "never raise downstream of authorization" contract
+`PatientViewRuntime.run()` already documents for evidence/composer failures,
+now also covering the runtime's own framework plumbing. This is split into
+TWO separate nets, not one, because they have different accounting
+guarantees:
+
+- Import + graph construction + `compile()` — no node function has run yet,
+  so zero reads have occurred BY CONSTRUCTION. `runtime.runtime_unavailable_result`
+  hardcodes empty/zero metadata, which is correct here.
+- `compiled.invoke()` — this is where node functions actually run and
+  perform real reads, so a failure here (a node raising unexpectedly, or a
+  framework-internal error inside invoke's own dispatch) must report
+  whatever `specialists_run`/reads already completed via
+  `runtime.node_failure_result`, not hardcoded zeros — an earlier version of
+  this fix used ONE net covering both, which could report "zero reads" after
+  `chart_node` had already performed a real one. `chart`/`graph_result` are
+  captured in a `completed` dict by closure (not read from graph state,
+  which invoke() never returns on failure) for exactly this reason.
+
+Both nets are broader than `runtimes/custom.py`, which does NOT wrap its
 specialist calls this defensively and would crash on a genuinely unexpected
 bug (e.g. a broken custom repository) — a deliberate asymmetry: custom is
 the trusted production default, where a bug should surface loudly; langgraph
@@ -71,7 +85,9 @@ considered and rejected: the factory is a plain constructor with no request
 context, so it cannot distinguish "about to serve real traffic" from
 "constructed once at import time" — degrading per-request, after
 authorization, is the point where a human-facing outcome (safe escalation,
-not a 500) is actually possible.
+not a 500) is actually possible. Only `error_type` is logged in either net,
+never a message — this is the one place an external library's own exception
+text could otherwise leak into a PHI-safe log.
 """
 from __future__ import annotations
 
@@ -86,7 +102,14 @@ from ..composer import compose as _default_compose
 from ..contracts import AuthorizationRequest, GraphLimits
 from ..graph import PatientGraphReader
 from ..repository import ChartRepositoryPort
-from ..runtime import PatientViewResult, finalize_result, initial_reasons, refused_result, runtime_unavailable_result
+from ..runtime import (
+    PatientViewResult,
+    finalize_result,
+    initial_reasons,
+    node_failure_result,
+    refused_result,
+    runtime_unavailable_result,
+)
 from ..specialists import (
     CHART_READ_TOOL,
     EVIDENCE_VALIDATE_TOOL,
@@ -119,16 +142,26 @@ class LangGraphPatientViewRuntime:
         scope = authorizer.authorize(request)  # raises AuthorizationDenied; zero reads before this line, no graph built
 
         specialists_run: list[str] = []
+        # Mirrors specialists_run: captured by closure, not read from graph
+        # state, so it survives even if a LATER node raises and invoke()
+        # never returns any state at all — this is what lets the failure
+        # path below report reads that actually happened instead of
+        # silently claiming zero.
+        completed: dict = {}
 
         def chart_node(state):
-            state["chart"] = run_specialist(
+            chart = run_specialist(
                 CHART_READ_TOOL, repository.load_chart, scope.patient_id, correlation_id=scope.correlation_id
             )
+            completed["chart"] = chart
+            state["chart"] = chart
             specialists_run.append(CHART_READ_TOOL)
             return state
 
         def graph_node(state):
-            state["graph"] = run_specialist(GRAPH_READ_TOOL, PatientGraphReader(scope, repository, limits=limits).build)
+            graph_result = run_specialist(GRAPH_READ_TOOL, PatientGraphReader(scope, repository, limits=limits).build)
+            completed["graph"] = graph_result
+            state["graph"] = graph_result
             specialists_run.append(GRAPH_READ_TOOL)
             return state
 
@@ -165,23 +198,15 @@ class LangGraphPatientViewRuntime:
             state["elapsed_seconds"] = clock() - start
             return state
 
-        # Everything from the (deliberately post-authorization — see
-        # "Dependency-absence policy" above) langgraph import through
-        # invoke() is wrapped in one net: an authorized request must not
-        # crash either, whether the failure is a missing optional dependency,
-        # a version/API-shape mismatch in an installed one, or a framework
-        # internal error — none of that is the caller's fault, and the
-        # PatientViewRuntime contract promises no raise downstream of
-        # authorization. This is a deliberate asymmetry with
-        # runtimes/custom.py, which does NOT wrap its chart/graph specialist
-        # calls this broadly and would crash on a genuinely unexpected bug
-        # (e.g. a broken custom repository): custom is the trusted
-        # production default, where a bug should surface loudly; langgraph is
-        # the optional, experimental comparison spike, where erring toward
-        # "never a 500" is the more defensible choice while it is still being
-        # evaluated. Only `error_type` is logged, never a message or any
-        # state — this is the one place an external library's own exception
-        # text could otherwise leak into a PHI-safe log.
+        # Import + graph construction + compile are wrapped in their own net,
+        # separate from invoke() below: nothing here ever calls a node
+        # function, so zero reads can have occurred by construction —
+        # runtime_unavailable_result()'s hardcoded zero/empty metadata is
+        # exactly correct for this failure class (missing optional
+        # dependency, a version/API-shape mismatch, a compile-time framework
+        # error). Only `error_type` is logged, never a message — this is the
+        # one place an external library's own exception text could otherwise
+        # leak into a PHI-safe log.
         try:
             from langgraph.graph import END, StateGraph
 
@@ -198,11 +223,42 @@ class LangGraphPatientViewRuntime:
             graph.add_edge("compose", "final_validate")
             graph.add_edge("final_validate", END)
             compiled = graph.compile(checkpointer=None)  # no PHI at rest — see module docstring
-            final_state = compiled.invoke({}, config={"recursion_limit": _RECURSION_LIMIT})
         except Exception as exc:
             return runtime_unavailable_result(
                 correlation_id=scope.correlation_id,
                 patient_id=scope.patient_id,
+                error_type=type(exc).__name__,
+                elapsed_seconds=clock() - start,
+            )
+
+        # invoke() gets its OWN, separate net: this is where node functions
+        # actually run and perform real reads, so a failure here must report
+        # whatever specialists/reads `completed` already captured — reusing
+        # runtime_unavailable_result()'s hardcoded-zero shape here would
+        # silently understate completed chart/graph access in the audit
+        # trail (a real review finding: this exact class of bug shipped
+        # once already, when this net was wider and covered invoke() too).
+        # An authorized request must still not crash either way — this is a
+        # deliberate asymmetry with runtimes/custom.py, which does NOT wrap
+        # its chart/graph specialist calls this broadly and would crash on a
+        # genuinely unexpected bug (e.g. a broken custom repository): custom
+        # is the trusted production default, where a bug should surface
+        # loudly; langgraph is the optional, experimental comparison spike,
+        # where erring toward "never a 500" is the more defensible choice
+        # while it is still being evaluated.
+        try:
+            final_state = compiled.invoke({}, config={"recursion_limit": _RECURSION_LIMIT})
+        except Exception as exc:
+            chart = completed.get("chart")
+            graph_result = completed.get("graph")
+            return node_failure_result(
+                correlation_id=scope.correlation_id,
+                patient_id=scope.patient_id,
+                specialists_run=specialists_run,
+                chart_reads=chart.reads if chart else 0,
+                graph_reads=graph_result.reads if graph_result else 0,
+                chart_truncated=chart.truncated if chart else False,
+                graph_truncated=graph_result.truncated if graph_result else False,
                 error_type=type(exc).__name__,
                 elapsed_seconds=clock() - start,
             )
