@@ -39,25 +39,39 @@ requires them installed; see requirements-langgraph.txt (optional,
 uninstalled by default, never in requirements-dev.txt or a service).
 tests/test_patient_view_runtime_contract.py fakes both via `sys.modules`,
 mirroring libs/eligibility_agent/runtimes/langchain_runtime.py's established
-pattern; it validates this module's own control flow against a documented
-shape of LangGraph's API, not compatibility with the real library — this has
-never been run against a real langgraph install, by design.
+pattern, for the suite that runs with no install required; it validates
+this module's own control flow against a documented shape of LangGraph's
+API. Real compatibility against the exact pins in requirements-langgraph.txt
+(`langgraph==0.2.62`, `langchain-core==0.3.29`) HAS been verified by hand —
+the successful, refused, and denied paths all run correctly against the
+real installed package, matching the faked-suite's behavior — and is
+covered going forward by `tests/test_patient_view_langgraph_smoke.py`,
+which skips (not fails) when the optional package isn't installed.
 
-Dependency-absence policy (explicit, per review): missing `langgraph` is
-**not** configuration-fatal at `build_runtime("langgraph")` selection
-time — this class has no `__init__` and touches nothing until a request
-actually runs `run()`. At request time, authorization still happens first
-(see above); if the `langgraph.graph` import itself then fails, that failure
-is caught and degrades to a safe ESCALATED `PatientViewResult`
-(`runtime.runtime_unavailable_result`) rather than propagating — this is the
-same "never raise downstream of authorization" contract
-`PatientViewRuntime.run()` already documents for evidence/composer
-failures, now also covering the runtime's own optional dependency. The
-alternative (fail loudly at selection time) was considered and rejected:
-`build_runtime()` is a plain factory with no request context, so it cannot
-distinguish "about to serve real traffic" from "constructed once at import
-time" — degrading per-request, after authorization, is the point where a
-human-facing outcome (safe escalation, not a 500) is actually possible.
+Dependency/framework-failure policy (explicit, per review): missing
+`langgraph`, a version/API-shape mismatch in an installed one, or any other
+framework-internal failure is **not** configuration-fatal at
+`build_runtime("langgraph")` selection time — this class has no `__init__`
+and touches nothing until a request actually runs `run()`. At request time,
+authorization still happens first (see above); everything from the
+`langgraph.graph` import through `compiled.invoke()` is wrapped in one
+`except Exception`, degrading to a safe ESCALATED `PatientViewResult`
+(`runtime.runtime_unavailable_result`, logging the exception TYPE only)
+rather than propagating — this is the same "never raise downstream of
+authorization" contract `PatientViewRuntime.run()` already documents for
+evidence/composer failures, now also covering the runtime's own framework
+plumbing. This is broader than `runtimes/custom.py`, which does NOT wrap its
+specialist calls this defensively and would crash on a genuinely unexpected
+bug (e.g. a broken custom repository) — a deliberate asymmetry: custom is
+the trusted production default, where a bug should surface loudly; langgraph
+is the optional, experimental comparison spike, where erring toward "never a
+500" is the more defensible choice while it is still being evaluated.
+The alternative (fail loudly at `build_runtime()` selection time) was
+considered and rejected: the factory is a plain constructor with no request
+context, so it cannot distinguish "about to serve real traffic" from
+"constructed once at import time" — degrading per-request, after
+authorization, is the point where a human-facing outcome (safe escalation,
+not a 500) is actually possible.
 """
 from __future__ import annotations
 
@@ -103,29 +117,6 @@ class LangGraphPatientViewRuntime:
     ) -> PatientViewResult:
         start = clock()
         scope = authorizer.authorize(request)  # raises AuthorizationDenied; zero reads before this line, no graph built
-
-        # Deliberately imported AFTER authorization, not just lazily inside
-        # run(): LangGraph is optional and uninstalled by default, so a
-        # denied request must raise AuthorizationDenied, never
-        # ModuleNotFoundError. Importing before the authorize() call would
-        # turn every denial into a dependency crash on any installation that
-        # hasn't opted into requirements-langgraph.txt — silently losing the
-        # deny-first guarantee this runtime's docstring promises.
-        #
-        # But an AUTHORIZED request must not crash either: if the optional
-        # dependency is missing, that is not this caller's fault, and the
-        # PatientViewRuntime contract promises no raise downstream of
-        # authorization. Degrade to a safe ESCALATED result instead — see
-        # this module's docstring ("Dependency-absence policy").
-        try:
-            from langgraph.graph import END, StateGraph
-        except ImportError as exc:
-            return runtime_unavailable_result(
-                correlation_id=scope.correlation_id,
-                patient_id=scope.patient_id,
-                error_type=type(exc).__name__,
-                elapsed_seconds=clock() - start,
-            )
 
         specialists_run: list[str] = []
 
@@ -174,21 +165,47 @@ class LangGraphPatientViewRuntime:
             state["elapsed_seconds"] = clock() - start
             return state
 
-        graph = StateGraph(dict)
-        graph.add_node("chart", chart_node)
-        graph.add_node("graph_read", graph_node)
-        graph.add_node("evidence", evidence_node)
-        graph.add_node("compose", compose_node)
-        graph.add_node("final_validate", final_validate_node)
-        graph.set_entry_point("chart")
-        graph.add_edge("chart", "graph_read")
-        graph.add_edge("graph_read", "evidence")
-        graph.add_conditional_edges("evidence", route_after_evidence, {"compose": "compose", "end": END})
-        graph.add_edge("compose", "final_validate")
-        graph.add_edge("final_validate", END)
-        compiled = graph.compile(checkpointer=None)  # no PHI at rest — see module docstring
+        # Everything from the (deliberately post-authorization — see
+        # "Dependency-absence policy" above) langgraph import through
+        # invoke() is wrapped in one net: an authorized request must not
+        # crash either, whether the failure is a missing optional dependency,
+        # a version/API-shape mismatch in an installed one, or a framework
+        # internal error — none of that is the caller's fault, and the
+        # PatientViewRuntime contract promises no raise downstream of
+        # authorization. This is a deliberate asymmetry with
+        # runtimes/custom.py, which does NOT wrap its chart/graph specialist
+        # calls this broadly and would crash on a genuinely unexpected bug
+        # (e.g. a broken custom repository): custom is the trusted
+        # production default, where a bug should surface loudly; langgraph is
+        # the optional, experimental comparison spike, where erring toward
+        # "never a 500" is the more defensible choice while it is still being
+        # evaluated. Only `error_type` is logged, never a message or any
+        # state — this is the one place an external library's own exception
+        # text could otherwise leak into a PHI-safe log.
+        try:
+            from langgraph.graph import END, StateGraph
 
-        final_state = compiled.invoke({}, config={"recursion_limit": _RECURSION_LIMIT})
+            graph = StateGraph(dict)
+            graph.add_node("chart", chart_node)
+            graph.add_node("graph_read", graph_node)
+            graph.add_node("evidence", evidence_node)
+            graph.add_node("compose", compose_node)
+            graph.add_node("final_validate", final_validate_node)
+            graph.set_entry_point("chart")
+            graph.add_edge("chart", "graph_read")
+            graph.add_edge("graph_read", "evidence")
+            graph.add_conditional_edges("evidence", route_after_evidence, {"compose": "compose", "end": END})
+            graph.add_edge("compose", "final_validate")
+            graph.add_edge("final_validate", END)
+            compiled = graph.compile(checkpointer=None)  # no PHI at rest — see module docstring
+            final_state = compiled.invoke({}, config={"recursion_limit": _RECURSION_LIMIT})
+        except Exception as exc:
+            return runtime_unavailable_result(
+                correlation_id=scope.correlation_id,
+                patient_id=scope.patient_id,
+                error_type=type(exc).__name__,
+                elapsed_seconds=clock() - start,
+            )
 
         chart = final_state["chart"]
         graph_result = final_state["graph"]

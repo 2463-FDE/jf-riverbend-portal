@@ -370,6 +370,96 @@ def test_langgraph_runtime_degrades_safely_for_an_authorized_request_when_langgr
     assert "langgraph" not in sys.modules
 
 
+def _install_fake_langgraph_with_broken_compile(monkeypatch):
+    class _BrokenStateGraph:
+        def __init__(self, schema):
+            pass
+
+        def add_node(self, name, fn):
+            pass
+
+        def set_entry_point(self, name):
+            pass
+
+        def add_edge(self, source, target):
+            pass
+
+        def add_conditional_edges(self, source, router, mapping):
+            pass
+
+        def compile(self, checkpointer=None):
+            raise RuntimeError("simulated langgraph compile failure")
+
+    fake_graph_mod = types.ModuleType("langgraph.graph")
+    fake_graph_mod.StateGraph = _BrokenStateGraph
+    fake_graph_mod.END = object()
+    fake_langgraph_mod = types.ModuleType("langgraph")
+    monkeypatch.setitem(sys.modules, "langgraph", fake_langgraph_mod)
+    monkeypatch.setitem(sys.modules, "langgraph.graph", fake_graph_mod)
+
+
+def _install_fake_langgraph_with_broken_invoke(monkeypatch):
+    class _BrokenCompiledGraph:
+        def invoke(self, state, config=None):
+            raise RuntimeError("simulated langgraph invoke failure")
+
+    class _StateGraphThatCompilesToABrokenGraph:
+        def __init__(self, schema):
+            pass
+
+        def add_node(self, name, fn):
+            pass
+
+        def set_entry_point(self, name):
+            pass
+
+        def add_edge(self, source, target):
+            pass
+
+        def add_conditional_edges(self, source, router, mapping):
+            pass
+
+        def compile(self, checkpointer=None):
+            return _BrokenCompiledGraph()
+
+    fake_graph_mod = types.ModuleType("langgraph.graph")
+    fake_graph_mod.StateGraph = _StateGraphThatCompilesToABrokenGraph
+    fake_graph_mod.END = object()
+    fake_langgraph_mod = types.ModuleType("langgraph")
+    monkeypatch.setitem(sys.modules, "langgraph", fake_langgraph_mod)
+    monkeypatch.setitem(sys.modules, "langgraph.graph", fake_graph_mod)
+
+
+def test_langgraph_runtime_degrades_safely_when_compile_raises(monkeypatch):
+    # Regression test for a follow-up review finding: the safe-degradation
+    # path originally only covered the import failing. Once StateGraph
+    # imports successfully, graph construction/compile()/invoke() can still
+    # raise — from a version mismatch or a framework-internal error — and
+    # that must degrade the same way, not escape as an uncaught exception
+    # for an authorized request.
+    _install_fake_langgraph_with_broken_compile(monkeypatch)
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
+    assert result.evidence_ids == []
+
+
+def test_langgraph_runtime_degrades_safely_when_invoke_raises(monkeypatch):
+    _install_fake_langgraph_with_broken_invoke(monkeypatch)
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
+    assert result.evidence_ids == []
+
+
 # --------------------------------------------------------------------------- #
 # Factory: fail-closed, config-only selection
 # --------------------------------------------------------------------------- #
