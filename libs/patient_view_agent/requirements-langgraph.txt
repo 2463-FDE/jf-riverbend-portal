@@ -1,0 +1,24 @@
+# Optional LangGraph comparison-spike runtime (PATIENT_VIEW_RUNTIME=langgraph)
+# — a NEW dependency, deliberately NOT in the root requirements-dev.txt and
+# NOT in any service's own requirements.txt (nothing is wired into a running
+# service; this deliverable adds no HTTP route — see
+# docs/analysis/W5-orchestration-framework-evaluation.md). Only a caller that
+# actually selects this runtime needs it installed; every import in
+# runtimes/langgraph_runtime.py is lazy for exactly that reason.
+#
+# No checkpointer package is pinned here (unlike
+# libs/eligibility_agent/requirements-langchain.txt's langgraph-checkpoint-redis):
+# this runtime's compiled graph deliberately has no checkpointer at all — see
+# runtimes/langgraph_runtime.py's module docstring — so there is nothing for
+# one to back. No langchain-aws either: composer.py's model call goes through
+# libs/llm_client directly, not a LangChain chat model, so no LangGraph
+# message/tool-calling types are used anywhere in this runtime.
+#
+# Same pins already verified to resolve on PyPI for
+# libs/eligibility_agent/requirements-langchain.txt; reused here rather than
+# re-verifying fresh ones. Not installed or run against real code in this
+# environment — that's by design (see the module docstring's disclosed
+# caveat), so cross-package compatibility is unverified, same caveat as that
+# file.
+langchain-core==0.3.29
+langgraph==0.2.62

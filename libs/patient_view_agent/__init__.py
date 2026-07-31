@@ -35,7 +35,14 @@ from .contracts import (
 )
 from .graph import CrossPatientEvidenceError, build_patient_graph
 from .repository import ChartRepositoryPort, SeededChartRepository, seed_derived_sample
-from .runtime import ExecutionMetadata, PatientViewOutcome, PatientViewResult, run_patient_view
+from .runtime import (
+    ExecutionMetadata,
+    PatientViewOutcome,
+    PatientViewResult,
+    PatientViewRuntime,
+    build_runtime,
+    run_patient_view,
+)
 from .specialists import EvidenceIntegrityError, SpecialistError, ViewReason
 
 # `build_patient_graph()` is the single public retrieval entrypoint: it takes an
@@ -80,4 +87,7 @@ __all__ = [
     "ExecutionMetadata",
     "PatientViewResult",
     "run_patient_view",
+    # Week 5 — swappable runtime contract (custom is the default and rollback)
+    "PatientViewRuntime",
+    "build_runtime",
 ]
