@@ -289,19 +289,23 @@ class LangGraphPatientViewRuntime:
         # silently understate completed chart/graph access in the audit
         # trail (a real review finding: this exact class of bug shipped
         # once already, when this net was wider and covered invoke() too).
-        # An authorized request must still not crash either way — this is a
-        # deliberate asymmetry with runtimes/custom.py, which does NOT wrap
-        # its chart/graph specialist calls this broadly and would crash on a
-        # genuinely unexpected bug (e.g. a broken custom repository): custom
-        # is the trusted production default, where a bug should surface
-        # loudly; langgraph is the optional, experimental comparison spike,
-        # where erring toward "never a 500" is the more defensible choice
-        # while it is still being evaluated.
+        # An authorized request must still not crash either way, matching
+        # runtimes/custom.py's identical contract.
         try:
             final_state = compiled.invoke({}, config={"recursion_limit": _RECURSION_LIMIT})
         except Exception as exc:
             chart = completed.get("chart")
             graph_result = completed.get("graph")
+            # `failed_dispatch`: true only while an allowlisted specialist's
+            # OWN node (chart/graph/evidence, beyond their two specifically-
+            # handled exception types) is what raised — false once all
+            # three have already appended themselves to `specialists_run`
+            # and the failure is therefore in compose_node/final_validate_node
+            # instead, which were never counted as a tool_call on the
+            # successful path either (a real review finding: reusing the
+            # dispatch-failure accounting here fabricated a phantom 4th
+            # tool call for compose_node/final_validate_node failures).
+            failed_dispatch = len(specialists_run) < 3
             return node_failure_result(
                 correlation_id=scope.correlation_id,
                 patient_id=scope.patient_id,
@@ -312,6 +316,7 @@ class LangGraphPatientViewRuntime:
                 graph_truncated=graph_result.truncated if graph_result else False,
                 error_type=type(exc).__name__,
                 elapsed_seconds=clock() - start,
+                failed_dispatch=failed_dispatch,
             )
 
         chart = final_state["chart"]

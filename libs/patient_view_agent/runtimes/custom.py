@@ -19,16 +19,27 @@ per `PatientViewRuntime.run()`'s contract that nothing downstream of
 authorization may raise. This mirrors `runtimes/langgraph_runtime.py`'s
 identical handling in `graph_node`.
 
-The whole authorize->chart->graph->evidence->compose->finalize sequence is
-also wrapped in one outer `except Exception`, below the two specific
-exception types above, degrading to `runtime.node_failure_result` for any
-OTHER unexpected failure (a repository error, an unexpected composer/client
-exception, or any other genuinely unforeseen bug) — the SAME contract
+The chart->graph->evidence dispatch sequence and the compose->finalize
+sequence each get their OWN outer `except Exception`, below the two
+specific exception types above, both degrading to
+`runtime.node_failure_result` for any OTHER unexpected failure (a
+repository error, an unexpected composer/client exception, or any other
+genuinely unforeseen bug) — the SAME contract
 `runtimes/langgraph_runtime.py`'s `compiled.invoke()` catch-all already
 enforces. `chart`/`graph` are read back from plain locals (this runtime is
 sequential, not graph-based, so there's no `completed` closure dict to
 mirror) so a failure after one or both specialists already completed still
 reports the real reads that happened, never a fabricated zero.
+
+The two nets are split, not one, because `node_failure_result`'s
+`tool_calls` accounting differs by which net failed: Net 1 (dispatch) had
+an allowlisted specialist call in flight that never got to append itself to
+`specialists_run`, so `failed_dispatch=True` counts it. Net 2
+(compose/finalize) runs only after all three specialists already
+succeeded, so a failure there is never a specialist dispatch —
+`failed_dispatch=False` reports `tool_calls=len(specialists_run)` (3, not a
+fabricated 4), matching how compose was never counted as a tool_call on the
+successful path either.
 """
 from __future__ import annotations
 
@@ -83,6 +94,12 @@ class CustomPatientViewRuntime:
         chart = None
         graph = None
 
+        # Net 1: chart/graph/evidence specialist dispatch. Anything that
+        # reaches the outer `except Exception` here happened WHILE an
+        # allowlisted specialist dispatch was in flight and never got to
+        # append itself to specialists_run — `failed_dispatch=True` below
+        # counts that attempt in tool_calls, matching refused_result()'s
+        # identical accounting for the two specific exception types.
         try:
             chart = run_specialist(
                 CHART_READ_TOOL, repository.load_chart, scope.patient_id, correlation_id=scope.correlation_id
@@ -130,9 +147,37 @@ class CustomPatientViewRuntime:
                     elapsed_seconds=clock() - start,
                 )
             specialists_run.append(EVIDENCE_VALIDATE_TOOL)
+        except Exception as exc:
+            # Catches anything NOT already specifically classified above
+            # (CrossPatientEvidenceError/EvidenceIntegrityError both `return`
+            # before reaching here): a repository error, or any other
+            # genuinely unforeseen bug during chart/graph/evidence dispatch.
+            # `chart`/`graph` are read back from the locals above —
+            # whichever specialists actually completed before the failure —
+            # so this reports real partial reads, never a fabricated zero.
+            return node_failure_result(
+                correlation_id=scope.correlation_id,
+                patient_id=scope.patient_id,
+                specialists_run=specialists_run,
+                chart_reads=chart.reads if chart else 0,
+                graph_reads=graph.reads if graph else 0,
+                chart_truncated=chart.truncated if chart else False,
+                graph_truncated=graph.truncated if graph else False,
+                error_type=type(exc).__name__,
+                elapsed_seconds=clock() - start,
+                failed_dispatch=True,
+            )
 
-            reasons: list[ViewReason] = initial_reasons(request, evidence)
-
+        # Net 2: compose + finalize, AFTER all three specialists already
+        # succeeded. A failure here is NOT a specialist dispatch — composing
+        # was never counted as a tool_call on the successful path either
+        # (finalize_result()'s tool_calls=len(specialists_run), no +1) — so
+        # `failed_dispatch=False` here, unlike Net 1. This is the specific
+        # gap a review caught: reusing Net 1's accounting for this net would
+        # report a phantom 4th tool call (len(specialists_run)+1) when only
+        # 3 dispatches ever ran.
+        reasons: list[ViewReason] = initial_reasons(request, evidence)
+        try:
             composed, compose_attempts, used_fallback = compose_fn(scope, evidence, llm_client=llm_client)
             if used_fallback:
                 reasons.append(ViewReason.COMPOSE_FELL_BACK)
@@ -153,29 +198,20 @@ class CustomPatientViewRuntime:
                 max_seconds=max_seconds,
             )
         except Exception as exc:
-            # Catches anything NOT already specifically classified above
-            # (CrossPatientEvidenceError/EvidenceIntegrityError both `return`
-            # before reaching here): a repository error, an unexpected
-            # composer/client failure, or any other genuinely unforeseen bug
-            # after authorization. `PatientViewRuntime.run()`'s contract
-            # promises nothing downstream of authorization may raise — this
-            # runtime previously violated that promise for anything besides
-            # the two specific exception types above (a real review
-            # finding: an authorized request hitting e.g. a repository
-            # error could 500 instead of degrading safely, while
-            # runtimes/langgraph_runtime.py already handled the equivalent
-            # case). `chart`/`graph` are read back from the locals above —
-            # whichever specialists actually completed before the failure —
-            # so this degrades exactly like langgraph's `node_failure_result`
-            # path: reporting real partial reads, never fabricating zero.
+            # compose_fn is an arbitrary injectable callable; if it raises
+            # instead of returning its (composed, attempts, used_fallback)
+            # tuple, there is no channel to recover how many attempts it
+            # made — compose_attempts stays at node_failure_result()'s
+            # default of 0 (unknown, not a claim that zero attempts ran).
             return node_failure_result(
                 correlation_id=scope.correlation_id,
                 patient_id=scope.patient_id,
                 specialists_run=specialists_run,
-                chart_reads=chart.reads if chart else 0,
-                graph_reads=graph.reads if graph else 0,
-                chart_truncated=chart.truncated if chart else False,
-                graph_truncated=graph.truncated if graph else False,
+                chart_reads=chart.reads,
+                graph_reads=graph.reads,
+                chart_truncated=chart.truncated,
+                graph_truncated=graph.truncated,
                 error_type=type(exc).__name__,
                 elapsed_seconds=clock() - start,
+                failed_dispatch=False,
             )

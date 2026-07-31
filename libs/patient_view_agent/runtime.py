@@ -290,6 +290,8 @@ def node_failure_result(
     graph_truncated: bool,
     error_type: str,
     elapsed_seconds: float,
+    failed_dispatch: bool,
+    compose_attempts: int = 0,
 ) -> PatientViewResult:
     """Shared by any runtime whose specialist/node execution itself raised
     unexpectedly AFTER one or more specialists already completed real reads
@@ -297,10 +299,28 @@ def node_failure_result(
     failures BEFORE any specialist runs. Reports the specialists/reads that
     actually happened rather than hardcoding zero, so audit/access
     accounting never understates what was read just because a LATER step
-    failed. `tool_calls` counts the failed dispatch even though it is not
-    appended to `specialists_run` (it never completed), mirroring
-    `refused_result()`'s identical accounting. `error_type` is the
-    exception's TYPE only, never a message."""
+    failed. `error_type` is the exception's TYPE only, never a message.
+
+    `failed_dispatch` MUST be true only when the failure itself was an
+    in-flight, allowlisted specialist dispatch (chart_read/graph_read/
+    evidence_validate) that never got to append itself to `specialists_run`
+    — in that case `tool_calls` counts it anyway (`len(specialists_run) + 1`),
+    mirroring `refused_result()`'s identical accounting. It MUST be false
+    for a failure downstream of a successful evidence validation — e.g.
+    `compose_fn`/`finalize_result` raising — because composing was never
+    counted as a tool_call on the successful path either
+    (`finalize_result()`'s `tool_calls=len(specialists_run)`, no +1); a
+    caller that always passed `failed_dispatch=True` here previously
+    fabricated a phantom tool call in that scenario (a real review finding:
+    all three specialists succeeding, then compose raising, reported
+    `tool_calls=4` when only 3 dispatches ever happened).
+
+    `compose_attempts` defaults to 0 (unknown), not fabricated: an arbitrary
+    `compose_fn` that raises instead of returning its `(composed, attempts,
+    used_fallback)` tuple gives the caller no channel to recover how many
+    attempts it made before failing — 0 here means "not confirmed," the
+    same honest-zero convention used elsewhere in this module, not a claim
+    that zero attempts were made."""
     log.error(
         "patient_view node failure (correlation_id=%s, specialists_run=%s, error_type=%s)",
         correlation_id,
@@ -318,10 +338,10 @@ def node_failure_result(
         patient_id=patient_id,
         execution=ExecutionMetadata(
             specialists_run=specialists_run,
-            tool_calls=len(specialists_run) + 1,
+            tool_calls=len(specialists_run) + 1 if failed_dispatch else len(specialists_run),
             reads=chart_reads + graph_reads,
             truncated=chart_truncated or graph_truncated,
-            compose_attempts=0,
+            compose_attempts=compose_attempts,
             elapsed_seconds=elapsed_seconds,
         ),
     )

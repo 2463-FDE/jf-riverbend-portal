@@ -251,6 +251,29 @@ def test_unexpected_repository_failure_after_chart_read_degrades_safely_with_par
     assert result.execution.reads == 2
 
 
+def _broken_compose_fn(scope, evidence, llm_client=None):
+    raise RuntimeError("simulated composer failure")
+
+
+def test_compose_failure_after_all_specialists_succeed_does_not_report_a_phantom_tool_call(runtime_name):
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = runtime(runtime_name).run(
+        req(patient=1042), authorizer=authorizer, repository=repo, compose_fn=_broken_compose_fn
+    )
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.execution.specialists_run == ["chart_read", "graph_read", "evidence_validate"]
+    # Exactly 3 tool calls — chart_read, graph_read, evidence_validate — all
+    # of which actually completed. compose_fn raising is NOT a 4th
+    # specialist dispatch; reporting tool_calls=4 here would be a phantom
+    # call that never happened (the exact bug this test guards against).
+    assert result.execution.tool_calls == 3
+    assert result.execution.reads == 4
+
+
 def test_denied_request_performs_zero_reads(runtime_name):
     repo = fresh_repo()
     authorizer = make_authorizer({"clinician": {1042}})
