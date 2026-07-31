@@ -65,6 +65,12 @@ Two correctness properties this module holds itself to, per PR #14 review
   including on patient-scoped reads if that stale record carried the
   requested patient_id. Both InMemoryCosineStore and PgVectorStore had this
   bug — it's in the shared contract, not one backend's quirk.
+- A failed index() must roll back before propagating: without it, psycopg2
+  leaves the transaction "aborted" after any failed statement, so every
+  later call on that connection (index() again, or retrieve_top_k()) keeps
+  failing until something else rolls it back — turning one transient DB
+  error into a lasting outage for that store instance rather than something
+  a caller can retry.
 """
 import hashlib
 import os
@@ -247,42 +253,52 @@ class PgVectorStore(VectorStore):
         # requested patient_id. A failed commit leaves self._corpus_by_id
         # exactly as it was before this call, never partially updated.
         new_corpus_by_id: Dict[str, CorpusRecord] = {}
-        with self._conn.cursor() as cur:
-            for record in corpus:
-                new_corpus_by_id[record.record_id] = record
-                vector = vectors_by_record_id[record.record_id]
-                self._check_dimension(record.record_id, vector)
-                vector_param = self._vector_cast(vector) if self._vector_cast else vector
-                cur.execute(
-                    """
-                    INSERT INTO rag_embeddings
-                        (record_id, patient_id, provider, model, dimension, content_hash, embedding, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-                    ON CONFLICT (record_id, provider, model) DO UPDATE
-                        SET patient_id = EXCLUDED.patient_id,
-                            dimension = EXCLUDED.dimension,
-                            content_hash = EXCLUDED.content_hash,
-                            embedding = EXCLUDED.embedding,
-                            updated_at = now()
-                        WHERE rag_embeddings.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-                           OR rag_embeddings.dimension IS DISTINCT FROM EXCLUDED.dimension
-                           OR rag_embeddings.patient_id IS DISTINCT FROM EXCLUDED.patient_id
-                    """,
-                    (
-                        record.record_id,
-                        record.patient_id,
-                        self._provider,
-                        self._model,
-                        self._dimension,
-                        _content_hash(record.text),
-                        vector_param,
-                    ),
-                )
-                if cur.rowcount:
-                    written += 1
-                else:
-                    skipped += 1
-        self._conn.commit()
+        try:
+            with self._conn.cursor() as cur:
+                for record in corpus:
+                    new_corpus_by_id[record.record_id] = record
+                    vector = vectors_by_record_id[record.record_id]
+                    self._check_dimension(record.record_id, vector)
+                    vector_param = self._vector_cast(vector) if self._vector_cast else vector
+                    cur.execute(
+                        """
+                        INSERT INTO rag_embeddings
+                            (record_id, patient_id, provider, model, dimension, content_hash, embedding, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                        ON CONFLICT (record_id, provider, model) DO UPDATE
+                            SET patient_id = EXCLUDED.patient_id,
+                                dimension = EXCLUDED.dimension,
+                                content_hash = EXCLUDED.content_hash,
+                                embedding = EXCLUDED.embedding,
+                                updated_at = now()
+                            WHERE rag_embeddings.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                               OR rag_embeddings.dimension IS DISTINCT FROM EXCLUDED.dimension
+                               OR rag_embeddings.patient_id IS DISTINCT FROM EXCLUDED.patient_id
+                        """,
+                        (
+                            record.record_id,
+                            record.patient_id,
+                            self._provider,
+                            self._model,
+                            self._dimension,
+                            _content_hash(record.text),
+                            vector_param,
+                        ),
+                    )
+                    if cur.rowcount:
+                        written += 1
+                    else:
+                        skipped += 1
+            self._conn.commit()
+        except Exception:
+            # Without this, a failed statement (a transient DB error, a
+            # deadlock, mid-batch failure) leaves psycopg2's transaction
+            # "aborted" — every later call on this same connection (index()
+            # again, or retrieve_top_k()) would keep failing until something
+            # else rolls it back, turning one transient blip into a lasting
+            # outage for this store instance.
+            self._conn.rollback()
+            raise
         self._corpus_by_id = new_corpus_by_id
         log.info(
             "pgvector_store indexed corpus (provider=%s, total=%s, written=%s, skipped=%s)",

@@ -52,8 +52,16 @@ class _FakeCursor:
         return False
 
     def execute(self, sql, params=None):
+        if self._conn.poisoned:
+            # Mirrors real psycopg2: once a transaction is aborted, every
+            # later statement on the same connection fails until rollback().
+            raise RuntimeError("current transaction is aborted, commands ignored until end of transaction block")
         params = list(params) if params is not None else []
         self._conn.executed.append((" ".join(sql.split()), params))
+        if self._conn.fail_next_execute:
+            self._conn.fail_next_execute = False
+            self._conn.poisoned = True
+            raise RuntimeError("simulated transient database error")
         statement = sql.strip().upper()
         if statement.startswith("INSERT"):
             record_id, patient_id, provider, model, dimension, content_hash, embedding = params
@@ -91,6 +99,8 @@ class _FakeConnection:
         self.select_response = []
         self.committed = False
         self.rolled_back = False
+        self.poisoned = False  # simulates psycopg2's aborted-transaction state
+        self.fail_next_execute = False  # set by a test to simulate one transient failure
 
     def cursor(self):
         return _FakeCursor(self)
@@ -100,6 +110,7 @@ class _FakeConnection:
 
     def rollback(self):
         self.rolled_back = True
+        self.poisoned = False
 
 
 def _pgvector_store(dimension=3, provider="fake", model="", connection=None):
@@ -235,6 +246,41 @@ def test_pgvector_store_rejects_dimension_mismatch_on_query():
 
 
 # --- PgVectorStore (fake connection): idempotent persistence -----------------
+
+
+def test_pgvector_store_rolls_back_after_a_failed_index_so_a_retry_can_succeed():
+    # Reviewer finding: index() committed only after the whole upsert loop,
+    # with no rollback on failure. Without a rollback, psycopg2 leaves the
+    # transaction "aborted" — every later statement on that connection fails
+    # too, turning one transient DB error into a lasting outage for this
+    # store instance rather than something a caller can retry.
+    conn = _FakeConnection()
+    store = _pgvector_store(dimension=2, connection=conn)
+    conn.fail_next_execute = True
+
+    with pytest.raises(RuntimeError, match="simulated transient database error"):
+        store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+
+    assert conn.rolled_back is True
+
+    # A retry on the SAME store/connection must succeed, not inherit an
+    # aborted transaction from the failed attempt above.
+    result = store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+    assert result == IndexResult(written=1, skipped=0)
+
+
+def test_pgvector_store_a_failed_index_does_not_partially_update_the_active_corpus():
+    # The corpus swap only happens after a successful commit — a failed
+    # index() must leave _corpus_by_id exactly as it was before the call.
+    conn = _FakeConnection()
+    store = _pgvector_store(dimension=2, connection=conn)
+    store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+
+    conn.fail_next_execute = True
+    with pytest.raises(RuntimeError):
+        store.index([_record("r2", 2, "b")], {"r2": [0.0, 1.0]})
+
+    assert set(store._corpus_by_id.keys()) == {"r1"}
 
 
 def test_pgvector_store_second_index_over_unchanged_records_writes_nothing():
