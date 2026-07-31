@@ -171,6 +171,25 @@ class _CrossPatientLeakRepo(ChartRepositoryPort):
         return ChartResult(patient_id=patient_id, encounters=encounters, records=[], reads=2)
 
 
+class _RepoRaisesOnSecondCall(ChartRepositoryPort):
+    """Returns a legitimate chart for the chart specialist's call, then
+    raises a plain (unclassified) exception on the graph specialist's own
+    internal `load_chart` call — a repository error, NOT
+    `CrossPatientEvidenceError`/`EvidenceIntegrityError`. Neither runtime may
+    let this propagate past authorization, and the resulting failure result
+    must report the chart read that already completed, not zero."""
+
+    def __init__(self):
+        self.load_calls = 0
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        self.load_calls += 1
+        if self.load_calls == 1:
+            encounters = [EncounterRow(id=1, patient_id=patient_id, provider="Dr. Patel")]
+            return ChartResult(patient_id=patient_id, encounters=encounters, records=[], reads=2)
+        raise RuntimeError("simulated repository failure mid-read")
+
+
 # --------------------------------------------------------------------------- #
 # Contract tests — run once per runtime_name
 # --------------------------------------------------------------------------- #
@@ -213,6 +232,23 @@ def test_cross_patient_graph_read_refuses_rather_than_raising_or_escalating(runt
     # load_chart read (2) that happened inside PatientGraphReader.build()
     # BEFORE it rejected — must not be silently dropped to 0.
     assert result.execution.reads == 4
+
+
+def test_unexpected_repository_failure_after_chart_read_degrades_safely_with_partial_reads(runtime_name):
+    repo = _RepoRaisesOnSecondCall()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.evidence_ids == []
+    assert result.execution.specialists_run == ["chart_read"]
+    # Only the chart specialist's real, completed read (2) is reported — the
+    # graph specialist's own call raised before returning anything, so there
+    # is nothing to add on its behalf; this must not be a fabricated 0 for
+    # the chart read that DID complete, nor a crash for either runtime.
+    assert result.execution.reads == 2
 
 
 def test_denied_request_performs_zero_reads(runtime_name):

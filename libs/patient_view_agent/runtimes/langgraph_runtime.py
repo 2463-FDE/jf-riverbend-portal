@@ -97,12 +97,15 @@ generic `invoke()` catch-all, which reported it as a generic ESCALATED/
 NODE_FAILURE — masking a security-relevant integrity rejection from any
 audit/recovery code that keys off the refusal reason.
 
-Both nets are broader than `runtimes/custom.py`, which does NOT wrap its
-specialist calls this defensively and would crash on a genuinely unexpected
-bug (e.g. a broken custom repository) — a deliberate asymmetry: custom is
-the trusted production default, where a bug should surface loudly; langgraph
-is the optional, experimental comparison spike, where erring toward "never a
-500" is the more defensible choice while it is still being evaluated.
+`runtimes/custom.py` now enforces the identical contract (an outer
+`except Exception` around its own sequential authorize->chart->graph->
+evidence->compose->finalize flow, added in the same review round that added
+these two nets here) — an earlier version of this docstring claimed a
+deliberate asymmetry ("custom crashes loudly, langgraph never does"), but
+that was never actually licensed by `PatientViewRuntime.run()`'s own
+contract, which promises nothing downstream of authorization may raise for
+EITHER runtime. `custom.py` crashing on a plain repository error was a real,
+unfixed gap, not an intentional design choice.
 The alternative (fail loudly at `build_runtime()` selection time) was
 considered and rejected: the factory is a plain constructor with no request
 context, so it cannot distinguish "about to serve real traffic" from
