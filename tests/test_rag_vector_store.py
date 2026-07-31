@@ -484,9 +484,13 @@ def test_pgvector_store_rolls_back_after_an_unscoped_read_too():
     assert store._conn.rolled_back is True
 
 
-def test_pgvector_store_unscoped_query_does_not_force_an_exact_scan():
-    # Unscoped queries (the eval harness's usage) keep using the ANN index —
-    # only the security-scoped path pays the exact-scan cost.
+def test_pgvector_store_unscoped_query_also_forces_an_exact_scan():
+    # Reviewer finding (follow-up round): the exact-scan fix originally only
+    # applied when patient_id was set, but provider/model/record_id =
+    # ANY(eligible_ids) are present on EVERY call — and rag_embeddings keeps
+    # stale/old-model rows that can suffer the identical HNSW post-filter
+    # under-return even when unscoped. The eval harness's own retrieval path
+    # is unscoped, so this must be unconditional, not scoped-only.
     store = _pgvector_store(dimension=2)
     store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
     store._conn.select_response = [("r1",)]
@@ -494,7 +498,9 @@ def test_pgvector_store_unscoped_query_does_not_force_an_exact_scan():
     store.retrieve_top_k([1.0, 0.0], k=1)
 
     statements = [sql for sql, _ in store._conn.executed]
-    assert not any("enable_indexscan" in sql for sql in statements)
+    assert "SET LOCAL enable_indexscan = off" in statements
+    assert "SET LOCAL enable_bitmapscan = off" in statements
+    assert "SET LOCAL enable_indexonlyscan = off" in statements
 
 
 def test_pgvector_store_query_filters_by_patient_id_when_scoped():

@@ -182,60 +182,94 @@ def test_pgvector_scoped_query_plan_never_uses_an_approximate_index():
     assert "Seq Scan" in plan, plan
 
 
-def _seed_realistic_scale_corpus(pg_store):
-    # Shared setup for the two tests below: r1 (real target) plus 50,000
-    # filler rows simulating a realistically-sized active corpus, all in
-    # pg_store._corpus_by_id (bulk-inserted + dict-updated directly, bypassing
-    # 50,000 individual index() round trips — see the "at scale" test above
-    # for why this still faithfully represents run_pipeline's real shape).
+def test_pgvector_unscoped_query_plan_also_forces_an_exact_scan():
+    # Confirms the mechanism against a real planner: manually issues the same
+    # SET LOCAL + query shape retrieve_top_k now sends unconditionally, and
+    # checks the resulting plan avoids index/bitmap scans even when unscoped.
+    # This does NOT, by itself, prove retrieve_top_k actually issues these
+    # statements for an unscoped call — that's what
+    # tests/test_rag_vector_store.py::
+    # test_pgvector_store_unscoped_query_also_forces_an_exact_scan proves
+    # (against a fake connection that records exactly what SQL was sent),
+    # and is the test that actually catches a regression here: reverting the
+    # fix and re-running the "at scale" test below did NOT fail, because the
+    # table's own UNIQUE(record_id, provider, model) constraint gives the
+    # planner an incidental exact-lookup index for a small eligible_ids list
+    # regardless of this fix (the same phenomenon as the round-1
+    # patient_id-B-tree escape hatch) — a reminder that a mechanism test
+    # (this one, and the unit-level one) is what actually guards the fix;
+    # the "at scale" test below is a correctness demonstration, not a
+    # reliable regression discriminator.
+    pg_store = PgVectorStore(config=_DB_CONFIG, dimension=_DIMENSION, provider=_PROVIDER)
     pg_store.index(
         [CorpusRecord(record_id="r1", patient_id=1042, patient_name="x", text="t", occurred_at="2026-01-01")],
         {"r1": [1.0] + [0.0] * (_DIMENSION - 1)},
     )
+
+    with pg_store._conn.cursor() as cur:
+        cur.execute("SET LOCAL enable_indexscan = off")
+        cur.execute("SET LOCAL enable_bitmapscan = off")
+        cur.execute("SET LOCAL enable_indexonlyscan = off")
+        cur.execute(
+            "EXPLAIN SELECT record_id FROM rag_embeddings WHERE provider = %s AND model = %s "
+            "AND record_id = ANY(%s) ORDER BY embedding <=> %s LIMIT %s",
+            [_PROVIDER, "", ["r1"], Vector([1.0] + [0.0] * (_DIMENSION - 1)), 5],
+        )
+        plan = "\n".join(row[0] for row in cur.fetchall())
+
+    assert "Index Scan" not in plan and "Bitmap" not in plan, plan
+    assert "Seq Scan" in plan, plan
+
+
+def test_pgvector_unscoped_retrieval_returns_all_eligible_rows_despite_ineligible_noise_at_scale():
+    # The reviewer's explicit ask: seed many closer INELIGIBLE rows (not in
+    # this instance's _corpus_by_id — e.g. stale rows from an older run,
+    # exactly what rag_embeddings intentionally keeps per migration 010) and
+    # prove an UNSCOPED query still returns every eligible row despite them,
+    # mirroring the scoped "at scale" test above but for the unscoped path
+    # the eval harness actually uses. This is a correctness demonstration,
+    # not a strict regression discriminator: the table's own
+    # UNIQUE(record_id, provider, model) constraint gives the planner a cheap
+    # exact-lookup path for a small eligible_ids list independent of this
+    # fix — see the mechanism test above for what actually guards the fix.
+    query_vector = [1.0] + [0.0] * (_DIMENSION - 1)
+
+    pg_store = PgVectorStore(config=_DB_CONFIG, dimension=_DIMENSION, provider=_PROVIDER)
+    target_corpus = [
+        CorpusRecord(
+            record_id=f"unscoped-target-{i:04d}",
+            patient_id=1042,
+            patient_name="x",
+            text=f"target record {i}",
+            occurred_at="2026-01-01",
+        )
+        for i in range(5)
+    ]
+    # far from the query (orthogonal direction) — the only eligible rows
+    target_vectors = {
+        record.record_id: [0.0] * (_DIMENSION - 1) + [1.0 + i * 0.01] for i, record in enumerate(target_corpus)
+    }
+    pg_store.index(target_corpus, target_vectors)
+
+    # tens of thousands of near-perfect matches to the query, same
+    # provider/model, but NEVER passed through this instance's index() —
+    # ineligible stale rows, not a different patient/model.
     conn = _raw_connection()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO rag_embeddings "
             "(record_id, patient_id, provider, model, dimension, content_hash, embedding) "
-            "SELECT 'filler-' || gs, 1043, %s, '', %s, 'filler-' || gs, "
-            "       ('[' || random()::text || repeat(',0', %s - 1) || ']')::vector "
-            "FROM generate_series(1, 50000) gs",
+            "SELECT 'unscoped-noise-' || gs, 1043, %s, '', %s, 'noise-' || gs, "
+            "       ('[1' || repeat(',0', %s - 1) || ']')::vector "
+            "FROM generate_series(1, 20000) gs",
             (_PROVIDER, _DIMENSION, _DIMENSION),
         )
-        cur.execute("ANALYZE rag_embeddings")
     conn.commit()
     conn.close()
-    pg_store._corpus_by_id.update(
-        {
-            f"filler-{i}": CorpusRecord(
-                record_id=f"filler-{i}", patient_id=1043, patient_name="x", text="f", occurred_at="x"
-            )
-            for i in range(1, 50001)
-        }
-    )
 
+    result = pg_store.retrieve_top_k(query_vector, k=5)  # unscoped
 
-def test_pgvector_unscoped_query_plan_uses_the_hnsw_index():
-    # Contrast case: an unscoped query (the eval harness's usage) is NOT the
-    # security-scoped path, so it keeps using the approximate ANN index —
-    # only patient-scoped queries pay the exact-scan cost. Needs a
-    # realistically-sized eligible set for the planner to consider the index
-    # worth using at all (it correctly prefers Seq Scan over a handful of
-    # rows, and the record_id = ANY(...) fix above makes the eligible set —
-    # not the raw table size — the thing that has to be realistic).
-    pg_store = PgVectorStore(config=_DB_CONFIG, dimension=_DIMENSION, provider=_PROVIDER)
-    _seed_realistic_scale_corpus(pg_store)
-    eligible_ids = list(pg_store._corpus_by_id.keys())
-
-    with pg_store._conn.cursor() as cur:
-        cur.execute(
-            "EXPLAIN SELECT record_id FROM rag_embeddings WHERE provider = %s AND model = %s "
-            "AND record_id = ANY(%s) ORDER BY embedding <=> %s LIMIT %s",
-            [_PROVIDER, "", eligible_ids, Vector([1.0] + [0.0] * (_DIMENSION - 1)), 5],
-        )
-        plan = "\n".join(row[0] for row in cur.fetchall())
-
-    assert "rag_embeddings_hnsw_idx" in plan, plan
+    assert {record.record_id for record in result} == {record.record_id for record in target_corpus}
 
 
 def test_pgvector_scoped_retrieval_returns_all_eligible_rows_at_scale():
@@ -328,28 +362,23 @@ def test_pgvector_stale_row_not_in_the_active_corpus_never_consumes_a_limit_slot
     assert [record.record_id for record in result] == ["current-r1"]
 
 
-def test_pgvector_a_scoped_read_does_not_degrade_a_later_unscoped_read_on_the_same_store():
-    # Regression test for the follow-up review finding: SET LOCAL lasts until
-    # end of transaction, not end of cursor, and retrieve_top_k previously
-    # never committed/rolled back — so a scoped read's disabled indexes could
-    # leak into every later read on the same connection. Do a scoped read,
-    # then check the query plan of an unscoped read on the SAME store still
-    # uses the HNSW index (not forced to Seq Scan by a leaked setting).
+def test_pgvector_a_scoped_read_followed_by_an_unscoped_read_both_succeed_on_the_same_store():
+    # Since the exact-scan fix now applies unconditionally (see above), a
+    # scoped read no longer leaves the connection in any state DIFFERENT from
+    # an unscoped one — there's nothing asymmetric left to leak. This just
+    # confirms consecutive calls of different scope on the same store/
+    # connection don't interfere with each other (rollback-per-call, proven
+    # at the unit level, keeps the connection usable across both).
     pg_store = PgVectorStore(config=_DB_CONFIG, dimension=_DIMENSION, provider=_PROVIDER)
-    _seed_realistic_scale_corpus(pg_store)
-    eligible_ids = list(pg_store._corpus_by_id.keys())
+    r1 = CorpusRecord(record_id="r1", patient_id=1042, patient_name="x", text="t", occurred_at="2026-01-01")
+    query_vector = [1.0] + [0.0] * (_DIMENSION - 1)
+    pg_store.index([r1], {"r1": query_vector})
 
-    pg_store.retrieve_top_k([1.0] + [0.0] * (_DIMENSION - 1), k=1, patient_id=1042)  # the scoped read
+    scoped = pg_store.retrieve_top_k(query_vector, k=1, patient_id=1042)
+    unscoped = pg_store.retrieve_top_k(query_vector, k=1)
 
-    with pg_store._conn.cursor() as cur:
-        cur.execute(
-            "EXPLAIN SELECT record_id FROM rag_embeddings WHERE provider = %s AND model = %s "
-            "AND record_id = ANY(%s) ORDER BY embedding <=> %s LIMIT %s",
-            [_PROVIDER, "", eligible_ids, Vector([1.0] + [0.0] * (_DIMENSION - 1)), 5],
-        )
-        plan = "\n".join(row[0] for row in cur.fetchall())
-
-    assert "rag_embeddings_hnsw_idx" in plan, plan
+    assert [r.record_id for r in scoped] == ["r1"]
+    assert [r.record_id for r in unscoped] == ["r1"]
 
 
 def test_pgvector_model_swap_under_the_same_provider_does_not_leak_across_models():

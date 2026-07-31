@@ -19,22 +19,26 @@ it does not remediate that unresolved gateway/records IDOR.
 Two correctness properties this module holds itself to, per PR #14 review
 (see .claude/skills/langgraph-imp-planner/SKILL.md, "Lessons learned"):
 
-- A patient-scoped query must never under-return: pgvector's HNSW index
-  applies `patient_id = %s` AFTER the approximate graph search, so a plain
-  `ORDER BY embedding <=> %s LIMIT k` can silently return fewer than k rows
-  even when k+ eligible rows exist for that patient (this is pgvector's own
-  documented filtered-ANN limitation, not a bug in Postgres). Verified by
-  hand against a live pgvector 0.8.0 database: enabling
-  `hnsw.iterative_scan = strict_order` did NOT reliably fix this for an
-  adversarially-clustered patient (it still returned 0 of 5 true matches in
-  one reproduction — iterative scan's own graph-traversal termination can
-  give up before reaching a poorly-connected cluster). Forcing an exact scan
-  for scoped queries (disabling index/bitmap scan methods for that query)
+- No filtered query may under-return: pgvector's HNSW index applies EVERY
+  `WHERE` clause AFTER the approximate graph search, not just `patient_id` —
+  that includes `provider`, `model`, and `record_id = ANY(:eligible_ids)`,
+  which are present on every call, scoped or not. Since `rag_embeddings`
+  intentionally keeps stale rows (round 2) and old-model rows (round 4)
+  rather than deleting them, an UNSCOPED query can also have many closer
+  ineligible rows in the same HNSW index, get them filtered out after the
+  approximate search, and return fewer or wrong active-corpus rows even when
+  k eligible ones exist — the eval harness's own retrieval path is unscoped
+  and was exposed to exactly this. Verified by hand against a live pgvector
+  0.8.0 database: enabling `hnsw.iterative_scan = strict_order` did NOT
+  reliably fix this for an adversarially-clustered patient (it still
+  returned 0 of 5 true matches in one reproduction — iterative scan's own
+  graph-traversal termination can give up before reaching a poorly-connected
+  cluster). Forcing an exact scan (disabling index/bitmap scan methods)
   DID reliably return the correct, complete result in the same
-  reproduction — see retrieve_top_k below. Exactness over ANN speed is the
-  right trade for this specific path: it is the security-scoped query, and
-  this corpus is demonstration-sized by design (adr/0006), so an O(n)
-  filtered scan is cheap.
+  reproduction — see retrieve_top_k below, applied to EVERY call, not only
+  patient-scoped ones. Exactness over ANN speed is the right trade here: this
+  corpus is demonstration-sized by design (adr/0006), so an O(n) filtered
+  scan is cheap regardless of scope.
 - A model change under the same provider must never mix embedding spaces:
   `provider` alone (e.g. "ollama") does not capture *which* model produced a
   vector (OLLAMA_EMBED_MODEL can change independently). `model` is part of
@@ -336,19 +340,22 @@ class PgVectorStore(VectorStore):
 
         try:
             with self._conn.cursor() as cur:
-                if patient_id is not None:
-                    # pgvector's HNSW index applies a WHERE filter AFTER the
-                    # approximate graph search, so a selective patient_id
-                    # predicate can silently return fewer than k rows even when
-                    # k+ exist for that patient. Verified `hnsw.iterative_scan`
-                    # does not reliably fix this (see this module's docstring);
-                    # forcing an exact scan does. This is the patient-scope
-                    # security boundary, so correctness wins over ANN speed —
-                    # and this corpus is demonstration-sized (adr/0006), so the
-                    # O(n) cost is cheap.
-                    cur.execute("SET LOCAL enable_indexscan = off")
-                    cur.execute("SET LOCAL enable_bitmapscan = off")
-                    cur.execute("SET LOCAL enable_indexonlyscan = off")
+                # pgvector's HNSW index applies EVERY WHERE filter AFTER the
+                # approximate graph search — not just patient_id. provider,
+                # model, and record_id = ANY(eligible_ids) are present on
+                # EVERY call, scoped or not, and rag_embeddings intentionally
+                # keeps stale/old-model rows (rounds 2 and 4), so even an
+                # unscoped query can have closer ineligible rows fill the ANN
+                # candidate list and get filtered out after LIMIT. Verified
+                # `hnsw.iterative_scan` does not reliably fix this (see this
+                # module's docstring); forcing an exact scan does. Applied
+                # unconditionally, not only when patient_id is set —
+                # correctness wins over ANN speed here regardless of scope,
+                # and this corpus is demonstration-sized (adr/0006), so the
+                # O(n) cost is cheap.
+                cur.execute("SET LOCAL enable_indexscan = off")
+                cur.execute("SET LOCAL enable_bitmapscan = off")
+                cur.execute("SET LOCAL enable_indexonlyscan = off")
                 cur.execute(sql, params)
                 record_ids = [row[0] for row in cur.fetchall()]
         finally:
