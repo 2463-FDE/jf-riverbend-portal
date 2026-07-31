@@ -85,10 +85,17 @@ class LangGraphPatientViewRuntime:
         max_seconds: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> PatientViewResult:
-        from langgraph.graph import END, StateGraph
-
         start = clock()
         scope = authorizer.authorize(request)  # raises AuthorizationDenied; zero reads before this line, no graph built
+
+        # Deliberately imported AFTER authorization, not just lazily inside
+        # run(): LangGraph is optional and uninstalled by default, so a
+        # denied request must raise AuthorizationDenied, never
+        # ModuleNotFoundError. Importing before the authorize() call would
+        # turn every denial into a dependency crash on any installation that
+        # hasn't opted into requirements-langgraph.txt — silently losing the
+        # deny-first guarantee this runtime's docstring promises.
+        from langgraph.graph import END, StateGraph
 
         specialists_run: list[str] = []
 

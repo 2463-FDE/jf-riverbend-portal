@@ -326,6 +326,28 @@ def test_langgraph_runtime_denies_before_the_graph_is_even_built(monkeypatch):
     assert repo.load_calls == 0
 
 
+def test_langgraph_runtime_denies_before_importing_langgraph_at_all():
+    # Regression test for a review finding: authorize() must run BEFORE the
+    # `from langgraph.graph import ...` line, not just before the graph is
+    # built — otherwise a denied request on an installation that hasn't
+    # opted into requirements-langgraph.txt (the default: langgraph is
+    # optional and uninstalled) fails with ModuleNotFoundError instead of
+    # AuthorizationDenied, silently losing the deny-first guarantee. This
+    # deliberately does NOT fake langgraph (unlike every other langgraph
+    # test in this file) — it proves the real import order against the real
+    # absence of the package, which a faked sys.modules entry can never
+    # exercise (the import always "succeeds" against a fake).
+    assert "langgraph" not in sys.modules, "langgraph must not already be imported for this test to mean anything"
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    with pytest.raises(AuthorizationDenied):
+        build_runtime("langgraph").run(req(patient=9999), authorizer=authorizer, repository=repo)
+
+    assert repo.load_calls == 0
+    assert "langgraph" not in sys.modules  # denial short-circuited before the import ever ran
+
+
 # --------------------------------------------------------------------------- #
 # Factory: fail-closed, config-only selection
 # --------------------------------------------------------------------------- #
