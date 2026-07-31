@@ -5,6 +5,14 @@ changed is correctly re-embedded (its hash changes). This is the specific
 cost failure mode (re-embedding the same corpus on every eval run) this
 deliverable exists to avoid.
 
+The cache file is namespaced by provider AND model (see `model` below) — a
+provider tag alone (e.g. "ollama") does not say which model produced a
+vector, so changing OLLAMA_EMBED_MODEL while keeping the same provider would
+otherwise still hit this cache under unchanged content_hash and hand back the
+OLD model's vector. `libs/rag_corpus/vector_store.py::model_tag_for_provider`
+is the single source of truth for that model tag — pass its output here as
+`model` so this cache and PgVectorStore's persisted identity always agree.
+
 Cache files live under RAG_EMBEDDING_CACHE_DIR (default
 .cache/rag_embeddings, gitignored) — never committed, since they're derived
 data, not source. Never logs record text or vector contents, only counts.
@@ -26,9 +34,15 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _cache_filename(provider: str, model: str) -> str:
+    return f"{provider}.json" if not model else f"{provider}__{model}.json"
+
+
 class EmbeddingCache:
-    def __init__(self, cache_dir: str, provider: str):
-        self._path = os.path.join(cache_dir, f"{provider}.json")
+    def __init__(self, cache_dir: str, provider: str, model: str = ""):
+        self._provider = provider
+        self._model = model
+        self._path = os.path.join(cache_dir, _cache_filename(provider, model))
         self._data: Dict[str, List[float]] = self._load()
 
     def _load(self) -> Dict[str, List[float]]:
@@ -59,7 +73,9 @@ class EmbeddingCache:
             self._save()
 
         log.info(
-            "embedding_cache resolved corpus (total=%s, cache_hits=%s, newly_embedded=%s)",
+            "embedding_cache resolved corpus (provider=%s, model=%s, total=%s, cache_hits=%s, newly_embedded=%s)",
+            self._provider,
+            self._model,
             len(records),
             cache_hits,
             len(misses),

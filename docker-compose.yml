@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:15
+    # pgvector/pgvector:0.8.0-pg15 is a drop-in postgres:15 build with the
+    # pgvector extension pre-installed (see db/migrations/010_pgvector_embeddings.sql,
+    # adr/0006) — no other change to how Postgres runs here.
+    image: pgvector/pgvector:0.8.0-pg15
     environment:
       POSTGRES_DB: ${DB_NAME:-riverbend}
       POSTGRES_USER: ${DB_USER:-riverbend_app}

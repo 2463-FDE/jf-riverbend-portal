@@ -15,6 +15,7 @@ from libs.embedding_client import EmbeddingClient
 from .config import CorpusConfig
 from .corpus import CorpusRecord, build_corpus
 from .embedding_cache import EmbeddingCache
+from .vector_store import IndexResult, VectorStore, model_tag_for_provider
 
 
 @dataclass
@@ -23,25 +24,41 @@ class PipelineResult:
     vectors_by_record_id: Dict[str, List[float]]
     cache_hits: int
     newly_embedded: int
+    index_result: Optional[IndexResult] = None
 
 
 def run_pipeline(
     config: Optional[CorpusConfig] = None,
     embedding_client: Optional[EmbeddingClient] = None,
+    vector_store: Optional[VectorStore] = None,
 ) -> PipelineResult:
     config = config or CorpusConfig()
     embedding_client = embedding_client or EmbeddingClient()
 
     corpus = build_corpus(config.max_records)
-    cache = EmbeddingCache(cache_dir=config.cache_dir, provider=embedding_client.provider_name)
+    # model_tag_for_provider is the same function PgVectorStore uses to derive
+    # its own persisted identity — reusing it here (rather than re-deriving
+    # independently) is what keeps the disk cache and the DB row agreeing on
+    # "which model made this vector" after a model swap (e.g. OLLAMA_EMBED_MODEL).
+    cache = EmbeddingCache(
+        cache_dir=config.cache_dir,
+        provider=embedding_client.provider_name,
+        model=model_tag_for_provider(embedding_client.provider_name),
+    )
 
     vectors_by_record_id, cache_hits, newly_embedded = cache.get_or_embed_all(corpus, embedding_client)
+
+    # Persisting to a vector_store (e.g. PgVectorStore) is opt-in: passing
+    # none (the default) keeps this pipeline exactly as it was before Stage 2
+    # — disk-cached vectors only, no database persistence.
+    index_result = vector_store.index(corpus, vectors_by_record_id) if vector_store is not None else None
 
     return PipelineResult(
         corpus=corpus,
         vectors_by_record_id=vectors_by_record_id,
         cache_hits=cache_hits,
         newly_embedded=newly_embedded,
+        index_result=index_result,
     )
 
 

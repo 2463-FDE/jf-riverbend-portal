@@ -11,15 +11,14 @@ production fix.
 """
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Optional
 
 from libs.embedding_client import EmbeddingClient
-from libs.rag_corpus import CorpusConfig, CorpusRecord, run_pipeline
+from libs.rag_corpus import CorpusConfig, VectorStore, build_vector_store, run_pipeline
 
 from .goldset import load_goldset
 from .identity_proxy import cluster_patients
 from .metrics import EvalReport, compute_metrics
-from .similarity import cosine_similarity
 
 _DEFAULT_GOLDSET_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "db", "seed", "goldset.json")
 
@@ -30,28 +29,36 @@ class EvalConfig:
     goldset_path: str = field(default_factory=lambda: os.getenv("RAG_EVAL_GOLDSET_PATH", _DEFAULT_GOLDSET_PATH))
 
 
-def _retrieve_top_k(
-    query_vector: List[float],
-    corpus: List[CorpusRecord],
-    vectors_by_record_id: Dict[str, List[float]],
-    k: int,
-) -> List[CorpusRecord]:
-    scored = [
-        (cosine_similarity(query_vector, vectors_by_record_id[record.record_id]), record) for record in corpus
-    ]
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [record for _, record in scored[:k]]
-
-
 def run_eval(
     eval_config: Optional[EvalConfig] = None,
     corpus_config: Optional[CorpusConfig] = None,
     embedding_client: Optional[EmbeddingClient] = None,
+    vector_store: Optional[VectorStore] = None,
 ) -> EvalReport:
     eval_config = eval_config or EvalConfig()
     embedding_client = embedding_client or EmbeddingClient()
+    # RAG_VECTOR_STORE=memory|pgvector (default memory) — see
+    # libs/rag_corpus/vector_store.py. Retrieval here is intentionally
+    # corpus-wide (no patient_id scope): this harness measures AUD-09
+    # identity-fragmentation effects on retrieval quality across the whole
+    # corpus, which requires being able to retrieve a duplicate patient's
+    # record for another duplicate's query. The patient-scope filter itself
+    # is exercised directly in tests/test_rag_vector_store.py and
+    # tests/integration/test_pgvector_retrieval.py, not here.
+    #
+    # `provider` must come from the ACTUAL embedding_client, not
+    # PgVectorStore's own default ("fake") — otherwise a real
+    # EMBEDDING_PROVIDER=ollama run would persist/query vectors mislabeled as
+    # "fake", or fail with a dimension mismatch attributed to the wrong
+    # provider. `model` and `dimension` are not threaded through here: the
+    # rag_embeddings column is a fixed vector(16) sized to
+    # FakeEmbeddingProvider (see migration 010 / adr/0006's revisit trigger),
+    # so a non-fake provider whose output dimension differs still fails —
+    # correctly and loudly, via PgVectorStore's own dimension check — rather
+    # than silently under a mislabeled identity.
+    store = vector_store or build_vector_store(provider=embedding_client.provider_name)
 
-    pipeline_result = run_pipeline(config=corpus_config, embedding_client=embedding_client)
+    pipeline_result = run_pipeline(config=corpus_config, embedding_client=embedding_client, vector_store=store)
     gold_cases = load_goldset(eval_config.goldset_path)
 
     # Query embeddings are not cached — only the corpus is (see
@@ -61,9 +68,7 @@ def run_eval(
     query_vectors = embedding_client.embed([case.query for case in gold_cases])
 
     retrieved_by_case = {
-        case.query: _retrieve_top_k(
-            query_vector, pipeline_result.corpus, pipeline_result.vectors_by_record_id, eval_config.top_k
-        )
+        case.query: store.retrieve_top_k(query_vector, eval_config.top_k)
         for case, query_vector in zip(gold_cases, query_vectors)
     }
 
