@@ -42,6 +42,22 @@ mirroring libs/eligibility_agent/runtimes/langchain_runtime.py's established
 pattern; it validates this module's own control flow against a documented
 shape of LangGraph's API, not compatibility with the real library — this has
 never been run against a real langgraph install, by design.
+
+Dependency-absence policy (explicit, per review): missing `langgraph` is
+**not** configuration-fatal at `build_runtime("langgraph")` selection
+time — this class has no `__init__` and touches nothing until a request
+actually runs `run()`. At request time, authorization still happens first
+(see above); if the `langgraph.graph` import itself then fails, that failure
+is caught and degrades to a safe ESCALATED `PatientViewResult`
+(`runtime.runtime_unavailable_result`) rather than propagating — this is the
+same "never raise downstream of authorization" contract
+`PatientViewRuntime.run()` already documents for evidence/composer
+failures, now also covering the runtime's own optional dependency. The
+alternative (fail loudly at selection time) was considered and rejected:
+`build_runtime()` is a plain factory with no request context, so it cannot
+distinguish "about to serve real traffic" from "constructed once at import
+time" — degrading per-request, after authorization, is the point where a
+human-facing outcome (safe escalation, not a 500) is actually possible.
 """
 from __future__ import annotations
 
@@ -56,7 +72,7 @@ from ..composer import compose as _default_compose
 from ..contracts import AuthorizationRequest, GraphLimits
 from ..graph import PatientGraphReader
 from ..repository import ChartRepositoryPort
-from ..runtime import PatientViewResult, finalize_result, initial_reasons, refused_result
+from ..runtime import PatientViewResult, finalize_result, initial_reasons, refused_result, runtime_unavailable_result
 from ..specialists import (
     CHART_READ_TOOL,
     EVIDENCE_VALIDATE_TOOL,
@@ -95,7 +111,21 @@ class LangGraphPatientViewRuntime:
         # turn every denial into a dependency crash on any installation that
         # hasn't opted into requirements-langgraph.txt — silently losing the
         # deny-first guarantee this runtime's docstring promises.
-        from langgraph.graph import END, StateGraph
+        #
+        # But an AUTHORIZED request must not crash either: if the optional
+        # dependency is missing, that is not this caller's fault, and the
+        # PatientViewRuntime contract promises no raise downstream of
+        # authorization. Degrade to a safe ESCALATED result instead — see
+        # this module's docstring ("Dependency-absence policy").
+        try:
+            from langgraph.graph import END, StateGraph
+        except ImportError as exc:
+            return runtime_unavailable_result(
+                correlation_id=scope.correlation_id,
+                patient_id=scope.patient_id,
+                error_type=type(exc).__name__,
+                elapsed_seconds=clock() - start,
+            )
 
         specialists_run: list[str] = []
 

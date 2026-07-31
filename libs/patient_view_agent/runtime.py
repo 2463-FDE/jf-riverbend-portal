@@ -71,11 +71,20 @@ _KNOWN_RUNTIMES = ("custom", "langgraph")
 
 _AUTO_COMPLETE_PURPOSES = frozenset({Purpose.TREATMENT})
 _ESCALATE_REASONS = frozenset(
-    {ViewReason.NO_EVIDENCE, ViewReason.NON_TREATMENT_PURPOSE, ViewReason.TIMEOUT, ViewReason.COMPOSE_FELL_BACK}
+    {
+        ViewReason.NO_EVIDENCE,
+        ViewReason.NON_TREATMENT_PURPOSE,
+        ViewReason.TIMEOUT,
+        ViewReason.COMPOSE_FELL_BACK,
+        ViewReason.RUNTIME_UNAVAILABLE,
+    }
 )
 _REFUSE_REASONS = frozenset({ViewReason.CROSS_PATIENT_EVIDENCE, ViewReason.UNSUPPORTED_EVIDENCE})
 
 _SAFE_REFUSAL_SUMMARY = "This request could not be completed safely and has been refused. No chart content is shown."
+_SAFE_RUNTIME_UNAVAILABLE_SUMMARY = (
+    "This view requires human review before use: the selected orchestration runtime is unavailable right now."
+)
 _SAFE_ESCALATION_PREFIX = "This view requires human review before use: "
 
 
@@ -198,6 +207,47 @@ def refused_result(
             tool_calls=len(specialists_run) + 1,
             reads=chart_reads + graph_reads,
             truncated=chart_truncated or graph_truncated,
+            compose_attempts=0,
+            elapsed_seconds=elapsed_seconds,
+        ),
+    )
+
+
+def runtime_unavailable_result(
+    *,
+    correlation_id: str,
+    patient_id: int,
+    error_type: str,
+    elapsed_seconds: float,
+) -> PatientViewResult:
+    """Shared by any runtime whose OWN optional dependency turns out to be
+    missing at request time (e.g. `runtimes/langgraph_runtime.py` when
+    `langgraph` isn't installed). Selecting such a runtime is never fatal at
+    `build_runtime()` time — the dependency is only actually needed once a
+    request tries to run — so this degrades to a safe ESCALATED result
+    instead of raising, satisfying `PatientViewRuntime.run()`'s contract that
+    nothing downstream of authorization may raise. Zero reads have occurred
+    by construction: this only ever fires before any specialist runs.
+    `error_type` is the exception's TYPE only (e.g. "ModuleNotFoundError"),
+    never a message — this can otherwise be the one place free-text from an
+    external library's exception could leak into a PHI-safe log."""
+    log.error(
+        "patient_view runtime unavailable (correlation_id=%s, error_type=%s)", correlation_id, error_type
+    )
+    return PatientViewResult(
+        outcome=PatientViewOutcome.ESCALATED,
+        summary=_SAFE_RUNTIME_UNAVAILABLE_SUMMARY,
+        evidence_ids=[],
+        limitations=[],
+        escalation=True,
+        reasons=[ViewReason.RUNTIME_UNAVAILABLE],
+        correlation_id=correlation_id,
+        patient_id=patient_id,
+        execution=ExecutionMetadata(
+            specialists_run=[],
+            tool_calls=0,
+            reads=0,
+            truncated=False,
             compose_attempts=0,
             elapsed_seconds=elapsed_seconds,
         ),

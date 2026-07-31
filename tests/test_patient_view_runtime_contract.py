@@ -348,6 +348,28 @@ def test_langgraph_runtime_denies_before_importing_langgraph_at_all():
     assert "langgraph" not in sys.modules  # denial short-circuited before the import ever ran
 
 
+def test_langgraph_runtime_degrades_safely_for_an_authorized_request_when_langgraph_is_absent():
+    # Regression test for a follow-up review finding: authorize-before-import
+    # (the fix above) closes the DENIED path, but an AUTHORIZED request still
+    # hit the same missing import and crashed with ModuleNotFoundError — no
+    # PatientViewResult was ever returned, violating the contract's "never
+    # raise downstream of authorization" promise. This deliberately does NOT
+    # fake langgraph, proving the real, uninstalled case degrades to a safe
+    # ESCALATED result instead of raising.
+    assert "langgraph" not in sys.modules, "langgraph must not already be imported for this test to mean anything"
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})  # this patient IS authorized
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert result.escalation is True
+    assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
+    assert result.evidence_ids == []
+    assert repo.load_calls == 0  # the import failed before any specialist ran
+    assert "langgraph" not in sys.modules
+
+
 # --------------------------------------------------------------------------- #
 # Factory: fail-closed, config-only selection
 # --------------------------------------------------------------------------- #

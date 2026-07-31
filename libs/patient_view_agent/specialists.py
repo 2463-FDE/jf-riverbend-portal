@@ -61,6 +61,7 @@ class ViewReason(str, Enum):
     NON_TREATMENT_PURPOSE = "non_treatment_purpose"
     COMPOSE_FELL_BACK = "compose_fell_back"
     TIMEOUT = "timeout"
+    RUNTIME_UNAVAILABLE = "runtime_unavailable"  # an optional runtime's own dependency (e.g. langgraph) is missing
 
 
 class EvidenceIntegrityError(Exception):
