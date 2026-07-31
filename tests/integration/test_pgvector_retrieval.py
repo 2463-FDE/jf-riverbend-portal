@@ -377,3 +377,31 @@ def test_pgvector_model_swap_under_the_same_provider_does_not_leak_across_models
     result = store_a.retrieve_top_k(query_vector, k=1)
 
     assert [record.record_id for record in result] == ["rec-a"]
+
+
+def test_pgvector_reindexing_with_a_smaller_corpus_evicts_the_dropped_record_for_real():
+    # Regression test for the fifth review finding: rag_embeddings
+    # intentionally keeps r2's row after a re-index that drops it (migration
+    # 010's "no cleanup" design) — the ONLY thing keeping it unreachable is
+    # PgVectorStore.index() replacing (not merging into) _corpus_by_id, so
+    # the record_id = ANY(:eligible_ids) constraint on the NEXT retrieve_top_k
+    # call no longer includes it. Proven here against a real query (not just
+    # the constraint that gets built) that the stale row is truly excluded,
+    # including on a patient-scoped read for r2's own patient_id.
+    store = PgVectorStore(config=_DB_CONFIG, dimension=_DIMENSION, provider=_PROVIDER)
+    r1 = CorpusRecord(record_id="r1", patient_id=1042, patient_name="x", text="r1", occurred_at="2026-01-01")
+    r2 = CorpusRecord(record_id="r2", patient_id=1043, patient_name="x", text="r2", occurred_at="2026-01-01")
+    query_vector = [1.0] + [0.0] * (_DIMENSION - 1)
+    store.index([r1, r2], {"r1": query_vector, "r2": query_vector})  # r2 is an equally perfect match
+
+    store.index([r1], {"r1": query_vector})  # re-index without r2
+
+    with store._conn.cursor() as cur:
+        cur.execute("SELECT record_id FROM rag_embeddings WHERE provider = %s AND record_id = 'r2'", (_PROVIDER,))
+        assert cur.fetchone() is not None, "r2's row must still physically exist (migration 010's no-cleanup design)"
+
+    unscoped = store.retrieve_top_k(query_vector, k=5)
+    assert "r2" not in {record.record_id for record in unscoped}
+
+    scoped = store.retrieve_top_k(query_vector, k=5, patient_id=1043)  # r2's own patient_id
+    assert scoped == []

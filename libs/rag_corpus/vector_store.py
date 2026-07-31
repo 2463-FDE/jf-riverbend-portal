@@ -54,6 +54,17 @@ Two correctness properties this module holds itself to, per PR #14 review
   after a scoped one on the same connection would inherit the scoped query's
   disabled indexes. retrieve_top_k rolls back (a plain read has nothing to
   commit) in a `finally` after every call.
+- Re-indexing must REPLACE the active corpus, never merge into it: index()
+  builds `_corpus_by_id` fresh from exactly the records it was just given
+  (for PgVectorStore, swapped in only after a successful commit, so a failed
+  index() call leaves the prior complete state untouched) instead of adding
+  to whatever was there before. An append-only `_corpus_by_id` would keep a
+  record removed from a later index() call — e.g. a shrunk
+  RAG_CORPUS_MAX_RECORDS or a renamed/removed seed record — permanently
+  "eligible" via the `record_id = ANY(:eligible_ids)` constraint above,
+  including on patient-scoped reads if that stale record carried the
+  requested patient_id. Both InMemoryCosineStore and PgVectorStore had this
+  bug — it's in the shared contract, not one backend's quirk.
 """
 import hashlib
 import os
@@ -137,9 +148,13 @@ class InMemoryCosineStore(VectorStore):
         self._vectors_by_record_id: Dict[str, List[float]] = {}
 
     def index(self, corpus: List[CorpusRecord], vectors_by_record_id: Dict[str, List[float]]) -> IndexResult:
-        for record in corpus:
-            self._corpus_by_id[record.record_id] = record
-            self._vectors_by_record_id[record.record_id] = vectors_by_record_id[record.record_id]
+        # Replace, not merge: a record present in an earlier index() call but
+        # absent from THIS corpus must become unreachable — an append-only
+        # _corpus_by_id would keep a removed record eligible forever,
+        # including on patient-scoped reads if it carried the requested
+        # patient_id.
+        self._corpus_by_id = {record.record_id: record for record in corpus}
+        self._vectors_by_record_id = {record.record_id: vectors_by_record_id[record.record_id] for record in corpus}
         log.info("in_memory_cosine_store indexed corpus (total=%s)", len(corpus))
         return IndexResult(written=len(corpus), skipped=0)
 
@@ -222,9 +237,19 @@ class PgVectorStore(VectorStore):
     def index(self, corpus: List[CorpusRecord], vectors_by_record_id: Dict[str, List[float]]) -> IndexResult:
         written = 0
         skipped = 0
+        # Built separately from self._corpus_by_id and only swapped in after
+        # a successful commit below: replace, not merge. rag_embeddings
+        # intentionally keeps old rows across re-indexes (see migration 010),
+        # so retrieve_top_k's record_id = ANY(eligible_ids) constraint is the
+        # ONLY thing keeping a since-removed record unreachable — an
+        # append-only _corpus_by_id would defeat that on the very next call,
+        # including on patient-scoped reads if the stale record carried the
+        # requested patient_id. A failed commit leaves self._corpus_by_id
+        # exactly as it was before this call, never partially updated.
+        new_corpus_by_id: Dict[str, CorpusRecord] = {}
         with self._conn.cursor() as cur:
             for record in corpus:
-                self._corpus_by_id[record.record_id] = record
+                new_corpus_by_id[record.record_id] = record
                 vector = vectors_by_record_id[record.record_id]
                 self._check_dimension(record.record_id, vector)
                 vector_param = self._vector_cast(vector) if self._vector_cast else vector
@@ -258,6 +283,7 @@ class PgVectorStore(VectorStore):
                 else:
                     skipped += 1
         self._conn.commit()
+        self._corpus_by_id = new_corpus_by_id
         log.info(
             "pgvector_store indexed corpus (provider=%s, total=%s, written=%s, skipped=%s)",
             self._provider,

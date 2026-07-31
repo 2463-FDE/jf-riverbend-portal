@@ -191,6 +191,22 @@ def test_in_memory_store_cross_patient_query_with_no_records_returns_empty():
     assert result == []
 
 
+def test_in_memory_store_reindexing_with_a_smaller_corpus_evicts_the_dropped_record():
+    # Reviewer finding: index() must REPLACE the active corpus, not merge
+    # into it — an append-only _corpus_by_id would keep r2 eligible forever
+    # after a re-index that no longer includes it.
+    store = InMemoryCosineStore()
+    store.index([_record("r1", 1, "a"), _record("r2", 2, "b")], {"r1": [1.0, 0.0], "r2": [0.0, 1.0]})
+
+    store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+
+    unscoped = store.retrieve_top_k([0.0, 1.0], k=5)
+    assert "r2" not in {record.record_id for record in unscoped}
+
+    scoped = store.retrieve_top_k([0.0, 1.0], k=5, patient_id=2)
+    assert scoped == []  # r2 (patient 2) is gone even when queried by its own patient_id
+
+
 def test_in_memory_store_does_not_log_record_text_or_vectors(caplog):
     caplog.set_level(logging.INFO)
     store = InMemoryCosineStore()
@@ -244,6 +260,32 @@ def test_pgvector_store_only_reindexes_records_whose_text_changed():
     result = store.index(corpus_v2, vectors_v2)
 
     assert result == IndexResult(written=1, skipped=1)
+
+
+def test_pgvector_store_reindexing_with_a_smaller_corpus_evicts_the_dropped_record():
+    # Reviewer finding: index() must REPLACE the active corpus, not merge
+    # into it. rag_embeddings intentionally keeps the OLD row for r2 in the
+    # DB (migration 010) — record_id = ANY(:eligible_ids) is the only thing
+    # keeping it unreachable, so an append-only _corpus_by_id would silently
+    # widen that constraint back to include r2 on the very next
+    # retrieve_top_k call, including a patient-scoped one for r2's own
+    # patient_id. (The fake connection here doesn't simulate real SQL
+    # filtering, so this checks the constraint that WOULD be sent — the real
+    # filtering is proven against a live Postgres in the integration test.)
+    store = _pgvector_store(dimension=2)
+    store.index([_record("r1", 1, "a"), _record("r2", 2, "b")], {"r1": [1.0, 0.0], "r2": [0.0, 1.0]})
+
+    store.index([_record("r1", 1, "a")], {"r1": [1.0, 0.0]})
+
+    assert set(store._corpus_by_id.keys()) == {"r1"}
+
+    store._conn.select_response = [("r1",)]
+    store.retrieve_top_k([1.0, 0.0], k=5, patient_id=2)  # patient_id of the now-evicted r2
+
+    sql, params = store._conn.executed[-1]
+    eligible_ids_param = params[2]
+    assert "r2" not in eligible_ids_param
+    assert eligible_ids_param == ["r1"]
 
 
 def test_pgvector_store_reindexes_on_dimension_change_even_with_unchanged_text():
