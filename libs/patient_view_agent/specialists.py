@@ -61,6 +61,8 @@ class ViewReason(str, Enum):
     NON_TREATMENT_PURPOSE = "non_treatment_purpose"
     COMPOSE_FELL_BACK = "compose_fell_back"
     TIMEOUT = "timeout"
+    RUNTIME_UNAVAILABLE = "runtime_unavailable"  # a runtime's own dependency/framework failed BEFORE any specialist ran
+    NODE_FAILURE = "node_failure"  # a specialist/node raised unexpectedly AFTER one or more specialists already ran
 
 
 class EvidenceIntegrityError(Exception):

@@ -1,0 +1,663 @@
+"""Week 5 — contract-parity tests for the two switchable PatientViewRuntime
+implementations (libs/patient_view_agent/runtimes/{custom,langgraph_runtime}.py).
+
+The SAME test functions run against both runtimes via the `runtime_name`
+fixture — mirrors tests/test_eligibility_agent_runtimes.py's established
+shape — so a passing suite is evidence the *contract* holds for each
+implementation, not just that each does something plausible on its own.
+
+langgraph/langchain_core are faked via sys.modules (same pattern as
+test_eligibility_agent_runtimes.py's `_install_fake_langgraph`): no real
+install is required, and this validates
+runtimes/langgraph_runtime.py's own control flow against a documented shape
+of LangGraph's StateGraph/conditional-edges API, not compatibility with the
+real library.
+"""
+import logging
+import sys
+import types
+
+import pytest
+
+from libs.patient_view_agent import (
+    Action,
+    AuthorizationDenied,
+    AuthorizationRequest,
+    ChartRepositoryPort,
+    ChartResult,
+    EncounterRow,
+    FakePolicyAuthorization,
+    PatientViewOutcome,
+    Purpose,
+    RecordRow,
+    SeededChartRepository,
+    ViewReason,
+    build_runtime,
+    seed_derived_sample,
+)
+
+FIXED_CID = "corrid-contract"
+
+
+# --------------------------------------------------------------------------- #
+# Fake langgraph — mirrors test_eligibility_agent_runtimes.py's
+# _install_fake_langgraph, minus langchain_core.messages (this runtime never
+# uses LangChain message/chat-model types — composer.py calls libs.llm_client
+# directly, not a bound chat model).
+# --------------------------------------------------------------------------- #
+
+
+def _install_fake_langgraph(monkeypatch):
+    recorded = {"checkpointers": [], "node_names": set()}
+    _END = object()
+
+    class _FakeStateGraph:
+        def __init__(self, schema):
+            self._nodes = {}
+            self._entry = None
+            self._edges = {}
+            self._cond_edges = {}
+
+        def add_node(self, name, fn):
+            self._nodes[name] = fn
+            recorded["node_names"].add(name)
+
+        def set_entry_point(self, name):
+            self._entry = name
+
+        def add_edge(self, source, target):
+            self._edges[source] = target
+
+        def add_conditional_edges(self, source, router, mapping):
+            self._cond_edges[source] = (router, mapping)
+
+        def compile(self, checkpointer=None):
+            recorded["checkpointers"].append(checkpointer)
+            nodes, entry, edges, cond_edges = self._nodes, self._entry, self._edges, self._cond_edges
+
+            class _FakeCompiledGraph:
+                def invoke(self, state, config=None):
+                    current = entry
+                    while True:
+                        state = nodes[current](state)
+                        if current in cond_edges:
+                            router, mapping = cond_edges[current]
+                            target = mapping[router(state)]
+                        else:
+                            target = edges.get(current, _END)
+                        if target is _END:
+                            return state
+                        current = target
+
+            return _FakeCompiledGraph()
+
+    fake_graph_mod = types.ModuleType("langgraph.graph")
+    fake_graph_mod.StateGraph = _FakeStateGraph
+    fake_graph_mod.END = _END
+    fake_langgraph_mod = types.ModuleType("langgraph")
+
+    monkeypatch.setitem(sys.modules, "langgraph", fake_langgraph_mod)
+    monkeypatch.setitem(sys.modules, "langgraph.graph", fake_graph_mod)
+    return recorded
+
+
+@pytest.fixture(params=["custom", "langgraph"])
+def runtime_name(request, monkeypatch):
+    if request.param == "langgraph":
+        _install_fake_langgraph(monkeypatch)
+    return request.param
+
+
+def runtime(runtime_name):
+    return build_runtime(runtime_name)
+
+
+# --------------------------------------------------------------------------- #
+# Shared fixtures (mirrors tests/test_patient_view_runtime.py)
+# --------------------------------------------------------------------------- #
+
+
+def make_authorizer(grants=None, **kw):
+    return FakePolicyAuthorization(grants or {"clinician": {1042, 1043, 5000}}, id_factory=lambda: FIXED_CID, **kw)
+
+
+def req(actor="clinician", patient=1042, purpose=Purpose.TREATMENT):
+    return AuthorizationRequest(actor_id=actor, patient_id=patient, action=Action.VIEW_PATIENT_CHART, purpose=purpose)
+
+
+def fresh_repo():
+    return SeededChartRepository(*seed_derived_sample())
+
+
+class _FlakyRepo(ChartRepositoryPort):
+    """Returns a legitimate chart on its first call (the chart specialist)
+    and a chart with an extra, unsupported record on its second call (the
+    graph specialist's own internal read) — two independent reads that
+    disagree. Proves the evidence validator catches this regardless of which
+    runtime dispatches the two reads."""
+
+    def __init__(self, patient_id: int):
+        self._patient_id = patient_id
+        self.load_calls = 0
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        self.load_calls += 1
+        encounters = [EncounterRow(id=1, patient_id=patient_id, provider="Dr. Patel")]
+        if self.load_calls == 1:
+            records = []
+        else:
+            records = [RecordRow(id=999, encounter_id=1, patient_id=patient_id, kind="note", title="ghost", status="final")]
+        return ChartResult(patient_id=patient_id, encounters=encounters, records=records, reads=2)
+
+
+class _CrossPatientLeakRepo(ChartRepositoryPort):
+    """Returns a legitimate chart for the chart specialist's call, then a
+    chart containing a DIFFERENT patient's encounter for the graph
+    specialist's own internal `load_chart` call — reproduces graph.py's own
+    cross-patient tripwire (`CrossPatientEvidenceError`) firing from inside
+    `PatientGraphReader.build()`, not the evidence validator's
+    `EvidenceIntegrityError`. Proves both runtimes must refuse rather than
+    raise or escalate, and that the refusal's read count includes the graph
+    specialist's own internal read even though it was rejected."""
+
+    def __init__(self, patient_id: int):
+        self._patient_id = patient_id
+        self.load_calls = 0
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        self.load_calls += 1
+        other_patient_id = patient_id if self.load_calls == 1 else patient_id + 1
+        encounters = [EncounterRow(id=1, patient_id=other_patient_id, provider="Dr. Patel")]
+        return ChartResult(patient_id=patient_id, encounters=encounters, records=[], reads=2)
+
+
+class _RepoRaisesOnSecondCall(ChartRepositoryPort):
+    """Returns a legitimate chart for the chart specialist's call, then
+    raises a plain (unclassified) exception on the graph specialist's own
+    internal `load_chart` call — a repository error, NOT
+    `CrossPatientEvidenceError`/`EvidenceIntegrityError`. Neither runtime may
+    let this propagate past authorization, and the resulting failure result
+    must report the chart read that already completed, not zero."""
+
+    def __init__(self):
+        self.load_calls = 0
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        self.load_calls += 1
+        if self.load_calls == 1:
+            encounters = [EncounterRow(id=1, patient_id=patient_id, provider="Dr. Patel")]
+            return ChartResult(patient_id=patient_id, encounters=encounters, records=[], reads=2)
+        raise RuntimeError("simulated repository failure mid-read")
+
+
+# --------------------------------------------------------------------------- #
+# Contract tests — run once per runtime_name
+# --------------------------------------------------------------------------- #
+
+
+def test_successful_fan_out_completes_with_evidence_ids(runtime_name):
+    repo = fresh_repo()
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=make_authorizer(), repository=repo)
+
+    assert result.outcome == PatientViewOutcome.COMPLETED
+    assert result.escalation is False
+    assert ViewReason.EVIDENCE_FOUND in result.reasons
+    assert result.evidence_ids
+    assert result.execution.specialists_run == ["chart_read", "graph_read", "evidence_validate"]
+    assert result.execution.reads == 4
+    assert result.execution.reads_complete is True
+    assert result.patient_id == 1042
+    assert result.correlation_id == FIXED_CID
+
+
+def test_cross_patient_data_never_appears_for_authorized_patient(runtime_name):
+    repo = fresh_repo()
+    result = runtime(runtime_name).run(req(patient=1043), authorizer=make_authorizer(), repository=repo)
+    assert result.outcome == PatientViewOutcome.COMPLETED
+    assert "encounter:1" not in result.evidence_ids
+    assert "encounter:6" not in result.evidence_ids
+    assert {"encounter:4", "encounter:7"} <= set(result.evidence_ids)
+
+
+def test_cross_patient_graph_read_refuses_rather_than_raising_or_escalating(runtime_name):
+    repo = _CrossPatientLeakRepo(1042)
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.REFUSED
+    assert ViewReason.CROSS_PATIENT_EVIDENCE in result.reasons
+    assert result.evidence_ids == []
+    assert result.execution.specialists_run == ["chart_read"]
+    # chart_read's own read (2) + the graph specialist's own internal
+    # load_chart read (2) that happened inside PatientGraphReader.build()
+    # BEFORE it rejected — must not be silently dropped to 0.
+    assert result.execution.reads == 4
+    # Unlike a generic node failure, CrossPatientEvidenceError carries its
+    # own exact reads/truncated (graph.py's own tripwire captured them
+    # before rejecting) — this total is confirmed, not a floor.
+    assert result.execution.reads_complete is True
+
+
+def test_unexpected_repository_failure_after_chart_read_degrades_safely_with_partial_reads(runtime_name):
+    repo = _RepoRaisesOnSecondCall()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.evidence_ids == []
+    assert result.execution.specialists_run == ["chart_read"]
+    # Only the chart specialist's real, completed read (2) is reported — the
+    # graph specialist's own call raised before returning anything, so there
+    # is nothing to add on its behalf; this must not be a fabricated 0 for
+    # the chart read that DID complete, nor a crash for either runtime.
+    assert result.execution.reads == 2
+    # The graph specialist's OWN call raised without returning its
+    # PatientGraph, so its true read contribution is unknown, not zero —
+    # `reads` (2) is a FLOOR, not an exact count. reads_complete=False
+    # communicates that explicitly rather than letting `reads=2` read as
+    # authoritative.
+    assert result.execution.reads_complete is False
+
+
+def test_repository_failure_on_the_very_first_read_reports_reads_incomplete_not_a_confirmed_zero(runtime_name):
+    class _RepoRaisesImmediately(ChartRepositoryPort):
+        def load_chart(self, patient_id, *, correlation_id=""):
+            raise RuntimeError("simulated repository failure on the very first read")
+
+    authorizer = make_authorizer({"clinician": {1042}})
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=_RepoRaisesImmediately())
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.execution.specialists_run == []
+    # reads=0 here must NOT be read as "confirmed zero reads" — the chart
+    # specialist's own dispatch raised before returning anything, so
+    # whatever it may have already touched is not reflected.
+    assert result.execution.reads == 0
+    assert result.execution.reads_complete is False
+
+
+def _broken_compose_fn(scope, evidence, llm_client=None):
+    raise RuntimeError("simulated composer failure")
+
+
+def test_compose_failure_after_all_specialists_succeed_does_not_report_a_phantom_tool_call(runtime_name):
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = runtime(runtime_name).run(
+        req(patient=1042), authorizer=authorizer, repository=repo, compose_fn=_broken_compose_fn
+    )
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.execution.specialists_run == ["chart_read", "graph_read", "evidence_validate"]
+    # Exactly 3 tool calls — chart_read, graph_read, evidence_validate — all
+    # of which actually completed. compose_fn raising is NOT a 4th
+    # specialist dispatch; reporting tool_calls=4 here would be a phantom
+    # call that never happened (the exact bug this test guards against).
+    assert result.execution.tool_calls == 3
+    assert result.execution.reads == 4
+    # All 3 specialists already returned their real reads before compose_fn
+    # raised — this total is exact, not a floor.
+    assert result.execution.reads_complete is True
+
+
+def test_denied_request_performs_zero_reads(runtime_name):
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+    with pytest.raises(AuthorizationDenied):
+        runtime(runtime_name).run(req(patient=9999), authorizer=authorizer, repository=repo)
+    assert repo.load_calls == 0
+
+
+def test_missing_evidence_escalates_rather_than_guessing(runtime_name):
+    repo = fresh_repo()  # seed has no rows for patient 5000
+    authorizer = make_authorizer({"clinician": {5000}})
+    result = runtime(runtime_name).run(req(patient=5000), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert result.escalation is True
+    assert ViewReason.NO_EVIDENCE in result.reasons
+    assert result.evidence_ids == ["patient:5000"]
+
+
+def test_non_treatment_purpose_forces_escalation_even_with_evidence(runtime_name):
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}}, allowed_purposes={Purpose.TREATMENT, Purpose.PAYMENT})
+    result = runtime(runtime_name).run(req(patient=1042, purpose=Purpose.PAYMENT), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert result.escalation is True
+    assert ViewReason.NON_TREATMENT_PURPOSE in result.reasons
+    assert result.evidence_ids
+
+
+def test_evidence_mismatch_between_specialists_is_refused_not_shown(runtime_name):
+    repo = _FlakyRepo(1042)
+    authorizer = make_authorizer({"clinician": {1042}})
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.REFUSED
+    assert result.escalation is True
+    assert ViewReason.UNSUPPORTED_EVIDENCE in result.reasons
+    assert result.evidence_ids == []
+    assert "refused" in result.summary.lower()
+
+
+def test_elapsed_time_budget_overrun_is_flagged_and_escalates(runtime_name):
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+    ticks = iter([0.0, 100.0, 100.0, 100.0])
+
+    def fake_clock():
+        return next(ticks, 100.0)
+
+    result = runtime(runtime_name).run(
+        req(patient=1042), authorizer=authorizer, repository=repo, max_seconds=1.0, clock=fake_clock
+    )
+    assert ViewReason.TIMEOUT in result.reasons
+    assert result.escalation is True
+    assert result.outcome == PatientViewOutcome.ESCALATED
+
+
+def test_full_run_logs_contain_no_phi(runtime_name, caplog):
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+    with caplog.at_level(logging.INFO):
+        runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=repo)
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    for forbidden in ["Maria", "Gonzalez", "O'Brien", "412-55-9981", "clinician"]:
+        assert forbidden not in blob, f"PHI/identifier leaked into logs: {forbidden!r}"
+
+
+# --------------------------------------------------------------------------- #
+# Equivalence: both runtimes must produce the SAME PatientViewResult
+# --------------------------------------------------------------------------- #
+
+
+def _fixed_clock():
+    ticks = iter([0.0, 1.0])
+    return lambda: next(ticks)
+
+
+def test_both_runtimes_produce_an_identical_result_for_the_same_seeded_input(monkeypatch):
+    _install_fake_langgraph(monkeypatch)
+
+    custom_result = build_runtime("custom").run(
+        req(patient=1042), authorizer=make_authorizer(), repository=fresh_repo(), clock=_fixed_clock()
+    )
+    langgraph_result = build_runtime("langgraph").run(
+        req(patient=1042), authorizer=make_authorizer(), repository=fresh_repo(), clock=_fixed_clock()
+    )
+
+    assert custom_result == langgraph_result
+
+
+def test_both_runtimes_produce_an_identical_refusal_for_a_flaky_repo(monkeypatch):
+    _install_fake_langgraph(monkeypatch)
+
+    custom_result = build_runtime("custom").run(
+        req(patient=1042), authorizer=make_authorizer(), repository=_FlakyRepo(1042), clock=_fixed_clock()
+    )
+    langgraph_result = build_runtime("langgraph").run(
+        req(patient=1042), authorizer=make_authorizer(), repository=_FlakyRepo(1042), clock=_fixed_clock()
+    )
+
+    assert custom_result == langgraph_result
+
+
+# --------------------------------------------------------------------------- #
+# LangGraph-specific: no tool-calling agent, no checkpointer / no PHI at rest
+# --------------------------------------------------------------------------- #
+
+
+def test_langgraph_runtime_has_no_tool_calling_agent_node(monkeypatch):
+    # Every node is a fixed, hardcoded function — no node whose job is to let
+    # a model pick a tool. If a future edit accidentally added an
+    # agent/tool-calling node, this fails.
+    recorded = _install_fake_langgraph(monkeypatch)
+    repo = fresh_repo()
+
+    build_runtime("langgraph").run(req(patient=1042), authorizer=make_authorizer(), repository=repo)
+
+    assert recorded["node_names"] == {"chart", "graph_read", "evidence", "compose", "final_validate"}
+
+
+def test_langgraph_runtime_compiles_with_no_checkpointer(monkeypatch):
+    # A checkpointer would persist graph state — including evidence ids — as
+    # a new PHI-at-rest surface. Must always be None, never an in-memory or
+    # backed saver.
+    recorded = _install_fake_langgraph(monkeypatch)
+    repo = fresh_repo()
+
+    build_runtime("langgraph").run(req(patient=1042), authorizer=make_authorizer(), repository=repo)
+
+    assert recorded["checkpointers"] == [None]
+
+
+def test_langgraph_runtime_denies_before_the_graph_is_even_built(monkeypatch):
+    # Authorization happens outside the graph — a DENY must never construct
+    # or compile a graph at all, let alone invoke one.
+    recorded = _install_fake_langgraph(monkeypatch)
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    with pytest.raises(AuthorizationDenied):
+        build_runtime("langgraph").run(req(patient=9999), authorizer=authorizer, repository=repo)
+
+    assert recorded["node_names"] == set()
+    assert recorded["checkpointers"] == []
+    assert repo.load_calls == 0
+
+
+def test_langgraph_runtime_denies_before_importing_langgraph_at_all():
+    # Regression test for a review finding: authorize() must run BEFORE the
+    # `from langgraph.graph import ...` line, not just before the graph is
+    # built — otherwise a denied request on an installation that hasn't
+    # opted into requirements-langgraph.txt (the default: langgraph is
+    # optional and uninstalled) fails with ModuleNotFoundError instead of
+    # AuthorizationDenied, silently losing the deny-first guarantee. This
+    # deliberately does NOT fake langgraph (unlike every other langgraph
+    # test in this file) — it proves the real import order against the real
+    # absence of the package, which a faked sys.modules entry can never
+    # exercise (the import always "succeeds" against a fake).
+    assert "langgraph" not in sys.modules, "langgraph must not already be imported for this test to mean anything"
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    with pytest.raises(AuthorizationDenied):
+        build_runtime("langgraph").run(req(patient=9999), authorizer=authorizer, repository=repo)
+
+    assert repo.load_calls == 0
+    assert "langgraph" not in sys.modules  # denial short-circuited before the import ever ran
+
+
+def test_langgraph_runtime_degrades_safely_for_an_authorized_request_when_langgraph_is_absent():
+    # Regression test for a follow-up review finding: authorize-before-import
+    # (the fix above) closes the DENIED path, but an AUTHORIZED request still
+    # hit the same missing import and crashed with ModuleNotFoundError — no
+    # PatientViewResult was ever returned, violating the contract's "never
+    # raise downstream of authorization" promise. This deliberately does NOT
+    # fake langgraph, proving the real, uninstalled case degrades to a safe
+    # ESCALATED result instead of raising.
+    assert "langgraph" not in sys.modules, "langgraph must not already be imported for this test to mean anything"
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})  # this patient IS authorized
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert result.escalation is True
+    assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
+    assert result.evidence_ids == []
+    assert repo.load_calls == 0  # the import failed before any specialist ran
+    assert "langgraph" not in sys.modules
+
+
+def _install_fake_langgraph_with_broken_compile(monkeypatch):
+    class _BrokenStateGraph:
+        def __init__(self, schema):
+            pass
+
+        def add_node(self, name, fn):
+            pass
+
+        def set_entry_point(self, name):
+            pass
+
+        def add_edge(self, source, target):
+            pass
+
+        def add_conditional_edges(self, source, router, mapping):
+            pass
+
+        def compile(self, checkpointer=None):
+            raise RuntimeError("simulated langgraph compile failure")
+
+    fake_graph_mod = types.ModuleType("langgraph.graph")
+    fake_graph_mod.StateGraph = _BrokenStateGraph
+    fake_graph_mod.END = object()
+    fake_langgraph_mod = types.ModuleType("langgraph")
+    monkeypatch.setitem(sys.modules, "langgraph", fake_langgraph_mod)
+    monkeypatch.setitem(sys.modules, "langgraph.graph", fake_graph_mod)
+
+
+def _install_fake_langgraph_with_broken_invoke(monkeypatch):
+    class _BrokenCompiledGraph:
+        def invoke(self, state, config=None):
+            raise RuntimeError("simulated langgraph invoke failure")
+
+    class _StateGraphThatCompilesToABrokenGraph:
+        def __init__(self, schema):
+            pass
+
+        def add_node(self, name, fn):
+            pass
+
+        def set_entry_point(self, name):
+            pass
+
+        def add_edge(self, source, target):
+            pass
+
+        def add_conditional_edges(self, source, router, mapping):
+            pass
+
+        def compile(self, checkpointer=None):
+            return _BrokenCompiledGraph()
+
+    fake_graph_mod = types.ModuleType("langgraph.graph")
+    fake_graph_mod.StateGraph = _StateGraphThatCompilesToABrokenGraph
+    fake_graph_mod.END = object()
+    fake_langgraph_mod = types.ModuleType("langgraph")
+    monkeypatch.setitem(sys.modules, "langgraph", fake_langgraph_mod)
+    monkeypatch.setitem(sys.modules, "langgraph.graph", fake_graph_mod)
+
+
+def test_langgraph_runtime_degrades_safely_when_compile_raises(monkeypatch):
+    # Regression test for a follow-up review finding: the safe-degradation
+    # path originally only covered the import failing. Once StateGraph
+    # imports successfully, graph construction/compile()/invoke() can still
+    # raise — from a version mismatch or a framework-internal error — and
+    # that must degrade the same way, not escape as an uncaught exception
+    # for an authorized request.
+    _install_fake_langgraph_with_broken_compile(monkeypatch)
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
+    assert result.evidence_ids == []
+
+
+def test_langgraph_runtime_degrades_safely_when_invoke_raises(monkeypatch):
+    _install_fake_langgraph_with_broken_invoke(monkeypatch)
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    # invoke() failing is classified as NODE_FAILURE, not RUNTIME_UNAVAILABLE
+    # — see the module docstring's "Dependency/framework-failure policy":
+    # invoke() is where reads actually happen, so its failures must be able
+    # to report partial reads (proven by the dedicated test below), unlike
+    # import/construction/compile failures where zero reads are guaranteed.
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.evidence_ids == []
+
+
+def test_langgraph_runtime_reports_partial_reads_when_a_node_fails_after_chart_read(monkeypatch):
+    _install_fake_langgraph(monkeypatch)
+    import libs.patient_view_agent.runtimes.langgraph_runtime as lgr
+
+    def _broken_validate_evidence(scope, chart, graph):
+        raise RuntimeError("simulated node failure")
+
+    monkeypatch.setattr(lgr, "validate_evidence", _broken_validate_evidence)
+
+    repo = fresh_repo()
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.execution.specialists_run == ["chart_read", "graph_read"]
+    assert result.execution.reads == 4  # the chart + graph reads that DID happen
+
+
+# --------------------------------------------------------------------------- #
+# Factory: fail-closed, config-only selection
+# --------------------------------------------------------------------------- #
+
+
+def test_build_runtime_rejects_unknown_name():
+    with pytest.raises(ValueError, match="Unknown PATIENT_VIEW_RUNTIME"):
+        build_runtime("autopilot")
+
+
+def test_build_runtime_fails_closed_on_unrecognized_env_value(monkeypatch):
+    monkeypatch.setenv("PATIENT_VIEW_RUNTIME", "some-typo")
+    with pytest.raises(ValueError, match="Unknown PATIENT_VIEW_RUNTIME"):
+        build_runtime()
+
+
+def test_build_runtime_rejects_an_explicit_empty_string_rather_than_defaulting(monkeypatch):
+    # Regression test for a review finding: name = name or os.getenv(...)
+    # treats "" as falsy, so build_runtime("") would silently fall through
+    # to the env var/default ("custom") instead of failing closed like any
+    # other unrecognized name — a real hazard if an empty string is ever
+    # threaded through from a caller's own (possibly blank) config value.
+    monkeypatch.delenv("PATIENT_VIEW_RUNTIME", raising=False)
+    with pytest.raises(ValueError, match="Unknown PATIENT_VIEW_RUNTIME"):
+        build_runtime("")
+
+
+def test_build_runtime_fails_closed_on_an_empty_env_value(monkeypatch):
+    monkeypatch.setenv("PATIENT_VIEW_RUNTIME", "")
+    with pytest.raises(ValueError, match="Unknown PATIENT_VIEW_RUNTIME"):
+        build_runtime()
+
+
+def test_build_runtime_defaults_to_custom(monkeypatch):
+    monkeypatch.delenv("PATIENT_VIEW_RUNTIME", raising=False)
+    from libs.patient_view_agent.runtimes.custom import CustomPatientViewRuntime
+
+    assert isinstance(build_runtime(), CustomPatientViewRuntime)
+
+
+def test_langgraph_runtime_is_never_imported_when_custom_is_selected():
+    # Importing/selecting "custom" must not require langgraph installed —
+    # proven by NOT faking it here and confirming build_runtime("custom")
+    # still works.
+    assert sys.modules.get("langgraph") is None
+    runtime_obj = build_runtime("custom")
+    result = runtime_obj.run(req(patient=1042), authorizer=make_authorizer(), repository=fresh_repo())
+    assert result.outcome == PatientViewOutcome.COMPLETED
