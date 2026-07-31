@@ -151,8 +151,19 @@ def build_runtime(name: str = None, **kwargs) -> PatientViewRuntime:
     libs/eligibility_agent/runtime.py::build_agent_runtime. `custom` must be
     requested explicitly (by name or via the env var) — it is the configured
     default, not an implicit fallback for an unrecognized value.
+
+    Only a truly UNSET `name` (`None`) reads the env var/default — an
+    explicitly passed empty string is treated as any other unrecognized
+    name and raises. `name = name or os.getenv(...)` would get this wrong:
+    `""` is falsy, so `or` would silently fall through to the env var/default
+    exactly as if the caller had passed nothing at all, defeating fail-closed
+    for a blank config value (a real deployment hazard — a `PATIENT_VIEW_
+    RUNTIME=""` typo or an empty string threaded through from elsewhere must
+    not silently select the rollback runtime and invalidate a runtime
+    comparison).
     """
-    name = name or os.getenv("PATIENT_VIEW_RUNTIME", "custom")
+    if name is None:
+        name = os.getenv("PATIENT_VIEW_RUNTIME", "custom")
 
     if name == "custom":
         from .runtimes.custom import CustomPatientViewRuntime

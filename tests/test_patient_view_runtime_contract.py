@@ -386,6 +386,23 @@ def test_build_runtime_fails_closed_on_unrecognized_env_value(monkeypatch):
         build_runtime()
 
 
+def test_build_runtime_rejects_an_explicit_empty_string_rather_than_defaulting(monkeypatch):
+    # Regression test for a review finding: name = name or os.getenv(...)
+    # treats "" as falsy, so build_runtime("") would silently fall through
+    # to the env var/default ("custom") instead of failing closed like any
+    # other unrecognized name — a real hazard if an empty string is ever
+    # threaded through from a caller's own (possibly blank) config value.
+    monkeypatch.delenv("PATIENT_VIEW_RUNTIME", raising=False)
+    with pytest.raises(ValueError, match="Unknown PATIENT_VIEW_RUNTIME"):
+        build_runtime("")
+
+
+def test_build_runtime_fails_closed_on_an_empty_env_value(monkeypatch):
+    monkeypatch.setenv("PATIENT_VIEW_RUNTIME", "")
+    with pytest.raises(ValueError, match="Unknown PATIENT_VIEW_RUNTIME"):
+        build_runtime()
+
+
 def test_build_runtime_defaults_to_custom(monkeypatch):
     monkeypatch.delenv("PATIENT_VIEW_RUNTIME", raising=False)
     from libs.patient_view_agent.runtimes.custom import CustomPatientViewRuntime
