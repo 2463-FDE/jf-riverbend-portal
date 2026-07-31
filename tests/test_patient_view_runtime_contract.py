@@ -485,6 +485,38 @@ def test_langgraph_runtime_reports_partial_reads_when_a_node_fails_after_chart_r
     assert result.execution.reads == 4  # the chart + graph reads that DID happen
 
 
+class _CrossPatientLeakRepo(ChartRepositoryPort):
+    """Returns a legitimate chart for the chart specialist's call, then a
+    chart containing a DIFFERENT patient's encounter for the graph
+    specialist's own internal `load_chart` call — reproduces graph.py's own
+    cross-patient tripwire (`CrossPatientEvidenceError`) firing from inside
+    `PatientGraphReader.build()`, not the evidence validator's
+    `EvidenceIntegrityError`."""
+
+    def __init__(self, patient_id: int):
+        self._patient_id = patient_id
+        self.load_calls = 0
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        self.load_calls += 1
+        other_patient_id = patient_id if self.load_calls == 1 else patient_id + 1
+        encounters = [EncounterRow(id=1, patient_id=other_patient_id, provider="Dr. Patel")]
+        return ChartResult(patient_id=patient_id, encounters=encounters, records=[], reads=2)
+
+
+def test_langgraph_runtime_refuses_rather_than_escalates_on_a_cross_patient_graph_read(monkeypatch):
+    _install_fake_langgraph(monkeypatch)
+    repo = _CrossPatientLeakRepo(1042)
+    authorizer = make_authorizer({"clinician": {1042}})
+
+    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+
+    assert result.outcome == PatientViewOutcome.REFUSED
+    assert ViewReason.CROSS_PATIENT_EVIDENCE in result.reasons
+    assert result.evidence_ids == []
+    assert result.execution.specialists_run == ["chart_read"]
+
+
 # --------------------------------------------------------------------------- #
 # Factory: fail-closed, config-only selection
 # --------------------------------------------------------------------------- #

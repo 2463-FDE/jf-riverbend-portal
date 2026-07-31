@@ -4,8 +4,16 @@ supervisor — see docs/analysis/W5-orchestration-framework-evaluation.md §8.
 A `StateGraph` mirroring the exact fixed sequence
 `runtimes/custom.py::CustomPatientViewRuntime` runs sequentially:
 
-    chart -> graph_read -> evidence -> (refused? END) -> compose
-    -> final_validate -> END
+    chart -> graph_read -> (refused? END) -> evidence -> (refused? END)
+    -> compose -> final_validate -> END
+
+`graph_read` has its own conditional exit (not just `evidence`): the graph
+specialist's OWN internal cross-patient tripwire (`graph.py`'s
+`CrossPatientEvidenceError`, raised from inside `PatientGraphReader.build()`)
+is a distinct integrity failure from the evidence validator's
+`EvidenceIntegrityError` and is caught right where it's raised, not by the
+generic `compiled.invoke()` catch-all below — see "Dependency/framework-
+failure policy" for why that catch-all must never see it.
 
 Authorization happens BEFORE the graph is built or invoked, exactly like the
 custom runtime: `authorizer.authorize(request)` raises `AuthorizationDenied`
@@ -74,6 +82,21 @@ guarantees:
   captured in a `completed` dict by closure (not read from graph state,
   which invoke() never returns on failure) for exactly this reason.
 
+`compiled.invoke()`'s catch-all is deliberately generic (`except Exception`)
+because it exists to catch truly UNEXPECTED node/framework failures — it must
+NOT be where a KNOWN, already-classified integrity failure gets reported.
+`graph.py`'s `CrossPatientEvidenceError` (raised from inside
+`PatientGraphReader.build()` when a row/node's patient id disagrees with the
+authorized scope — a real potential cross-patient leak, per RIV-201) is
+caught explicitly inside `graph_node`, one level below the generic net, and
+routed to `runtime.refused_result` with `ViewReason.CROSS_PATIENT_EVIDENCE` —
+the same reason `evidence_node`'s sibling `EvidenceIntegrityError` handling
+already uses for the analogous chart/graph-disagreement case. An earlier
+version of this runtime let `CrossPatientEvidenceError` fall through to the
+generic `invoke()` catch-all, which reported it as a generic ESCALATED/
+NODE_FAILURE — masking a security-relevant integrity rejection from any
+audit/recovery code that keys off the refusal reason.
+
 Both nets are broader than `runtimes/custom.py`, which does NOT wrap its
 specialist calls this defensively and would crash on a genuinely unexpected
 bug (e.g. a broken custom repository) — a deliberate asymmetry: custom is
@@ -100,7 +123,7 @@ from libs.safe_logging import get_safe_logger
 from ..authorization import AuthorizationPort
 from ..composer import compose as _default_compose
 from ..contracts import AuthorizationRequest, GraphLimits
-from ..graph import PatientGraphReader
+from ..graph import CrossPatientEvidenceError, PatientGraphReader
 from ..repository import ChartRepositoryPort
 from ..runtime import (
     PatientViewResult,
@@ -159,7 +182,22 @@ class LangGraphPatientViewRuntime:
             return state
 
         def graph_node(state):
-            graph_result = run_specialist(GRAPH_READ_TOOL, PatientGraphReader(scope, repository, limits=limits).build)
+            try:
+                graph_result = run_specialist(
+                    GRAPH_READ_TOOL, PatientGraphReader(scope, repository, limits=limits).build
+                )
+            except CrossPatientEvidenceError:
+                # The graph specialist's OWN internal cross-patient tripwire
+                # (graph.py's `_reject`) fired — this is a security-relevant
+                # integrity failure, not a generic node failure, and must be
+                # classified as ViewReason.CROSS_PATIENT_EVIDENCE so audit
+                # and recovery paths that key off the refusal reason still
+                # see it. Deliberately NOT appended to specialists_run, same
+                # as evidence_node's EvidenceIntegrityError handling below:
+                # the call was rejected, not completed.
+                state["refused"] = True
+                state["refuse_reasons"] = [ViewReason.CROSS_PATIENT_EVIDENCE]
+                return state
             completed["graph"] = graph_result
             state["graph"] = graph_result
             specialists_run.append(GRAPH_READ_TOOL)
@@ -179,6 +217,9 @@ class LangGraphPatientViewRuntime:
                 state["refused"] = True
                 state["refuse_reasons"] = exc.reasons
             return state
+
+        def route_after_graph_read(state):
+            return "end" if state.get("refused") else "evidence"
 
         def route_after_evidence(state):
             return "end" if state.get("refused") else "compose"
@@ -218,7 +259,7 @@ class LangGraphPatientViewRuntime:
             graph.add_node("final_validate", final_validate_node)
             graph.set_entry_point("chart")
             graph.add_edge("chart", "graph_read")
-            graph.add_edge("graph_read", "evidence")
+            graph.add_conditional_edges("graph_read", route_after_graph_read, {"evidence": "evidence", "end": END})
             graph.add_conditional_edges("evidence", route_after_evidence, {"compose": "compose", "end": END})
             graph.add_edge("compose", "final_validate")
             graph.add_edge("final_validate", END)
@@ -264,20 +305,27 @@ class LangGraphPatientViewRuntime:
             )
 
         chart = final_state["chart"]
-        graph_result = final_state["graph"]
 
         if final_state.get("refused"):
+            # `graph` is only in state if graph_node itself succeeded — a
+            # refusal routed straight from graph_node (CrossPatientEvidenceError)
+            # never set it, so graph_reads/graph_truncated must fall back to
+            # 0/False rather than KeyError, same "report only what actually
+            # completed" principle as node_failure_result() above.
+            graph_result = final_state.get("graph")
             return refused_result(
                 correlation_id=scope.correlation_id,
                 patient_id=scope.patient_id,
                 specialists_run=specialists_run,
                 reasons=final_state["refuse_reasons"],
                 chart_reads=chart.reads,
-                graph_reads=graph_result.reads,
+                graph_reads=graph_result.reads if graph_result else 0,
                 chart_truncated=chart.truncated,
-                graph_truncated=graph_result.truncated,
+                graph_truncated=graph_result.truncated if graph_result else False,
                 elapsed_seconds=clock() - start,
             )
+
+        graph_result = final_state["graph"]
 
         return finalize_result(
             correlation_id=scope.correlation_id,
