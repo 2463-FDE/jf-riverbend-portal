@@ -99,11 +99,22 @@ class PatientViewOutcome(str, Enum):
 
 
 class ExecutionMetadata(BaseModel):
+    """`reads_complete=False` means `reads` is a FLOOR, not an exact count:
+    an allowlisted specialist dispatch (chart_read/graph_read/
+    evidence_validate) was in flight and raised before returning its
+    ChartResult/PatientGraph, so whatever it may have already read is not
+    reflected in `reads` — there is no channel to recover that count from an
+    arbitrary repository/specialist exception (see `node_failure_result`).
+    Every other path (success, refusal, runtime-unavailable, or a
+    post-evidence compose/finalize failure) sets `reads_complete=True`:
+    every specialist that ran returned its real count."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     specialists_run: list[str]
     tool_calls: int
     reads: int
+    reads_complete: bool
     truncated: bool
     compose_attempts: int
     elapsed_seconds: float
@@ -206,7 +217,12 @@ def refused_result(
     """Shared by both runtimes for the evidence-integrity-failure path: an
     independent-read disagreement is refused before composition ever runs.
     `tool_calls` counts the rejected evidence_validate dispatch even though it
-    is deliberately not appended to `specialists_run` (it never completed)."""
+    is deliberately not appended to `specialists_run` (it never completed).
+    `reads_complete=True` always: whether this is an `EvidenceIntegrityError`
+    (chart AND graph both already succeeded and returned real objects) or a
+    `CrossPatientEvidenceError` (the caller passes `exc.reads`, the exact
+    count graph.py's own tripwire captured before rejecting), `chart_reads`/
+    `graph_reads` are always confirmed values here, never a placeholder."""
     log.warning("patient_view refused (correlation_id=%s, reasons=%s)", correlation_id, [r.value for r in reasons])
     return PatientViewResult(
         outcome=PatientViewOutcome.REFUSED,
@@ -221,6 +237,7 @@ def refused_result(
             specialists_run=specialists_run,
             tool_calls=len(specialists_run) + 1,
             reads=chart_reads + graph_reads,
+            reads_complete=True,  # chart_reads/graph_reads are always exact here — see refused_result's own docstring
             truncated=chart_truncated or graph_truncated,
             compose_attempts=0,
             elapsed_seconds=elapsed_seconds,
@@ -272,6 +289,7 @@ def runtime_unavailable_result(
             specialists_run=[],
             tool_calls=0,
             reads=0,
+            reads_complete=True,  # zero reads occurred BY CONSTRUCTION here — a confirmed 0, not a floor
             truncated=False,
             compose_attempts=0,
             elapsed_seconds=elapsed_seconds,
@@ -320,7 +338,18 @@ def node_failure_result(
     used_fallback)` tuple gives the caller no channel to recover how many
     attempts it made before failing — 0 here means "not confirmed," the
     same honest-zero convention used elsewhere in this module, not a claim
-    that zero attempts were made."""
+    that zero attempts were made.
+
+    `reads_complete` is set to `not failed_dispatch`: when `failed_dispatch`
+    is true, the specialist whose OWN call raised never returned its
+    ChartResult/PatientGraph, so whatever it may have already read against
+    the repository is NOT reflected in `chart_reads`/`graph_reads` (there is
+    no channel to recover a partial count from an arbitrary repository
+    exception — a real review finding: reporting a bare `reads=0` in this
+    case reads as an authoritative, complete count when it is actually only
+    a floor). When `failed_dispatch` is false (a post-evidence compose/
+    finalize failure), every specialist that ran already returned its real
+    count, so `reads` IS exact — `reads_complete=True`."""
     log.error(
         "patient_view node failure (correlation_id=%s, specialists_run=%s, error_type=%s)",
         correlation_id,
@@ -340,6 +369,7 @@ def node_failure_result(
             specialists_run=specialists_run,
             tool_calls=len(specialists_run) + 1 if failed_dispatch else len(specialists_run),
             reads=chart_reads + graph_reads,
+            reads_complete=not failed_dispatch,
             truncated=chart_truncated or graph_truncated,
             compose_attempts=compose_attempts,
             elapsed_seconds=elapsed_seconds,
@@ -367,7 +397,9 @@ def finalize_result(
     composer's citations on their own — re-check against the evidence
     validator's approved set (the final validator), then dispatch to
     REFUSED/ESCALATED/COMPLETED by this module's own deterministic rules,
-    never the composer/model."""
+    never the composer/model. `reads_complete=True` always: reaching this
+    function means chart, graph, and evidence validation all already
+    succeeded and returned real objects, so `reads` is exact."""
     approved_ids = set(evidence.evidence_ids)
     if not set(composed.cited_evidence_ids) <= approved_ids:
         reasons = [*reasons, ViewReason.UNSUPPORTED_EVIDENCE]
@@ -380,6 +412,7 @@ def finalize_result(
         specialists_run=specialists_run,
         tool_calls=len(specialists_run),
         reads=chart_reads + graph_reads,
+        reads_complete=True,
         truncated=chart_truncated or graph_truncated,
         compose_attempts=compose_attempts,
         elapsed_seconds=elapsed_seconds,

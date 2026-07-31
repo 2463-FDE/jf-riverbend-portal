@@ -205,6 +205,7 @@ def test_successful_fan_out_completes_with_evidence_ids(runtime_name):
     assert result.evidence_ids
     assert result.execution.specialists_run == ["chart_read", "graph_read", "evidence_validate"]
     assert result.execution.reads == 4
+    assert result.execution.reads_complete is True
     assert result.patient_id == 1042
     assert result.correlation_id == FIXED_CID
 
@@ -232,6 +233,10 @@ def test_cross_patient_graph_read_refuses_rather_than_raising_or_escalating(runt
     # load_chart read (2) that happened inside PatientGraphReader.build()
     # BEFORE it rejected — must not be silently dropped to 0.
     assert result.execution.reads == 4
+    # Unlike a generic node failure, CrossPatientEvidenceError carries its
+    # own exact reads/truncated (graph.py's own tripwire captured them
+    # before rejecting) — this total is confirmed, not a floor.
+    assert result.execution.reads_complete is True
 
 
 def test_unexpected_repository_failure_after_chart_read_degrades_safely_with_partial_reads(runtime_name):
@@ -249,6 +254,30 @@ def test_unexpected_repository_failure_after_chart_read_degrades_safely_with_par
     # is nothing to add on its behalf; this must not be a fabricated 0 for
     # the chart read that DID complete, nor a crash for either runtime.
     assert result.execution.reads == 2
+    # The graph specialist's OWN call raised without returning its
+    # PatientGraph, so its true read contribution is unknown, not zero —
+    # `reads` (2) is a FLOOR, not an exact count. reads_complete=False
+    # communicates that explicitly rather than letting `reads=2` read as
+    # authoritative.
+    assert result.execution.reads_complete is False
+
+
+def test_repository_failure_on_the_very_first_read_reports_reads_incomplete_not_a_confirmed_zero(runtime_name):
+    class _RepoRaisesImmediately(ChartRepositoryPort):
+        def load_chart(self, patient_id, *, correlation_id=""):
+            raise RuntimeError("simulated repository failure on the very first read")
+
+    authorizer = make_authorizer({"clinician": {1042}})
+    result = runtime(runtime_name).run(req(patient=1042), authorizer=authorizer, repository=_RepoRaisesImmediately())
+
+    assert result.outcome == PatientViewOutcome.ESCALATED
+    assert ViewReason.NODE_FAILURE in result.reasons
+    assert result.execution.specialists_run == []
+    # reads=0 here must NOT be read as "confirmed zero reads" — the chart
+    # specialist's own dispatch raised before returning anything, so
+    # whatever it may have already touched is not reflected.
+    assert result.execution.reads == 0
+    assert result.execution.reads_complete is False
 
 
 def _broken_compose_fn(scope, evidence, llm_client=None):
@@ -272,6 +301,9 @@ def test_compose_failure_after_all_specialists_succeed_does_not_report_a_phantom
     # call that never happened (the exact bug this test guards against).
     assert result.execution.tool_calls == 3
     assert result.execution.reads == 4
+    # All 3 specialists already returned their real reads before compose_fn
+    # raised — this total is exact, not a floor.
+    assert result.execution.reads_complete is True
 
 
 def test_denied_request_performs_zero_reads(runtime_name):
