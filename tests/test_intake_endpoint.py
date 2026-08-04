@@ -145,9 +145,14 @@ def test_response_never_leaks_the_raw_request_body_pattern(monkeypatch):
 
 
 def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
-    # D1 (Week 1 catch-up fix): the front desk still gets a log line recording
-    # that a registration happened, but PHI-shaped values must never appear in
-    # it — see app_mod's use of libs.safe_logging.redact() before logging.
+    # D1 (Week 1 catch-up fix, revised after PR review): the front desk still
+    # gets a log line recording that a registration happened, but it is now
+    # built from an explicit allowlist (_intake_log_summary) rather than a
+    # blocklist-redacted copy of the request body. A prior version of this
+    # fix used redact() on the whole body, which still leaked
+    # insurance.member_id/group_number because they weren't in the blocklist
+    # — this test asserts those specific identifiers (and every other
+    # demographic value) never reach the log line, by construction.
     def _post(url, *, json, headers, timeout):
         class _Resp:
             def raise_for_status(self):
@@ -177,14 +182,20 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
                 "phone": "555-0100",
                 "email": "jane@example.test",
                 "notes": "chief complaint text",
-            }
+            },
+            insurance={
+                "payer_name": "Aetna",
+                "member_id": "AET-SECRET-123456",
+                "group_number": "GRP-9987",
+                "plan_type": "PPO",
+            },
         ),
         db=db,
         x_request_id=None,
     )
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "POST /intake body=" in log_text  # the record itself is preserved
+    assert "POST /intake summary=" in log_text  # the record itself is preserved
     for leaked in (
         "Jane Roe",
         "Jane",
@@ -196,9 +207,13 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
         "555-0100",
         "jane@example.test",
         "chief complaint text",
+        "Aetna",
+        "AET-SECRET-123456",  # the PR review's specific finding
+        "GRP-9987",  # the PR review's specific finding
     ):
         assert leaked not in log_text, f"{leaked!r} leaked into the intake log line"
-    assert "***REDACTED***" in log_text
-    # Non-PHI fields (e.g. insurance carrier) are still visible for the
+    # Allowlisted, non-identifying fields are still present for the
     # front-desk record-of-registration purpose.
-    assert "Aetna" in log_text
+    assert '"created_via": "self_service"' in log_text
+    assert '"insurance_plan_type": "PPO"' in log_text
+    assert '"has_ssn": true' in log_text

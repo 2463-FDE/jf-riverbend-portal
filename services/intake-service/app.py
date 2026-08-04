@@ -6,14 +6,21 @@ We create the patient chart, attach insurance coverage (if supplied), record the
 signed consents, and enqueue an async payer eligibility check before returning.
 
 Inherited shortcomings (left as-is from the handoff):
-  * D1 — RESOLVED (Week 1 catch-up): the request body previously written to
-    the file log at INFO carried PHI (name/dob/ssn/address/notes) in plain
-    text. The log line itself is preserved (front desk still gets a record
-    of every registration), but the body is now passed through
-    libs/safe_logging.redact() first, so PHI-shaped fields are replaced with
-    a redaction marker before they ever reach the file handler in
-    logging_config.py. This does not retroactively scrub prior log entries
-    written before this fix — see docs/runbook.md for that gap.
+  * D1 — RESOLVED (Week 1 catch-up, revised): the request body previously
+    written to the file log at INFO carried PHI (name/dob/ssn/address/notes)
+    in plain text. A first fix ran the body through
+    libs/safe_logging.redact() before logging it, but that is a *blocklist*
+    — it only protects field names it's told about, and a PR review caught
+    that insurance identifiers (member_id/group_number) still leaked because
+    they weren't in the blocklist. Rather than keep extending that list
+    every time a new field is added anywhere in this request's schema, this
+    line now logs an explicit *allowlist* of known-safe fields
+    (_intake_log_summary) instead of any form of the request body. The log
+    line itself is preserved (front desk still gets a record of every
+    registration attempt), but nothing PHI-shaped can leak through it by
+    construction, because nothing outside the allowlist is ever included.
+    This does not retroactively scrub prior log entries written before this
+    fix — see docs/runbook.md for that gap.
   * D5 — no master patient index / match key: every /intake creates a brand new
     patients row, so one person forks into several charts (intake.yaml match_key:
     none).
@@ -45,7 +52,6 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db
-from libs.safe_logging import redact
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
 from models import Consent, InsuranceCoverage, Patient
@@ -87,13 +93,10 @@ def create_intake(
     started = time.time()
     correlation_id = x_request_id or new_correlation_id()
 
-    # D1 (Week 1 catch-up fix): still persist a record of every registration
-    # to the file handler for the front desk, but redact PHI-shaped fields
-    # (name/first_name/last_name/dob/ssn/address/phone/email/notes/...) first.
-    # redact() is a recursive dict/list backstop — it needs a plain dict, not
-    # the pre-serialized JSON string model_dump_json() produces, so this now
-    # dumps to a dict, redacts, then serializes for the log line.
-    log.info('POST /intake body=%s', json.dumps(redact(req.model_dump())))
+    # D1 (Week 1 catch-up fix, revised): log an explicit allowlist summary,
+    # never any form of the request body. See _intake_log_summary — nothing
+    # outside its fixed field set can appear in this line, by construction.
+    log.info('POST /intake summary=%s', json.dumps(_intake_log_summary(req)))
 
     with safe_span(_TRACER_NAME, "intake.create", {"correlation_id": correlation_id}) as span:
         # D5 (flagged, not fixed): no MPI / match-key lookup on (name, dob, ssn).
@@ -130,6 +133,34 @@ def create_intake(
         eligibility_status=eligibility_status,
         eligibility_job_id=eligibility_job_id,
     )
+
+
+def _intake_log_summary(req: IntakeRequest) -> dict[str, Any]:
+    """Allowlist-only summary of an /intake request, safe to log at INFO.
+
+    Deliberately an allowlist, not a blocklist: only the fields named here
+    can ever appear in the intake log line, regardless of what fields exist
+    on IntakeRequest/Demographics/Insurance today or are added to them in
+    the future. This is the fix for the PR review finding that a prior
+    blocklist-based redact() call still leaked insurance.member_id/
+    group_number — those identifiers, like every other field on the request,
+    are simply never read here at all.
+    """
+    demo = req.demographics
+    ins = req.insurance
+    return {
+        "created_via": demo.created_via,
+        "consents": list(req.consents),
+        "has_dob": demo.dob is not None,
+        "has_ssn": demo.ssn is not None,
+        "has_gender": demo.gender is not None,
+        "has_address": demo.address is not None,
+        "has_phone": demo.phone is not None,
+        "has_email": demo.email is not None,
+        "has_notes": demo.notes is not None,
+        "insurance_provided": ins is not None,
+        "insurance_plan_type": ins.plan_type if ins is not None else None,
+    }
 
 
 def _create_patient(db: Session, demo: Demographics) -> int:
