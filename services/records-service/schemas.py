@@ -16,15 +16,30 @@ class PatientSummary(BaseModel):
 
 
 class PatientDetail(BaseModel):
+    """Patient demographics + contact.
+
+    Carries both the composed/legacy display values (`name`, `address`) and
+    the structured fields (`first_name`/`last_name`/`city`/`state`/
+    `zip_code`) they were composed from — see intake-service/schemas.py
+    Demographics for how a row gets both. Structured fields are None for
+    patients created before the Week 6 UI update or by any caller that only
+    ever sent the legacy combined fields.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     mrn: str | None = None
-    name: str
+    name: str  # composed/legacy display value
+    first_name: str | None = None
+    last_name: str | None = None
     dob: str | None = None
     ssn: str | None = None
     gender: str | None = None
-    address: str | None = None
+    address: str | None = None  # composed/legacy display value
+    city: str | None = None
+    state: str | None = None
+    zip_code: str | None = None
     phone: str | None = None
     email: str | None = None
     notes: str | None = None
