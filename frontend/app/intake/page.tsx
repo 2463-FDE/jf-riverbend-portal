@@ -184,8 +184,10 @@ export default function IntakePage() {
                   onChange={(v) => setDemo({ ...demo, gender: v })}
                   options={["", "Female", "Male", "Non-binary", "Prefer not to say"]} />
               </div>
-              <SsnField id="ssn" value={demo.ssn} onChange={(v) => setDemo({ ...demo, ssn: v })}
-                hint="Used for insurance verification only." />
+              <div className="rb-field-row">
+                <SsnField id="ssn" value={demo.ssn} onChange={(v) => setDemo({ ...demo, ssn: v })}
+                  hint="Used for insurance verification only." />
+              </div>
             </fieldset>
 
             <fieldset className="rb-subsection" style={{ border: "none", margin: 0, padding: 0 }}>
