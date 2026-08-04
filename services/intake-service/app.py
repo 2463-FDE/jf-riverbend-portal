@@ -6,8 +6,14 @@ We create the patient chart, attach insurance coverage (if supplied), record the
 signed consents, and enqueue an async payer eligibility check before returning.
 
 Inherited shortcomings (left as-is from the handoff):
-  * D1 — the full request body (PHI: name/dob/ssn/notes) is written to a file
-    log at INFO. See logging_config.py.
+  * D1 — RESOLVED (Week 1 catch-up): the request body previously written to
+    the file log at INFO carried PHI (name/dob/ssn/address/notes) in plain
+    text. The log line itself is preserved (front desk still gets a record
+    of every registration), but the body is now passed through
+    libs/safe_logging.redact() first, so PHI-shaped fields are replaced with
+    a redaction marker before they ever reach the file handler in
+    logging_config.py. This does not retroactively scrub prior log entries
+    written before this fix — see docs/runbook.md for that gap.
   * D5 — no master patient index / match key: every /intake creates a brand new
     patients row, so one person forks into several charts (intake.yaml match_key:
     none).
@@ -25,6 +31,7 @@ safe opaque `eligibility_job_id` for the caller to poll. The old
 pending/degraded summary, for backward compatibility with any existing
 caller that reads it.
 """
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -38,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db
+from libs.safe_logging import redact
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
 from models import Consent, InsuranceCoverage, Patient
@@ -79,12 +87,13 @@ def create_intake(
     started = time.time()
     correlation_id = x_request_id or new_correlation_id()
 
-    # D1 (flagged, not fixed): persist the entire request body — including PHI —
-    # to the file handler so the front desk has a record of every registration.
-    # Unchanged behavior, same statement; the Week 6 structured demographics
-    # fields (first_name/last_name/city/state/zip_code) now flow through this
-    # same pre-existing log line, since it dumps the whole request model.
-    log.info('POST /intake body=%s', req.model_dump_json())
+    # D1 (Week 1 catch-up fix): still persist a record of every registration
+    # to the file handler for the front desk, but redact PHI-shaped fields
+    # (name/first_name/last_name/dob/ssn/address/phone/email/notes/...) first.
+    # redact() is a recursive dict/list backstop — it needs a plain dict, not
+    # the pre-serialized JSON string model_dump_json() produces, so this now
+    # dumps to a dict, redacts, then serializes for the log line.
+    log.info('POST /intake body=%s', json.dumps(redact(req.model_dump())))
 
     with safe_span(_TRACER_NAME, "intake.create", {"correlation_id": correlation_id}) as span:
         # D5 (flagged, not fixed): no MPI / match-key lookup on (name, dob, ssn).

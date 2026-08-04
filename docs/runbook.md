@@ -33,6 +33,43 @@ To regenerate the seed file (deterministic):
 python3 db/seed/generate_seed.py > db/seed/seed.sql
 ```
 
+## Deploying a new release / rollback (Week 1 catch-up)
+
+There is still no CI/CD pipeline that deploys to a clinic VM (see
+`ARCHITECTURE.md` §1) — this section covers what to do manually once new code
+reaches a VM, however that happens.
+
+**Before restarting any service after a `git pull`:** apply any new database
+migrations against the running Postgres *first*.
+
+```bash
+db/migrations/apply.sh
+```
+
+This runs every file in `db/migrations/` in order against the running
+`postgres` compose service. It is safe to run on **any** existing database —
+whether freshly seeded, stopped at an old migration, or already fully
+migrated — because every migration in this directory uses `IF NOT EXISTS` /
+guarded DDL: re-applying an already-applied migration is a no-op (you'll see
+`NOTICE: ... already exists, skipping`), not an error. Run it after every
+deploy, even if you're not sure whether the target migration already ran.
+
+Skipping this step before restarting a service whose code expects a new
+column (e.g. `patients.first_name`/`last_name`/`city`/`state`/`zip_code`,
+added in migration 011) will make every request touching that column fail —
+`intake-service` returns `503` from `_create_patient`'s
+`except SQLAlchemyError` handler in that case. This was flagged in PR #19's
+review and is exactly what `apply.sh` prevents.
+
+**Rollback:** revert the code (`git revert`/redeploy the previous image).
+Every migration in this repo so far only *adds* nullable columns, tables, or
+indexes — nothing drops or renames existing columns — so rolling back the
+application code is safe without rolling back the schema; the old code
+simply ignores the newer columns it doesn't know about. If a future
+migration ever needs to drop/rename something, write its own rollback note
+here before merging it, and prefer an additive-then-backfill-then-drop
+sequence over a single destructive migration.
+
 ## Demo accounts
 
 All seeded users share password `portal123`, role `staff`. Examples:
@@ -181,9 +218,19 @@ next team.
 
 ## Logs & PHI warning
 
-`logs/intake-service.log` currently contains full request bodies **including
-PHI** (name/DOB/SSN). Treat the logs directory as sensitive; do not copy it off
-the host. Removing PHI from logs is an open remediation item.
+`logs/intake-service.log` records one line per `/intake` request, but as of
+the Week 1 catch-up fix the demographics/contact fields in that line are
+passed through `libs/safe_logging.redact()` first — PHI-shaped values
+(name/first_name/last_name/dob/ssn/address/city/state/zip_code/phone/email/
+notes) are replaced with `***REDACTED***` before the line is written.
+**This does not retroactively scrub log entries written before this fix** —
+any `logs/*.log` file that predates it may still contain plaintext PHI.
+Treat the logs directory as sensitive regardless; do not copy it off the
+host. `redact()` is a field-name-based backstop (see
+`libs/safe_logging/redact.py`), not a guarantee against every possible future
+PHI-shaped field — any new sensitive field name must be added to
+`SENSITIVE_FIELD_NAMES` there, and no other service's logging has been
+audited/fixed by this change (only `intake-service`'s `/intake` line).
 
 ## CI
 

@@ -1,7 +1,7 @@
 -- 002_add_disclosures — start of the ROI feature (incomplete)
 -- TODO: add authorization_id, purpose, and restriction columns before go-live.
 
-CREATE TABLE disclosures (
+CREATE TABLE IF NOT EXISTS disclosures (
     id            SERIAL PRIMARY KEY,
     patient_id    INTEGER NOT NULL REFERENCES patients(id),
     disclosed_to  TEXT,

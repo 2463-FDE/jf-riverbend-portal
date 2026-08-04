@@ -11,6 +11,16 @@
 -- values ever written so far — see db/seed/generate_seed.py) all satisfy the
 -- new constraint.
 
-ALTER TABLE insurance_coverages
-    ADD CONSTRAINT insurance_coverages_status_check
-    CHECK (status IN ('active', 'inactive', 'unknown', 'pending', 'stale'));
+-- Postgres has no `ADD CONSTRAINT IF NOT EXISTS`; guard with a DO block so
+-- this is safe to re-run (see db/migrations/apply.sh).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'insurance_coverages_status_check'
+    ) THEN
+        ALTER TABLE insurance_coverages
+            ADD CONSTRAINT insurance_coverages_status_check
+            CHECK (status IN ('active', 'inactive', 'unknown', 'pending', 'stale'));
+    END IF;
+END
+$$;

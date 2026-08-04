@@ -9,6 +9,7 @@ direct-function-call style already used by test_intake_eligibility.py. This
 is the "latency bound" + "patient/coverage/consent persist independently of
 payer latency" acceptance test called for by the Stage 3 plan.
 """
+import logging
 import time
 
 from conftest import load_module
@@ -141,3 +142,63 @@ def test_response_never_leaks_the_raw_request_body_pattern(monkeypatch):
     dumped = result.model_dump_json()
     assert "Jane Roe" not in dumped
     assert "1990-01-01" not in dumped
+
+
+def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
+    # D1 (Week 1 catch-up fix): the front desk still gets a log line recording
+    # that a registration happened, but PHI-shaped values must never appear in
+    # it — see app_mod's use of libs.safe_logging.redact() before logging.
+    def _post(url, *, json, headers, timeout):
+        class _Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"job_id": "job-1", "status": "queued"}
+
+        return _Resp()
+
+    monkeypatch.setattr(app_mod.httpx, "post", _post)
+
+    db = _FakeSession()
+    caplog.set_level(logging.INFO, logger=app_mod.log.name)
+    app_mod.create_intake(
+        _request(
+            demographics={
+                "name": "Jane Roe",
+                "first_name": "Jane",
+                "last_name": "Roe",
+                "dob": "1990-01-01",
+                "ssn": "111-22-3333",
+                "address": "1 Test Way",
+                "city": "Riverbend",
+                "state": "CA",
+                "zip_code": "90211",
+                "phone": "555-0100",
+                "email": "jane@example.test",
+                "notes": "chief complaint text",
+            }
+        ),
+        db=db,
+        x_request_id=None,
+    )
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "POST /intake body=" in log_text  # the record itself is preserved
+    for leaked in (
+        "Jane Roe",
+        "Jane",
+        "Roe",
+        "1990-01-01",
+        "111-22-3333",
+        "1 Test Way",
+        "Riverbend",
+        "555-0100",
+        "jane@example.test",
+        "chief complaint text",
+    ):
+        assert leaked not in log_text, f"{leaked!r} leaked into the intake log line"
+    assert "***REDACTED***" in log_text
+    # Non-PHI fields (e.g. insurance carrier) are still visible for the
+    # front-desk record-of-registration purpose.
+    assert "Aetna" in log_text

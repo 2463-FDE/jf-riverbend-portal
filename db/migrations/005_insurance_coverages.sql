@@ -3,7 +3,7 @@
 -- Stores the coverage captured at intake. eligibility-service verifies these
 -- against the clearinghouse (X12 270/271).
 
-CREATE TABLE insurance_coverages (
+CREATE TABLE IF NOT EXISTS insurance_coverages (
     id           SERIAL PRIMARY KEY,
     patient_id   INTEGER NOT NULL REFERENCES patients(id),
     payer_name   TEXT,

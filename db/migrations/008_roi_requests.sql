@@ -6,7 +6,7 @@
 -- authorization, and 164.522 restriction tracking. Not done yet — the fulfill
 -- path currently releases records without checking any of this.
 
-CREATE TABLE roi_requests (
+CREATE TABLE IF NOT EXISTS roi_requests (
     id               SERIAL PRIMARY KEY,
     patient_id       INTEGER NOT NULL REFERENCES patients(id),
     requested_by     TEXT,
@@ -19,4 +19,4 @@ CREATE TABLE roi_requests (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-ALTER TABLE disclosures ADD COLUMN roi_request_id INTEGER REFERENCES roi_requests(id);
+ALTER TABLE disclosures ADD COLUMN IF NOT EXISTS roi_request_id INTEGER REFERENCES roi_requests(id);
