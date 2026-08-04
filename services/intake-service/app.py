@@ -6,19 +6,27 @@ We create the patient chart, attach insurance coverage (if supplied), record the
 signed consents, and enqueue an async payer eligibility check before returning.
 
 Inherited shortcomings (left as-is from the handoff):
-  * D1 — RESOLVED (Week 1 catch-up, revised): the request body previously
-    written to the file log at INFO carried PHI (name/dob/ssn/address/notes)
-    in plain text. A first fix ran the body through
-    libs/safe_logging.redact() before logging it, but that is a *blocklist*
-    — it only protects field names it's told about, and a PR review caught
-    that insurance identifiers (member_id/group_number) still leaked because
-    they weren't in the blocklist. Rather than keep extending that list
-    every time a new field is added anywhere in this request's schema, this
-    line now logs an explicit *allowlist* of known-safe fields
-    (_intake_log_summary) instead of any form of the request body. The log
-    line itself is preserved (front desk still gets a record of every
-    registration attempt), but nothing PHI-shaped can leak through it by
-    construction, because nothing outside the allowlist is ever included.
+  * D1 — RESOLVED (Week 1 catch-up, revised twice after PR review): the
+    request body previously written to the file log at INFO carried PHI
+    (name/dob/ssn/address/notes) in plain text.
+      - Revision 1 ran the body through libs/safe_logging.redact() first,
+        but that is a *blocklist* — a review caught that insurance
+        identifiers (member_id/group_number) still leaked because they
+        weren't in the blocklist.
+      - Revision 2 switched to an *allowlist* (_intake_log_summary) instead
+        of any form of the request body — but a second review caught that
+        the allowlist itself still logged patient-linked, health/payment-
+        derived metadata (consents, has_dob/has_ssn/... presence flags,
+        insurance_plan_type). The very next log line records the newly
+        created patient_id, so ordinary chronological log correlation could
+        tie e.g. "Medicaid" or a declined consent back to a specific patient
+        — a real re-identification/inference risk even with no raw
+        identifier present.
+      - Current state: _intake_log_summary logs only correlation_id,
+        created_via, and consent_count (a bare integer, not which consents)
+        — nothing health- or payment-derived, and nothing that combines with
+        the adjacent patient_id line to reveal a sensitive attribute about
+        that patient.
     This does not retroactively scrub prior log entries written before this
     fix — see docs/runbook.md for that gap.
   * D5 — no master patient index / match key: every /intake creates a brand new
@@ -93,10 +101,10 @@ def create_intake(
     started = time.time()
     correlation_id = x_request_id or new_correlation_id()
 
-    # D1 (Week 1 catch-up fix, revised): log an explicit allowlist summary,
-    # never any form of the request body. See _intake_log_summary — nothing
-    # outside its fixed field set can appear in this line, by construction.
-    log.info('POST /intake summary=%s', json.dumps(_intake_log_summary(req)))
+    # D1 (Week 1 catch-up fix, revised twice): log an explicit allowlist
+    # summary containing no health/payment-derived or patient-linkable
+    # metadata — see _intake_log_summary.
+    log.info('POST /intake summary=%s', json.dumps(_intake_log_summary(req, correlation_id)))
 
     with safe_span(_TRACER_NAME, "intake.create", {"correlation_id": correlation_id}) as span:
         # D5 (flagged, not fixed): no MPI / match-key lookup on (name, dob, ssn).
@@ -135,31 +143,36 @@ def create_intake(
     )
 
 
-def _intake_log_summary(req: IntakeRequest) -> dict[str, Any]:
+_INTAKE_LOG_SUMMARY_KEYS = frozenset({"correlation_id", "created_via", "consent_count"})
+
+
+def _intake_log_summary(req: IntakeRequest, correlation_id: str) -> dict[str, Any]:
     """Allowlist-only summary of an /intake request, safe to log at INFO.
 
     Deliberately an allowlist, not a blocklist: only the fields named here
-    can ever appear in the intake log line, regardless of what fields exist
-    on IntakeRequest/Demographics/Insurance today or are added to them in
-    the future. This is the fix for the PR review finding that a prior
-    blocklist-based redact() call still leaked insurance.member_id/
-    group_number — those identifiers, like every other field on the request,
-    are simply never read here at all.
+    (see _INTAKE_LOG_SUMMARY_KEYS) can ever appear in the intake log line,
+    regardless of what fields exist on IntakeRequest/Demographics/Insurance
+    today or are added to them in the future.
+
+    Two PR review rounds narrowed this down:
+      1. A blocklist-based redact() call on the whole body still leaked
+         insurance.member_id/group_number (not in the blocklist).
+      2. A first allowlist attempt still logged consents, has_dob/has_ssn/...
+         presence flags, and insurance_plan_type — none of those are raw
+         identifiers, but the very next log line records the newly created
+         patient_id, so log-order correlation could tie a specific patient
+         to a health/payment attribute (e.g. "Medicaid", a declined
+         consent). Anything health- or payment-derived, or that varies with
+         a patient's answers to a sensitive question, is excluded now, even
+         in coarse/boolean form — only operational metadata remains:
+         correlation_id (opaque, not PHI-derived), created_via
+         (self_service | front_desk — a channel, not a patient attribute),
+         and consent_count (how many consents were included, not which).
     """
-    demo = req.demographics
-    ins = req.insurance
     return {
-        "created_via": demo.created_via,
-        "consents": list(req.consents),
-        "has_dob": demo.dob is not None,
-        "has_ssn": demo.ssn is not None,
-        "has_gender": demo.gender is not None,
-        "has_address": demo.address is not None,
-        "has_phone": demo.phone is not None,
-        "has_email": demo.email is not None,
-        "has_notes": demo.notes is not None,
-        "insurance_provided": ins is not None,
-        "insurance_plan_type": ins.plan_type if ins is not None else None,
+        "correlation_id": correlation_id,
+        "created_via": req.demographics.created_via,
+        "consent_count": len(req.consents),
     }
 
 

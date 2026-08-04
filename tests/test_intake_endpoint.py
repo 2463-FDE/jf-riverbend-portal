@@ -144,15 +144,7 @@ def test_response_never_leaks_the_raw_request_body_pattern(monkeypatch):
     assert "1990-01-01" not in dumped
 
 
-def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
-    # D1 (Week 1 catch-up fix, revised after PR review): the front desk still
-    # gets a log line recording that a registration happened, but it is now
-    # built from an explicit allowlist (_intake_log_summary) rather than a
-    # blocklist-redacted copy of the request body. A prior version of this
-    # fix used redact() on the whole body, which still leaked
-    # insurance.member_id/group_number because they weren't in the blocklist
-    # — this test asserts those specific identifiers (and every other
-    # demographic value) never reach the log line, by construction.
+def _mock_eligibility_post(monkeypatch):
     def _post(url, *, json, headers, timeout):
         class _Resp:
             def raise_for_status(self):
@@ -164,6 +156,34 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
         return _Resp()
 
     monkeypatch.setattr(app_mod.httpx, "post", _post)
+
+
+def _intake_summary_dict(caplog):
+    """Extract and parse the JSON payload of the 'POST /intake summary=' line."""
+    import json as _json
+
+    for record in caplog.records:
+        msg = record.getMessage()
+        if msg.startswith("POST /intake summary="):
+            return _json.loads(msg[len("POST /intake summary="):])
+    raise AssertionError("no 'POST /intake summary=' log line was emitted")
+
+
+def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
+    # D1 (Week 1 catch-up fix, revised twice after PR review): the front desk
+    # still gets a log line recording that a registration happened, but it is
+    # built from a narrow allowlist (_intake_log_summary), not any form of
+    # the request body.
+    #   Round 1 finding: redact()-on-the-whole-body still leaked
+    #     insurance.member_id/group_number (not in the blocklist).
+    #   Round 2 finding: even the first allowlist attempt still logged
+    #     consents/has_dob/has_ssn/.../insurance_plan_type — health/payment-
+    #     derived metadata that, combined with the immediately-following
+    #     patient_id log line, could be correlated back to a specific
+    #     patient. This test locks in the exact surviving key set
+    #     (_INTAKE_LOG_SUMMARY_KEYS) so a future addition fails loudly
+    #     instead of silently drifting back into a leak.
+    _mock_eligibility_post(monkeypatch)
 
     db = _FakeSession()
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
@@ -195,7 +215,6 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
     )
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "POST /intake summary=" in log_text  # the record itself is preserved
     for leaked in (
         "Jane Roe",
         "Jane",
@@ -208,12 +227,50 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
         "jane@example.test",
         "chief complaint text",
         "Aetna",
-        "AET-SECRET-123456",  # the PR review's specific finding
-        "GRP-9987",  # the PR review's specific finding
+        "AET-SECRET-123456",  # round-1 review finding
+        "GRP-9987",  # round-1 review finding
+        "PPO",  # round-2 review finding: plan type is payment-derived
+        "npp_ack",  # round-2 review finding: consent names, not just values
+        "treatment_consent",
     ):
         assert leaked not in log_text, f"{leaked!r} leaked into the intake log line"
-    # Allowlisted, non-identifying fields are still present for the
-    # front-desk record-of-registration purpose.
-    assert '"created_via": "self_service"' in log_text
-    assert '"insurance_plan_type": "PPO"' in log_text
-    assert '"has_ssn": true' in log_text
+
+    summary = _intake_summary_dict(caplog)
+    # Exact key set, not just "these are present" — an addition here must
+    # fail this test rather than silently ship, per the round-2 review ask.
+    assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
+    assert summary["created_via"] == "self_service"
+    assert summary["consent_count"] == 2
+    assert isinstance(summary["correlation_id"], str) and summary["correlation_id"]
+
+
+def test_intake_log_summary_excludes_plan_type_and_consent_names(monkeypatch, caplog):
+    # Round-2 review's specific regression ask: post an intake with a
+    # sensitive plan type (Medicaid) and named consents, assert neither
+    # reaches the log — a coarse consent_count is fine, the consent names
+    # and the plan type itself are not.
+    _mock_eligibility_post(monkeypatch)
+
+    db = _FakeSession()
+    caplog.set_level(logging.INFO, logger=app_mod.log.name)
+    app_mod.create_intake(
+        _request(
+            insurance={
+                "payer_name": "State Medicaid Office",
+                "member_id": "MEDI-000111",
+                "group_number": None,
+                "plan_type": "Medicaid",
+            },
+            consents=["npp_ack", "treatment_consent", "financial_consent"],
+        ),
+        db=db,
+        x_request_id=None,
+    )
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    for leaked in ("Medicaid", "State Medicaid Office", "npp_ack", "treatment_consent", "financial_consent"):
+        assert leaked not in log_text, f"{leaked!r} leaked into the intake log line"
+
+    summary = _intake_summary_dict(caplog)
+    assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
+    assert summary["consent_count"] == 3
