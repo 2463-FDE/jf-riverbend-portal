@@ -28,11 +28,16 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS patients (
     id          SERIAL PRIMARY KEY,            -- sequential, exposed in record URLs
     mrn         TEXT,                          -- medical record number (NOT used as a match key)
-    name        TEXT NOT NULL,
+    name        TEXT NOT NULL,                 -- legacy/composed; derived from first_name+last_name when structured input is used
+    first_name  TEXT,                          -- structured (migration 011); NULL for legacy-only callers
+    last_name   TEXT,                          -- structured (migration 011); NULL for legacy-only callers
     dob         TEXT,                          -- stored as ISO string, not DATE
     ssn         TEXT,                          -- plain text
     gender      TEXT,
-    address     TEXT,
+    address     TEXT,                          -- legacy/composed full address; derived from address+city+state+zip_code when structured input is used
+    city        TEXT,                          -- structured (migration 011); NULL for legacy-only callers
+    state       TEXT,                          -- structured (migration 011); NULL for legacy-only callers
+    zip_code    TEXT,                          -- structured (migration 011), TEXT to preserve leading zeros / ZIP+4
     phone       TEXT,
     email       TEXT,
     notes       TEXT,                          -- free-text clinical notes, plain text

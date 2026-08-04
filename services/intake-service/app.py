@@ -81,6 +81,9 @@ def create_intake(
 
     # D1 (flagged, not fixed): persist the entire request body — including PHI —
     # to the file handler so the front desk has a record of every registration.
+    # Unchanged behavior, same statement; the Week 6 structured demographics
+    # fields (first_name/last_name/city/state/zip_code) now flow through this
+    # same pre-existing log line, since it dumps the whole request model.
     log.info('POST /intake body=%s', req.model_dump_json())
 
     with safe_span(_TRACER_NAME, "intake.create", {"correlation_id": correlation_id}) as span:
@@ -124,10 +127,15 @@ def _create_patient(db: Session, demo: Demographics) -> int:
     try:
         patient = Patient(
             name=demo.name,
+            first_name=demo.first_name,
+            last_name=demo.last_name,
             dob=demo.dob,
             ssn=demo.ssn,
             gender=demo.gender,
             address=demo.address,
+            city=demo.city,
+            state=demo.state,
+            zip_code=demo.zip_code,
             phone=demo.phone,
             email=demo.email,
             notes=demo.notes,

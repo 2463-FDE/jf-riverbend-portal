@@ -656,6 +656,104 @@ textarea:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+.rb-field-row--3 {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 720px) {
+  .rb-field-row--3 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .rb-field-row--3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Section separation within a single wizard step (e.g. Demographics & Contact) */
+.rb-subsection + .rb-subsection {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rb-border);
+}
+.rb-subsection__title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--rb-text-muted);
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+/* Masked-field reveal toggle (e.g. SSN show/hide) */
+.rb-field__input-wrap {
+  position: relative;
+}
+.rb-field__input-wrap .rb-input {
+  padding-right: 42px;
+}
+.rb-field__reveal {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  border-radius: var(--rb-radius-sm);
+  color: var(--rb-text-muted);
+  cursor: pointer;
+}
+.rb-field__reveal:hover {
+  background: var(--rb-primary-tint);
+  color: var(--rb-primary-dark);
+}
+
+/* Accessible combobox (e.g. state selection) */
+.rb-combobox {
+  position: relative;
+}
+.rb-combobox__pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  background: var(--rb-surface);
+  border: 1px solid var(--rb-border);
+  border-radius: var(--rb-radius-sm);
+  box-shadow: var(--rb-shadow-md);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.rb-combobox__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+}
+.rb-combobox__opt {
+  padding: 8px 10px;
+  border-radius: var(--rb-radius-sm);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.rb-combobox__opt:hover,
+.rb-combobox__opt--active {
+  background: var(--rb-primary-tint);
+  color: var(--rb-primary-dark);
+}
+.rb-combobox__empty {
+  padding: 10px 12px;
+  font-size: 0.88rem;
+  color: var(--rb-text-muted);
+}
 .rb-checkbox {
   display: flex;
   align-items: flex-start;

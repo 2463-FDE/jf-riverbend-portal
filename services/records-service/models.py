@@ -11,11 +11,16 @@ class Patient(Base):
 
     id = Column(Integer, primary_key=True)
     mrn = Column(Text)
-    name = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)  # legacy/composed; see intake-service/schemas.py Demographics
+    first_name = Column(Text)            # structured (migration 011); NULL for legacy-only patients
+    last_name = Column(Text)             # structured (migration 011); NULL for legacy-only patients
     dob = Column(Text)               # stored as ISO string, not DATE (legacy)
     ssn = Column(Text)               # plain text (legacy)
     gender = Column(Text)
-    address = Column(Text)
+    address = Column(Text)           # legacy/composed; see intake-service/schemas.py Demographics
+    city = Column(Text)                  # structured (migration 011); NULL for legacy-only patients
+    state = Column(Text)                 # structured (migration 011); NULL for legacy-only patients
+    zip_code = Column(Text)              # structured (migration 011); NULL for legacy-only patients
     phone = Column(Text)
     email = Column(Text)
     notes = Column(Text)

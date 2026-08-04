@@ -34,6 +34,93 @@ def test_missing_demographics_rejected():
         schemas.IntakeRequest(consents=["npp_ack"])
 
 
+# --- Week 6: structured demographics/contact, additive + backward compatible ----
+
+
+def test_legacy_name_and_combined_address_pass_through_unchanged():
+    """A caller that only ever sends the old combined fields must see identical
+    stored behavior: `name`/`address` unchanged, new structured columns unset."""
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe", "address": "118 Maple Ave, Beverly Hills, CA 90210"}
+    )
+    demo = req.demographics
+    assert demo.name == "Jane Roe"
+    assert demo.address == "118 Maple Ave, Beverly Hills, CA 90210"
+    assert demo.first_name is None
+    assert demo.last_name is None
+    assert demo.city is None
+    assert demo.state is None
+    assert demo.zip_code is None
+
+
+def test_structured_name_derives_legacy_name():
+    req = schemas.IntakeRequest(demographics={"first_name": "Jane", "last_name": "Roe"})
+    demo = req.demographics
+    assert demo.first_name == "Jane"
+    assert demo.last_name == "Roe"
+    assert demo.name == "Jane Roe"  # derived legacy compatibility value
+
+
+def test_structured_address_derives_legacy_combined_address():
+    req = schemas.IntakeRequest(
+        demographics={
+            "first_name": "Jane",
+            "last_name": "Roe",
+            "address": "118 Maple Ave",
+            "city": "Beverly Hills",
+            "state": "CA",
+            "zip_code": "90210",
+        }
+    )
+    demo = req.demographics
+    assert demo.address == "118 Maple Ave, Beverly Hills, CA 90210"
+    assert demo.city == "Beverly Hills"
+    assert demo.state == "CA"
+    assert demo.zip_code == "90210"
+
+
+def test_zip_code_preserves_leading_zeros_and_plus_four():
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe", "zip_code": "02139-1234"}
+    )
+    assert req.demographics.zip_code == "02139-1234"
+
+
+def test_structured_address_with_missing_parts_has_no_malformed_commas():
+    # Only city supplied — street/state/zip blank — must not leave stray
+    # ", ," or trailing/leading commas in the composed legacy address.
+    req = schemas.IntakeRequest(demographics={"name": "Jane Roe", "city": "Riverbend"})
+    assert req.demographics.address == "Riverbend"
+    assert ",," not in (req.demographics.address or "")
+    assert not (req.demographics.address or "").startswith(",")
+    assert not (req.demographics.address or "").endswith(",")
+
+
+def test_explicit_name_takes_precedence_over_structured_name_when_both_given():
+    req = schemas.IntakeRequest(
+        demographics={"name": "Legacy Caller Name", "first_name": "Jane", "last_name": "Roe"}
+    )
+    assert req.demographics.name == "Legacy Caller Name"
+    # Structured fields are still stored even though `name` wasn't derived from them.
+    assert req.demographics.first_name == "Jane"
+    assert req.demographics.last_name == "Roe"
+
+
+def test_blank_structured_name_rejected():
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(demographics={"first_name": "  ", "last_name": "  "})
+
+
+def test_whitespace_only_optional_contact_fields_are_normalized_to_none():
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe", "city": "   ", "state": "  ", "zip_code": " "}
+    )
+    demo = req.demographics
+    assert demo.city is None
+    assert demo.state is None
+    assert demo.zip_code is None
+
+
 # NOTE (coverage gap, deliberate): nothing here asserts SSN format, that DOB is
 # a real date, or that duplicate patients are prevented — the service does none
 # of those (no input normalization, no MPI/match key). See SEEDED-DEBT.

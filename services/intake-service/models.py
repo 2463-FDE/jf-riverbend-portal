@@ -10,11 +10,16 @@ class Patient(Base):
 
     id = Column(Integer, primary_key=True)            # sequential, exposed in record URLs
     mrn = Column(Text)                                # not used as a match key
-    name = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)               # legacy/composed; see schemas.Demographics
+    first_name = Column(Text)                         # structured (migration 011)
+    last_name = Column(Text)                          # structured (migration 011)
     dob = Column(Text)                                # stored as ISO string, not DATE
     ssn = Column(Text)                                # plain text
     gender = Column(Text)
-    address = Column(Text)
+    address = Column(Text)                            # legacy/composed; see schemas.Demographics
+    city = Column(Text)                               # structured (migration 011)
+    state = Column(Text)                              # structured (migration 011)
+    zip_code = Column(Text)                            # structured (migration 011), TEXT to preserve leading zeros / ZIP+4
     phone = Column(Text)
     email = Column(Text)
     notes = Column(Text)

@@ -4,6 +4,8 @@ import { useState } from "react";
 import Link from "next/link";
 import Card from "../components/Card";
 import EligibilityStatus from "../components/EligibilityStatus";
+import StateCombobox from "../components/StateCombobox";
+import { IconEye, IconEyeOff } from "../components/icons";
 import { apiFetch } from "../lib/session";
 import type { IntakeResponse } from "../lib/types";
 
@@ -16,6 +18,9 @@ interface Demographics {
   phone: string;
   email: string;
   address: string;
+  city: string;
+  state: string;
+  zip_code: string;
 }
 interface Insurance {
   carrier: string;
@@ -31,7 +36,7 @@ interface Consents {
   communications: boolean;
 }
 
-const STEPS = ["Demographics", "Insurance", "Consents", "Review & Submit"];
+const STEPS = ["Demographics & Contact", "Insurance", "Consents", "Review & Submit"];
 
 export default function IntakePage() {
   const [step, setStep] = useState(0);
@@ -44,6 +49,9 @@ export default function IntakePage() {
     phone: "",
     email: "",
     address: "",
+    city: "",
+    state: "",
+    zip_code: "",
   });
   const [ins, setIns] = useState<Insurance>({
     carrier: "",
@@ -160,34 +168,46 @@ export default function IntakePage() {
 
       <Card title={STEPS[step]}>
         {step === 0 && (
-          <fieldset style={{ border: "none", margin: 0, padding: 0 }}>
-            <legend className="rb-muted" style={{ marginBottom: 12 }}>
-              Tell us who you are.
-            </legend>
-            <div className="rb-field-row">
-              <Field id="first_name" label="First name" required value={demo.first_name}
-                onChange={(v) => setDemo({ ...demo, first_name: v })} />
-              <Field id="last_name" label="Last name" required value={demo.last_name}
-                onChange={(v) => setDemo({ ...demo, last_name: v })} />
-            </div>
-            <div className="rb-field-row">
-              <Field id="dob" label="Date of birth" type="date" required value={demo.dob}
-                onChange={(v) => setDemo({ ...demo, dob: v })} />
-              <SelectField id="gender" label="Gender" value={demo.gender}
-                onChange={(v) => setDemo({ ...demo, gender: v })}
-                options={["", "Female", "Male", "Non-binary", "Prefer not to say"]} />
-            </div>
-            <div className="rb-field-row">
-              <Field id="ssn" label="SSN" hint="Used for insurance verification only."
-                value={demo.ssn} onChange={(v) => setDemo({ ...demo, ssn: v })} />
-              <Field id="phone" label="Phone" type="tel" value={demo.phone}
-                onChange={(v) => setDemo({ ...demo, phone: v })} />
-            </div>
-            <Field id="email" label="Email" type="email" value={demo.email}
-              onChange={(v) => setDemo({ ...demo, email: v })} />
-            <Field id="address" label="Home address" value={demo.address}
-              onChange={(v) => setDemo({ ...demo, address: v })} />
-          </fieldset>
+          <div>
+            <fieldset className="rb-subsection" style={{ border: "none", margin: 0, padding: 0 }}>
+              <legend className="rb-subsection__title">Demographics</legend>
+              <div className="rb-field-row">
+                <Field id="first_name" label="First name" required value={demo.first_name}
+                  onChange={(v) => setDemo({ ...demo, first_name: v })} />
+                <Field id="last_name" label="Last name" required value={demo.last_name}
+                  onChange={(v) => setDemo({ ...demo, last_name: v })} />
+              </div>
+              <div className="rb-field-row">
+                <Field id="dob" label="Date of birth" type="date" required value={demo.dob}
+                  onChange={(v) => setDemo({ ...demo, dob: v })} />
+                <SelectField id="gender" label="Gender" value={demo.gender}
+                  onChange={(v) => setDemo({ ...demo, gender: v })}
+                  options={["", "Female", "Male", "Non-binary", "Prefer not to say"]} />
+              </div>
+              <SsnField id="ssn" value={demo.ssn} onChange={(v) => setDemo({ ...demo, ssn: v })}
+                hint="Used for insurance verification only." />
+            </fieldset>
+
+            <fieldset className="rb-subsection" style={{ border: "none", margin: 0, padding: 0 }}>
+              <legend className="rb-subsection__title">Contact information</legend>
+              <div className="rb-field-row">
+                <Field id="phone" label="Phone" type="tel" value={demo.phone}
+                  onChange={(v) => setDemo({ ...demo, phone: v })} />
+                <Field id="email" label="Email" type="email" value={demo.email}
+                  onChange={(v) => setDemo({ ...demo, email: v })} />
+              </div>
+              <Field id="address" label="Address" value={demo.address}
+                onChange={(v) => setDemo({ ...demo, address: v })} />
+              <div className="rb-field-row--3">
+                <Field id="zip_code" label="ZIP code" value={demo.zip_code}
+                  onChange={(v) => setDemo({ ...demo, zip_code: v })} />
+                <Field id="city" label="City" value={demo.city}
+                  onChange={(v) => setDemo({ ...demo, city: v })} />
+                <StateCombobox id="state" label="State" value={demo.state}
+                  onChange={(v) => setDemo({ ...demo, state: v })} />
+              </div>
+            </fieldset>
+          </div>
         )}
 
         {step === 1 && (
@@ -243,13 +263,20 @@ export default function IntakePage() {
             <p className="rb-muted">Please confirm your information before submitting.</p>
             <h3 style={{ marginTop: 18 }}>Demographics</h3>
             <ReviewBlock rows={[
-              ["Name", `${demo.first_name} ${demo.last_name}`.trim() || "—"],
+              ["First name", demo.first_name || "—"],
+              ["Last name", demo.last_name || "—"],
               ["Date of birth", demo.dob || "—"],
               ["Gender", demo.gender || "—"],
               ["SSN", demo.ssn ? `•••-••-${demo.ssn.slice(-4)}` : "—"],
+            ]} />
+            <h3 style={{ marginTop: 18 }}>Contact</h3>
+            <ReviewBlock rows={[
               ["Phone", demo.phone || "—"],
               ["Email", demo.email || "—"],
               ["Address", demo.address || "—"],
+              ["City", demo.city || "—"],
+              ["State", demo.state || "—"],
+              ["ZIP code", demo.zip_code || "—"],
             ]} />
             <h3 style={{ marginTop: 18 }}>Insurance</h3>
             <ReviewBlock rows={[
@@ -334,6 +361,47 @@ function Field({
         aria-required={required}
         onChange={(e) => onChange(e.target.value)}
       />
+      {hint && <span className="rb-field__hint">{hint}</span>}
+    </div>
+  );
+}
+
+function SsnField({
+  id,
+  value,
+  onChange,
+  hint,
+}: {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+  hint?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="rb-field">
+      <label className="rb-field__label" htmlFor={id}>
+        SSN
+      </label>
+      <div className="rb-field__input-wrap">
+        <input
+          id={id}
+          className="rb-input"
+          type={visible ? "text" : "password"}
+          inputMode="numeric"
+          autoComplete="off"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <button
+          type="button"
+          className="rb-field__reveal"
+          aria-label={visible ? "Hide SSN" : "Show SSN"}
+          onClick={() => setVisible((v) => !v)}
+        >
+          {visible ? <IconEyeOff /> : <IconEye />}
+        </button>
+      </div>
       {hint && <span className="rb-field__hint">{hint}</span>}
     </div>
   );
