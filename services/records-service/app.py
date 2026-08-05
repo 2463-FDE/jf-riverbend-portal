@@ -2,16 +2,36 @@
 records-service — patient + records read façade (FHIR-ish).
 
 Serves patient demographics and a patient's encounters/records to the portal.
+
+Stage 3 addition: `GET /patients/{id}/view`, a new, additive route that wires
+the Week 4/5 `libs.patient_view_agent` supervisor to real data — a bounded,
+evidence-cited chart summary gated by `StaffAccessGate` (an authenticated-
+staff access gate, NOT patient-specific authorization) instead of that
+library's fixture `FakePolicyAuthorization`/`SeededChartRepository`. This
+does not touch or remediate `get_patient_records`/`get_patient` below
+(DEBT D11 / RIV-201) — see docs/analysis/RIV-201-patient-records-IDOR.md.
 """
-from fastapi import Depends, FastAPI, HTTPException, Query
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db
+from libs.patient_view_agent import (
+    Action,
+    AuthorizationDenied,
+    AuthorizationRequest,
+    PatientViewResult,
+    Purpose,
+    StaffAccessGate,
+    run_patient_view,
+)
 from logging_config import configure
-from models import Encounter, Patient, Record
+from models import AuditLog, Encounter, Patient, Record
+from patient_view_repository import SqlChartRepository
 from schemas import (
     EncounterOut,
     EncounterWithRecords,
@@ -26,6 +46,8 @@ from schemas import (
 log = configure(settings.service_name)
 
 app = FastAPI(title="Riverbend records-service")
+
+_STAFF_ACCESS_GATE = StaffAccessGate()
 
 
 @app.get("/healthz")
@@ -132,6 +154,89 @@ def get_patient_records(patient_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return PatientChart(patient_id=patient_id, encounters=chart)
+
+
+def _write_audit(db: Session, *, actor: str, message: str) -> None:
+    """Best-effort audit_logs write. `audit_logs` is mutable/soft-delete
+    logging, not a tamper-evident trail (db/schema.sql) — it is not the
+    security control here (StaffAccessGate already decided access before
+    this is ever called), so a write failure is logged and swallowed rather
+    than turned into a 5xx for an otherwise-legitimate, already-authorized
+    view."""
+    try:
+        db.add(AuditLog(actor=actor, message=message))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("patient_view: failed to write audit_logs entry")
+
+
+@app.get("/patients/{patient_id}/view", response_model=PatientViewResult)
+def get_patient_view(
+    patient_id: int,
+    purpose: str = Query(default="treatment"),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    db: Session = Depends(get_db),
+):
+    """
+    Stage 3 — bounded, evidence-cited patient-chart view via
+    `libs.patient_view_agent.run_patient_view`, backed by real data
+    (`SqlChartRepository`) and gated by `StaffAccessGate`.
+
+    `StaffAccessGate` is an authenticated-staff access gate, NOT
+    patient-specific authorization: it ALLOWs any request that carries a
+    non-empty `X-Actor-Id` (i.e. the gateway already authenticated a staff
+    session) and DENIES an unknown/missing one. It does not, and cannot,
+    verify that `x_actor_id` is entitled to `patient_id` specifically —
+    `users` has no relationship to `patients` in this schema (see
+    docs/analysis/RIV-201-patient-records-IDOR.md §6). This route does not
+    fix RIV-201; `get_patient_records`/`get_patient` below remain exactly as
+    IDOR-exploitable as documented.
+    """
+    try:
+        purpose_enum = Purpose(purpose)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"invalid purpose '{purpose}'")
+
+    request = AuthorizationRequest(
+        actor_id=x_actor_id or "",
+        patient_id=patient_id,
+        action=Action.VIEW_PATIENT_CHART,
+        purpose=purpose_enum,
+        correlation_id=x_request_id,
+    )
+
+    try:
+        result = run_patient_view(
+            request,
+            authorizer=_STAFF_ACCESS_GATE,
+            repository=SqlChartRepository(db),
+        )
+    except AuthorizationDenied as denial:
+        _write_audit(
+            db,
+            actor=x_actor_id or "unknown",
+            message=(
+                f"patient_view outcome=denied patient_id={patient_id} "
+                f"reason={denial.denial.reason.value} correlation_id={denial.denial.correlation_id}"
+            ),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": denial.denial.reason.value, "correlation_id": denial.denial.correlation_id},
+        )
+
+    _write_audit(
+        db,
+        actor=x_actor_id or "unknown",
+        message=(
+            f"patient_view outcome={result.outcome.value} patient_id={patient_id} "
+            f"evidence_count={len(result.evidence_ids)} correlation_id={result.correlation_id} "
+            f"reasons={','.join(r.value for r in result.reasons)}"
+        ),
+    )
+    return result
 
 
 @app.get("/records/search", response_model=list[RecordSearchHit])

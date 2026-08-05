@@ -190,6 +190,40 @@ def proxy_search(q: str, session: dict = Depends(require_session)):
 
 
 # --------------------------------------------------------------------------- #
+# Stage 3: bounded, evidence-cited patient-view agent (libs/patient_view_agent)
+#
+# `X-Actor-Id` carries the session's username to records-service, which uses
+# it as `StaffAccessGate`'s deny-by-default check: an authenticated-staff
+# access gate, NOT patient-specific authorization. It is DIFFERENT from the
+# IDOR posture of proxy_records/proxy_patient above: an unauthenticated
+# caller (no session at all) is still rejected here by require_session (401),
+# same as everywhere else on this gateway, and now the access itself is
+# recorded in a real audit_logs row (see records-service/app.py). What it
+# does NOT do is check that this specific actor may see this specific
+# patient_id — that ownership/care-team fact does not exist anywhere in this
+# schema (users has no relationship to patients — see
+# docs/analysis/RIV-201-patient-records-IDOR.md §6). This route is additive;
+# it does not fix RIV-201 and proxy_records/proxy_patient remain exactly as
+# exploitable as documented above.
+# --------------------------------------------------------------------------- #
+@app.get("/patients/{patient_id}/view")
+def proxy_patient_view(
+    patient_id: int,
+    purpose: Optional[str] = None,
+    session: dict = Depends(require_session),
+):
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("username") or ""
+    return _get(
+        "records",
+        f"/patients/{patient_id}/view",
+        params={"purpose": purpose} if purpose else None,
+        headers=headers,
+        forward_status=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # scheduling
 # --------------------------------------------------------------------------- #
 @app.get("/slots")

@@ -55,6 +55,32 @@ export interface RecordsResponse {
   encounters: EncounterBlock[];
 }
 
+// Stage 3 — libs.patient_view_agent.PatientViewResult, served via
+// GET /api/patients/[id]/view (gateway -> records-service, StaffAccessGate).
+// This is a bounded, evidence-cited summary, NOT a fix for the /api/records
+// IDOR above (see RIV-201) — see the frontend route's comment.
+export interface PatientViewExecution {
+  specialists_run: string[];
+  tool_calls: number;
+  reads: number;
+  reads_complete: boolean;
+  truncated: boolean;
+  compose_attempts: number;
+  elapsed_seconds: number;
+}
+
+export interface PatientViewResult {
+  outcome: "completed" | "escalated" | "refused";
+  summary: string;
+  evidence_ids: string[];
+  limitations: string[];
+  escalation: boolean;
+  reasons: string[];
+  correlation_id: string;
+  patient_id: number;
+  execution: PatientViewExecution;
+}
+
 export interface Slot {
   id: number;
   provider: string;
