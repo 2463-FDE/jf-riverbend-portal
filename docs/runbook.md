@@ -70,6 +70,21 @@ migration ever needs to drop/rename something, write its own rollback note
 here before merging it, and prefer an additive-then-backfill-then-drop
 sequence over a single destructive migration.
 
+**Exception — migration 009 touches data, not just schema** (PR #20 review):
+adding the `insurance_coverages.status` CHECK constraint requires every
+existing row to already satisfy it. If a real deployment has a row with a
+status value outside `active | inactive | unknown | pending | stale`
+(a manual repair, an old bug), 009 remaps it to `'unknown'` — but first
+copies the original value into the new `status_legacy` column and raises a
+Postgres `NOTICE` naming how many rows were affected, so the remap is
+visible in deploy output and the original value stays recoverable. Check
+`docker compose logs postgres` (or your deploy tool's captured output) after
+running `apply.sh` for any `insurance_coverages_status_check: remapping ...`
+notice, and review `SELECT * FROM insurance_coverages WHERE status_legacy IS
+NOT NULL;` afterward — a non-null `status_legacy` means that row's status was
+changed and should be checked by a human before trusting the new
+`'unknown'` value operationally.
+
 ## Demo accounts
 
 All seeded users share password `portal123`, role `staff`. Examples:

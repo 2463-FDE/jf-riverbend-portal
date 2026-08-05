@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS insurance_coverages (
     plan_type     TEXT,                        -- PPO | HMO | Medicaid | Medicare | self_pay
     status        TEXT DEFAULT 'unknown'        -- active | inactive | unknown | pending | stale
                   CHECK (status IN ('active', 'inactive', 'unknown', 'pending', 'stale')),
+    status_legacy TEXT,                         -- pre-migration-009 value, only set if it was remapped
     verified_at   TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
