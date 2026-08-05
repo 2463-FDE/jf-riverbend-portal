@@ -146,21 +146,22 @@ def test_created_via_outside_known_set_is_normalized_to_unknown():
 # --- Week 2-3 catch-up: adr/0004/RIV-160 duplicate-override contract -------
 
 
-def test_link_to_existing_is_no_longer_a_valid_override():
-    # PR #20 round-8 review: intake-service has no auth dependency and is
-    # exposed directly on the host, so "link_to_existing" let an
-    # unauthenticated caller attach coverage/consents to a caller-chosen
-    # existing patient_id. Only "create_new" remains accepted.
-    with pytest.raises(ValidationError):
-        schemas.IntakeRequest(
-            demographics={"name": "Jane Roe"},
-            duplicate_override="link_to_existing",
-        )
-
-
-def test_create_new_override_is_accepted():
-    req = schemas.IntakeRequest(demographics={"name": "Jane Roe"}, duplicate_override="create_new")
-    assert req.duplicate_override == "create_new"
+def test_duplicate_override_and_confirmed_by_no_longer_exist_on_the_schema():
+    # Round-10 review (2026-08-05): both fields removed entirely — not just
+    # restricted to "create_new" (round-8's fix). intake-service has no auth
+    # dependency, so nothing stopped any caller from both bypassing the
+    # exact-match block AND forging who supposedly confirmed it (see
+    # services/intake-service/app.py::create_intake). There is no
+    # model_config extra="forbid" here, so passing either as a raw kwarg is
+    # silently ignored rather than raising — asserting neither is present on
+    # the parsed model either way.
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe"},
+        duplicate_override="create_new",
+        confirmed_by="dr.smith",
+    )
+    assert not hasattr(req, "duplicate_override")
+    assert not hasattr(req, "confirmed_by")
 
 
 # NOTE (coverage gap, deliberate): nothing here asserts SSN format or that DOB

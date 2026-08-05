@@ -13,7 +13,6 @@ import logging
 import time
 
 import pytest
-from pydantic import ValidationError
 
 from conftest import load_module
 
@@ -472,7 +471,9 @@ def test_no_ssn_means_no_match_lookup_and_unaffected_behavior(monkeypatch):
     assert db.lock_calls == []  # no ssn -> no reliable key -> lock never acquired
 
 
-def test_exact_match_blocks_with_409_when_no_override(monkeypatch):
+def test_exact_match_always_blocks_with_409(monkeypatch):
+    # Round-10 review (2026-08-05): there is no override anymore, period —
+    # an exact SSN+DOB match always blocks, for every caller.
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
 
@@ -493,47 +494,31 @@ def test_exact_match_blocks_with_409_when_no_override(monkeypatch):
     assert db.added == []
 
 
-def test_link_to_existing_override_is_rejected_before_reaching_create_intake():
-    # PR #20 round-8 review: "link_to_existing" (+ link_to_patient_id) let an
-    # unauthenticated caller attach coverage/consents to a caller-chosen
-    # existing patient — removed from the accepted contract entirely, so an
-    # attempt to use it never becomes a valid IntakeRequest in the first
-    # place (see tests/test_intake_schemas.py).
-    with pytest.raises(ValidationError):
-        _request(
-            demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
-            duplicate_override="link_to_existing",
-        )
-
-
-def test_exact_match_create_new_override_creates_and_records_link(monkeypatch):
+def test_exact_match_ignores_smuggled_override_and_confirmed_by(monkeypatch):
+    # Round-10 review: duplicate_override/confirmed_by (and the older
+    # link_to_existing) no longer exist on IntakeRequest at all — not just
+    # restricted to "create_new". Even a caller who sends them anyway in the
+    # raw request body gets them silently dropped (no model_config
+    # extra="forbid" here, so unknown fields are ignored, not rejected) and
+    # the exact match still blocks. Proves there is no bypass left, smuggled
+    # or otherwise — the explicit regression case the review asked for.
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
 
-    result = app_mod.create_intake(
-        _request(
-            demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
-            duplicate_override="create_new",
-            confirmed_by="frontdesk",
-        ),
-        db=db, x_request_id=None,
+    req = _request(
+        demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
+        duplicate_override="create_new",
+        confirmed_by="dr.smith",
     )
+    assert not hasattr(req, "duplicate_override")
+    assert not hasattr(req, "confirmed_by")
 
-    assert result.patient_id != 42  # a genuinely new row
-    assert result.possible_duplicate_match is False  # exact, not partial — no warning flag
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod.create_intake(req, db=db, x_request_id=None)
 
-    links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
-    assert len(links) == 1
-    assert links[0].patient_id == result.patient_id
-    assert links[0].linked_patient_id == 42
-    assert links[0].confidence == "exact"
-    assert links[0].confirmed is True
-    assert links[0].confirmed_by == "frontdesk"
-    assert links[0].basis == "ssn_dob_match"  # coded reason only, never a raw PHI value
-
-    # Concurrent-intake protection: the advisory lock was acquired, keyed on
-    # the normalized ssn, before the match-key select ran.
-    assert db.lock_calls[0] == {"key": "111223333"}
+    assert exc_info.value.status_code == 409
+    assert db.commit_count == 0
+    assert db.added == []  # no new patient row appears
 
 
 def test_partial_match_never_blocks_and_returns_possible_duplicate_flag(monkeypatch):
@@ -553,28 +538,29 @@ def test_partial_match_never_blocks_and_returns_possible_duplicate_flag(monkeypa
     assert result.possible_duplicate_match is True
 
 
-def test_exact_match_create_new_does_not_succeed_if_link_write_fails(monkeypatch):
-    # Round-3 review: the patient row and its link audit row must commit or
-    # fail together. A prior version committed the patient first, then wrote
-    # the link in its own swallowed transaction — a link-write failure left
-    # a silent, uncorrelated duplicate patient AND still returned 201. Assert
-    # the endpoint no longer returns success in that case.
+def test_partial_match_link_confirmed_by_never_comes_from_the_request_body(monkeypatch):
+    # Round-10 review's second requested case: prove confirmed_by on any
+    # written patient_links row is never taken from the caller. There is no
+    # authenticated session anywhere in this service (a known, documented
+    # gap), so the honest equivalent is that it's always None — even if a
+    # caller tries to smuggle one in, it's silently dropped (no such field
+    # exists on IntakeRequest anymore) and has zero effect on the link row.
     _mock_eligibility_post(monkeypatch)
-    db = _RaisingFakeSession("simulated patient_links write failure")
-    db.existing_patients = [_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")]
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")])
 
-    with pytest.raises(app_mod.HTTPException) as exc_info:
-        app_mod.create_intake(
-            _request(
-                demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
-                duplicate_override="create_new",
-                confirmed_by="frontdesk",
-            ),
-            db=db, x_request_id=None,
-        )
+    result = app_mod.create_intake(
+        _request(
+            demographics={"name": "M. Gonzalez", "ssn": "111-22-3333", "dob": "1971-03-02"},
+            confirmed_by="dr.smith",  # not a real field anymore — silently ignored
+        ),
+        db=db, x_request_id=None,
+    )
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.status_code != 201
+    assert result.possible_duplicate_match is True
+    links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
+    assert len(links) == 1
+    assert links[0].confirmed is False
+    assert links[0].confirmed_by is None
 
 
 def test_partial_match_does_not_succeed_if_link_write_fails(monkeypatch):

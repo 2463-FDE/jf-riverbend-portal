@@ -195,29 +195,27 @@ def create_intake(
 
         possible_duplicate_match = False
         if exact_ids:
-            if req.duplicate_override is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "error": "possible_duplicate_patient",
-                        "confidence": "exact",
-                    },
-                )
-            # Only "create_new" is accepted (see schemas.IntakeRequest) —
-            # proceed, but keep the resemblance on record. Partial matches
-            # never block either — recorded unconfirmed for staff review,
-            # surfaced back only as a boolean (never the candidate
+            # Round-10 review (2026-08-05): this used to be overridable via a
+            # caller-supplied duplicate_override="create_new" + confirmed_by —
+            # removed entirely (see schemas.IntakeRequest). intake-service has
+            # no auth dependency, so nothing stopped any caller from both
+            # forcing a duplicate through AND forging who "confirmed" it. An
+            # exact SSN+DOB match now always blocks here, no exceptions, from
+            # this endpoint.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "possible_duplicate_patient",
+                    "confidence": "exact",
+                },
+            )
+        elif partial_ids:
+            # Partial matches never block — recorded unconfirmed for staff
+            # review, surfaced back only as a boolean (never the candidate
             # patient_id — see IntakeResponse.possible_duplicate_match).
             # Round-3 review (2026-08-05): patient + link rows are one
-            # atomic write now — see _create_patient_with_links.
-            patient_id = _create_patient_with_links(
-                db, req.demographics, exact_ids=exact_ids, partial_ids=partial_ids, confirmed_by=req.confirmed_by,
-            )
-            possible_duplicate_match = bool(partial_ids)
-        elif partial_ids:
-            patient_id = _create_patient_with_links(
-                db, req.demographics, exact_ids=[], partial_ids=partial_ids, confirmed_by=None,
-            )
+            # atomic write — see _create_patient_with_links.
+            patient_id = _create_patient_with_links(db, req.demographics, partial_ids)
             possible_duplicate_match = True
         else:
             patient_id = _create_patient(db, req.demographics)
@@ -368,31 +366,34 @@ def _find_match_candidates(db: Session, demo: Demographics) -> tuple[list[int], 
     return exact_ids, partial_ids
 
 
-def _build_patient_link(patient_id: int, linked_patient_id: int, confidence: str, *, confirmed: bool,
-                         confirmed_by: Optional[str]) -> "PatientLink":
-    """Builds (does not persist) a non-destructive audit row (adr/0004 item
-    3) — never merges or rewrites any other table's patient_id. basis is a
-    coded reason only, never a raw PHI value (see PatientLink docstring in
-    models.py)."""
+def _build_partial_patient_link(patient_id: int, linked_patient_id: int) -> "PatientLink":
+    """Builds (does not persist) a non-destructive partial-match audit row
+    (adr/0004 item 3) — never merges or rewrites any other table's
+    patient_id. basis is a coded reason only, never a raw PHI value (see
+    PatientLink docstring in models.py).
+
+    Round-10 review (2026-08-05): this is now the ONLY kind of patient_links
+    row this service ever writes — always confirmed=False, confirmed_by=None.
+    Exact-match links used to be created too, confirmed=True, via a
+    caller-supplied duplicate_override + confirmed_by — removed entirely
+    (see schemas.IntakeRequest) because intake-service has no auth
+    dependency, so nothing stopped a caller both bypassing the exact-match
+    block AND forging who supposedly confirmed it. There is no server-
+    derived actor identity anywhere in this system to honestly attribute a
+    real confirmation to, so this service no longer claims one exists.
+    """
     return PatientLink(
         patient_id=patient_id,
         linked_patient_id=linked_patient_id,
-        confidence=confidence,
-        basis="ssn_dob_match" if confidence == "exact" else "ssn_match_dob_differs",
-        confirmed=confirmed,
-        confirmed_by=confirmed_by,
-        confirmed_at=datetime.now(timezone.utc) if confirmed else None,
+        confidence="partial",
+        basis="ssn_match_dob_differs",
+        confirmed=False,
+        confirmed_by=None,
+        confirmed_at=None,
     )
 
 
-def _create_patient_with_links(
-    db: Session,
-    demo: Demographics,
-    *,
-    exact_ids: list[int],
-    partial_ids: list[int],
-    confirmed_by: Optional[str],
-) -> int:
+def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: list[int]) -> int:
     """Round-3 review fix (2026-08-05): the new patient row and its adr/0004/
     RIV-160 match-key link audit rows must commit or fail TOGETHER. A prior
     version committed the patient first, then wrote each link row in its own
@@ -407,6 +408,10 @@ def _create_patient_with_links(
     failure here — the patient insert or any link insert — rolls back the
     whole group and fails the request (503); nothing is left half-written,
     unlike the prior behavior this replaces.
+
+    Only ever called for partial matches now (round-10 review) — an exact
+    match always blocks with 409 before this function is reached, so no
+    caller here can create a "confirmed" link at all.
     """
     try:
         patient = Patient(
@@ -427,10 +432,8 @@ def _create_patient_with_links(
         )
         db.add(patient)
         db.flush()  # assigns patient.id without ending the transaction
-        for candidate_id in exact_ids:
-            db.add(_build_patient_link(patient.id, candidate_id, "exact", confirmed=True, confirmed_by=confirmed_by))
         for candidate_id in partial_ids:
-            db.add(_build_patient_link(patient.id, candidate_id, "partial", confirmed=False, confirmed_by=None))
+            db.add(_build_partial_patient_link(patient.id, candidate_id))
         db.commit()
         db.refresh(patient)
         return patient.id

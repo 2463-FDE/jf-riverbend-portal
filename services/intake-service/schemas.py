@@ -1,5 +1,5 @@
 """Pydantic v2 request/response schemas for intake-service."""
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -89,29 +89,26 @@ class Insurance(BaseModel):
 
 class IntakeRequest(BaseModel):
     """demographics/insurance/consents are the original contract.
-    duplicate_override/confirmed_by are additive (Week 2-3 catch-up,
-    adr/0004/RIV-160): unset for every pre-existing caller, so behavior is
-    unchanged unless a caller explicitly opts into resolving an exact-match
-    duplicate — see app.py::create_intake and _find_match_candidates.
 
-    Only "create_new" is accepted (PR #20 round-8 review): intake-service has
-    no auth dependency and is exposed directly on the host (docker-compose.yml,
-    port 8071), so a "link_to_existing" override that lets an unauthenticated
-    caller attach coverage/consents to a caller-chosen existing patient_id was
-    a chart-modification/enumeration path, not a safe feature. Resolving a
-    confirmed duplicate onto an existing patient is deferred until there is a
-    trusted, staff-authenticated path with a server-derived actor identity —
-    there is no server-derived actor identity anywhere in this system yet (no
-    session/auth propagation to intake-service — a known, pre-existing
-    trust-boundary gap), so confirmed_by is trusted verbatim from the caller,
-    same trust level as every other field here.
+    Round-10 review (2026-08-05, RIV-160): this used to also accept
+    duplicate_override="create_new" + confirmed_by, letting a caller bypass
+    an exact SSN+DOB match block and record a "confirmed" patient_links row
+    under a name of their own choosing. intake-service has no auth
+    dependency and is exposed directly on the host (docker-compose.yml, port
+    8071) — same root problem as "link_to_existing" before it (removed in
+    round-8): there is no server-derived actor identity anywhere in this
+    system (no session/auth propagation to intake-service), so nothing
+    stopped ANY caller from both forcing the duplicate through AND forging
+    who supposedly approved it. Both fields are removed entirely rather than
+    trusted verbatim; an exact match now always blocks with 409, no
+    exceptions, from this endpoint. A staff-authenticated path to knowingly
+    create a confirmed duplicate is deferred, unbuilt future work — see
+    app.py::create_intake and _find_match_candidates.
     """
 
     demographics: Demographics
     insurance: Optional[Insurance] = None
     consents: list[str] = Field(default_factory=lambda: ["npp_ack", "treatment_consent"])
-    duplicate_override: Optional[Literal["create_new"]] = None
-    confirmed_by: Optional[str] = None
 
 
 class IntakeResponse(BaseModel):
