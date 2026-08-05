@@ -274,3 +274,33 @@ def test_intake_log_summary_excludes_plan_type_and_consent_names(monkeypatch, ca
     summary = _intake_summary_dict(caplog)
     assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
     assert summary["consent_count"] == 3
+
+
+def test_hostile_created_via_never_reaches_the_log(monkeypatch, caplog):
+    # Round-3 review: Demographics.created_via is client-controlled, not an
+    # enum. A caller putting PHI-shaped text there must never see it come
+    # back out through the intake log line — schemas.py normalizes anything
+    # outside {self_service, front_desk} to "unknown" before this endpoint
+    # (or its log summary) ever sees it.
+    _mock_eligibility_post(monkeypatch)
+
+    db = _FakeSession()
+    caplog.set_level(logging.INFO, logger=app_mod.log.name)
+    app_mod.create_intake(
+        _request(
+            demographics={
+                "name": "Jane Roe",
+                "created_via": "patient is Jane Roe, SSN 111-22-3333",
+            }
+        ),
+        db=db,
+        x_request_id=None,
+    )
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "111-22-3333" not in log_text
+    assert "Jane Roe" not in log_text
+
+    summary = _intake_summary_dict(caplog)
+    assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
+    assert summary["created_via"] == "unknown"

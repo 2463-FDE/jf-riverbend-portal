@@ -121,6 +121,28 @@ def test_whitespace_only_optional_contact_fields_are_normalized_to_none():
     assert demo.zip_code is None
 
 
+# --- Week 1 catch-up, PR #20 round-3 review: created_via is untrusted input --
+
+
+def test_created_via_defaults_are_trusted():
+    for value in ("self_service", "front_desk"):
+        req = schemas.IntakeRequest(demographics={"name": "Jane Roe", "created_via": value})
+        assert req.demographics.created_via == value
+
+
+def test_created_via_outside_known_set_is_normalized_to_unknown():
+    # Demographics.created_via is a plain client-controlled string, not an
+    # enum — a bad client (or a future UI bug) could put arbitrary/PHI-shaped
+    # text in it, and it flows straight into an INFO log line
+    # (services/intake-service/app.py::_intake_log_summary) right next to the
+    # new patient_id. Anything outside the documented self_service/front_desk
+    # set must be normalized before it's trusted anywhere, logging included.
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe", "created_via": "patient is Jane Roe, SSN 111-22-3333"}
+    )
+    assert req.demographics.created_via == "unknown"
+
+
 # NOTE (coverage gap, deliberate): nothing here asserts SSN format, that DOB is
 # a real date, or that duplicate patients are prevented — the service does none
 # of those (no input normalization, no MPI/match key). See SEEDED-DEBT.

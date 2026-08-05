@@ -3,6 +3,14 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+# created_via is documented (models.py, schema.sql) as self_service | front_desk
+# only, but the field itself is a plain string a caller controls — see
+# Demographics._derive_legacy_fields, which normalizes anything outside this
+# set to "unknown" rather than trusting it verbatim (PR #20 review: an
+# untrusted created_via value flows straight into an INFO log line next to
+# the new patient_id).
+_VALID_CREATED_VIA = frozenset({"self_service", "front_desk"})
+
 
 class Demographics(BaseModel):
     """Patient demographics + contact.
@@ -65,6 +73,9 @@ class Demographics(BaseModel):
         else:
             # Legacy input: `address`, if any, is already the full blob.
             self.address = street or None
+
+        if self.created_via not in _VALID_CREATED_VIA:
+            self.created_via = "unknown"
 
         return self
 
