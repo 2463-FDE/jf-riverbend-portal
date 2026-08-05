@@ -204,23 +204,23 @@ def create_intake(
                     },
                 )
             # Only "create_new" is accepted (see schemas.IntakeRequest) —
-            # proceed, but keep the resemblance on record.
-            patient_id = _create_patient(db, req.demographics)
-            for candidate_id in exact_ids:
-                _record_patient_link(
-                    db, patient_id, candidate_id, "exact",
-                    confirmed=True, confirmed_by=req.confirmed_by,
-                )
+            # proceed, but keep the resemblance on record. Partial matches
+            # never block either — recorded unconfirmed for staff review,
+            # surfaced back only as a boolean (never the candidate
+            # patient_id — see IntakeResponse.possible_duplicate_match).
+            # Round-3 review (2026-08-05): patient + link rows are one
+            # atomic write now — see _create_patient_with_links.
+            patient_id = _create_patient_with_links(
+                db, req.demographics, exact_ids=exact_ids, partial_ids=partial_ids, confirmed_by=req.confirmed_by,
+            )
+            possible_duplicate_match = bool(partial_ids)
+        elif partial_ids:
+            patient_id = _create_patient_with_links(
+                db, req.demographics, exact_ids=[], partial_ids=partial_ids, confirmed_by=None,
+            )
+            possible_duplicate_match = True
         else:
             patient_id = _create_patient(db, req.demographics)
-
-        if partial_ids:
-            # Partial matches never block — recorded unconfirmed for staff
-            # review, surfaced back only as a boolean (never the candidate
-            # patient_id — see IntakeResponse.possible_duplicate_match).
-            for candidate_id in partial_ids:
-                _record_patient_link(db, patient_id, candidate_id, "partial", confirmed=False, confirmed_by=None)
-            possible_duplicate_match = True
 
         coverage_id = None
         if req.insurance is not None:
@@ -316,9 +316,9 @@ def _acquire_match_key_lock(db: Session, demo: Demographics) -> None:
     pg_advisory_xact_lock is held for the rest of the current transaction —
     released automatically at the next commit/rollback on this connection,
     which in create_intake's flow is the very next commit (_create_patient
-    or _record_patient_link), so this covers exactly the check-then-insert
-    window and nothing longer. A no-op when there's no ssn to key on, same as
-    _find_match_candidates.
+    or _create_patient_with_links), so this covers exactly the check-then-
+    insert window and nothing longer. A no-op when there's no ssn to key on,
+    same as _find_match_candidates.
     """
     normalized_ssn = _normalize_ssn(demo.ssn)
     if not normalized_ssn:
@@ -368,38 +368,78 @@ def _find_match_candidates(db: Session, demo: Demographics) -> tuple[list[int], 
     return exact_ids, partial_ids
 
 
-def _record_patient_link(
+def _build_patient_link(patient_id: int, linked_patient_id: int, confidence: str, *, confirmed: bool,
+                         confirmed_by: Optional[str]) -> "PatientLink":
+    """Builds (does not persist) a non-destructive audit row (adr/0004 item
+    3) — never merges or rewrites any other table's patient_id. basis is a
+    coded reason only, never a raw PHI value (see PatientLink docstring in
+    models.py)."""
+    return PatientLink(
+        patient_id=patient_id,
+        linked_patient_id=linked_patient_id,
+        confidence=confidence,
+        basis="ssn_dob_match" if confidence == "exact" else "ssn_match_dob_differs",
+        confirmed=confirmed,
+        confirmed_by=confirmed_by,
+        confirmed_at=datetime.now(timezone.utc) if confirmed else None,
+    )
+
+
+def _create_patient_with_links(
     db: Session,
-    patient_id: int,
-    linked_patient_id: int,
-    confidence: str,
-    confirmed: bool,
+    demo: Demographics,
+    *,
+    exact_ids: list[int],
+    partial_ids: list[int],
     confirmed_by: Optional[str],
-) -> None:
-    """Non-destructive audit row (adr/0004 item 3) — never merges or
-    rewrites any other table's patient_id. basis is a coded reason only,
-    never a raw PHI value (see PatientLink docstring in models.py)."""
+) -> int:
+    """Round-3 review fix (2026-08-05): the new patient row and its adr/0004/
+    RIV-160 match-key link audit rows must commit or fail TOGETHER. A prior
+    version committed the patient first, then wrote each link row in its own
+    separately-swallowed transaction (_record_patient_link, now removed) — so
+    a link-write failure (migration 012 not yet applied, a transient
+    Postgres error) left a newly created duplicate patient with NO audit
+    trail: the exact silent-duplicate-fragment failure mode RIV-160 exists
+    to prevent, reachable via this degraded path instead of the happy one.
+
+    Uses flush() (not commit()) to obtain the new patient's id while still
+    inside the same transaction as its link rows, then commits once. ANY
+    failure here — the patient insert or any link insert — rolls back the
+    whole group and fails the request (503); nothing is left half-written,
+    unlike the prior behavior this replaces.
+    """
     try:
-        link = PatientLink(
-            patient_id=patient_id,
-            linked_patient_id=linked_patient_id,
-            confidence=confidence,
-            basis="ssn_dob_match" if confidence == "exact" else "ssn_match_dob_differs",
-            confirmed=confirmed,
-            confirmed_by=confirmed_by,
-            confirmed_at=datetime.now(timezone.utc) if confirmed else None,
+        patient = Patient(
+            name=demo.name,
+            first_name=demo.first_name,
+            last_name=demo.last_name,
+            dob=demo.dob,
+            ssn=demo.ssn,
+            gender=demo.gender,
+            address=demo.address,
+            city=demo.city,
+            state=demo.state,
+            zip_code=demo.zip_code,
+            phone=demo.phone,
+            email=demo.email,
+            notes=demo.notes,
+            created_via=demo.created_via,
         )
-        db.add(link)
+        db.add(patient)
+        db.flush()  # assigns patient.id without ending the transaction
+        for candidate_id in exact_ids:
+            db.add(_build_patient_link(patient.id, candidate_id, "exact", confirmed=True, confirmed_by=confirmed_by))
+        for candidate_id in partial_ids:
+            db.add(_build_patient_link(patient.id, candidate_id, "partial", confirmed=False, confirmed_by=None))
         db.commit()
+        db.refresh(patient)
+        return patient.id
     except SQLAlchemyError as e:
         db.rollback()
-        # Non-fatal by design: a failure to record the audit link must not
-        # block or fail the registration itself (same principle as the
-        # eligibility enqueue step). error_type only — see _create_patient.
-        log.error(
-            "intake: failed to record patient_link for patient %s (error_type=%s)",
-            patient_id, type(e).__name__,
-        )
+        # Same reasoning as _create_patient: never log str(e) — it can embed
+        # the failed statement's bound parameters (name/dob/ssn/address/...).
+        log.error("intake: failed to create patient with link audit rows (error_type=%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="patient store unavailable")
 
 
 def _create_patient(db: Session, demo: Demographics) -> int:

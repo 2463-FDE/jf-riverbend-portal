@@ -48,12 +48,21 @@ class _FakeSession:
     def add(self, obj):
         self.added.append(obj)
 
-    def commit(self):
-        self.commit_count += 1
+    def _assign_ids(self):
         for obj in self.added:
             if getattr(obj, "id", None) is None:
                 obj.id = self._next_id
                 self._next_id += 1
+
+    def flush(self):
+        # Round-3 review fix: _create_patient_with_links flushes to obtain
+        # the new patient's id before adding its link rows, all inside one
+        # transaction committed once — this mirrors that without ending it.
+        self._assign_ids()
+
+    def commit(self):
+        self.commit_count += 1
+        self._assign_ids()
 
     def refresh(self, obj):
         pass
@@ -542,6 +551,46 @@ def test_partial_match_never_blocks_and_returns_possible_duplicate_flag(monkeypa
     # PR #20 round-8 review: a boolean flag only — never the candidate
     # patient_id, which this unauthenticated endpoint must not disclose.
     assert result.possible_duplicate_match is True
+
+
+def test_exact_match_create_new_does_not_succeed_if_link_write_fails(monkeypatch):
+    # Round-3 review: the patient row and its link audit row must commit or
+    # fail together. A prior version committed the patient first, then wrote
+    # the link in its own swallowed transaction — a link-write failure left
+    # a silent, uncorrelated duplicate patient AND still returned 201. Assert
+    # the endpoint no longer returns success in that case.
+    _mock_eligibility_post(monkeypatch)
+    db = _RaisingFakeSession("simulated patient_links write failure")
+    db.existing_patients = [_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")]
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod.create_intake(
+            _request(
+                demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
+                duplicate_override="create_new",
+                confirmed_by="frontdesk",
+            ),
+            db=db, x_request_id=None,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.status_code != 201
+
+
+def test_partial_match_does_not_succeed_if_link_write_fails(monkeypatch):
+    # Same failure mode, partial-match branch (the review's second requested case).
+    _mock_eligibility_post(monkeypatch)
+    db = _RaisingFakeSession("simulated patient_links write failure")
+    db.existing_patients = [_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")]
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod.create_intake(
+            _request(demographics={"name": "M. Gonzalez", "ssn": "111-22-3333", "dob": "1971-03-02"}),
+            db=db, x_request_id=None,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.status_code != 201
 
     links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
     assert len(links) == 1
