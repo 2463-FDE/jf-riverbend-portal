@@ -233,19 +233,37 @@ next team.
 
 ## Logs & PHI warning
 
-`logs/intake-service.log` records one line per `/intake` request, but as of
-the Week 1 catch-up fix the demographics/contact fields in that line are
-passed through `libs/safe_logging.redact()` first — PHI-shaped values
-(name/first_name/last_name/dob/ssn/address/city/state/zip_code/phone/email/
-notes) are replaced with `***REDACTED***` before the line is written.
-**This does not retroactively scrub log entries written before this fix** —
-any `logs/*.log` file that predates it may still contain plaintext PHI.
-Treat the logs directory as sensitive regardless; do not copy it off the
-host. `redact()` is a field-name-based backstop (see
-`libs/safe_logging/redact.py`), not a guarantee against every possible future
-PHI-shaped field — any new sensitive field name must be added to
-`SENSITIVE_FIELD_NAMES` there, and no other service's logging has been
-audited/fixed by this change (only `intake-service`'s `/intake` line).
+`logs/intake-service.log` records one line per `/intake` request:
+`POST /intake summary=<json>`. That JSON is built by
+`_intake_log_summary` (`services/intake-service/app.py`) from an
+**allowlist**, not a redacted copy of the request — it contains exactly two
+keys, `correlation_id` and `created_via`, and nothing else, regardless of
+what fields exist on the request schema today or are added later. An
+earlier version of this fix ran the whole request body through
+`libs/safe_logging.redact()` (a blocklist), but that missed several fields
+across three separate review rounds before the allowlist replaced it
+entirely — see `services/intake-service/app.py`'s `_intake_log_summary`
+docstring for the full history. `redact()` itself is unaffected and remains
+available as a general-purpose backstop for other code that logs structured
+data; it just isn't what powers this particular log line anymore.
+
+Insert **failures** on the patient/coverage/consent paths (`_create_patient`,
+`_create_coverage`, `_record_consents`) log only the exception's type name
+(e.g. `error_type=IntegrityError`), never `str(exc)` — a real SQLAlchemy
+error's string form embeds the failed statement's bound parameters
+(name/dob/ssn/address/... for patients, member_id/group_number for
+coverage) unless avoided. The intake-service database engine is also
+configured with `hide_parameters=True` (`services/intake-service/db.py`) as
+a second, engine-level layer of defense against any other call site that
+logs a SQLAlchemy exception directly.
+
+**None of this retroactively scrubs log entries written before these
+fixes** — any `logs/*.log` file that predates them may still contain
+plaintext PHI, including from the request-body and blocklist-redaction
+versions of this line that existed briefly during development. Treat the
+logs directory as sensitive regardless; do not copy it off the host. No
+other service's logging has been audited/fixed by this work — only
+`intake-service`'s `/intake` path (happy path and error paths).
 
 ## CI
 

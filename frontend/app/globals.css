@@ -647,13 +647,9 @@ textarea:focus-visible,
   resize: vertical;
 }
 .rb-field-row {
-
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
-    /* 
-  grid-template-columns: 1fr 1fr;
-  gap: 16px; */
 }
 @media (max-width: 600px) {
   .rb-field-row {
