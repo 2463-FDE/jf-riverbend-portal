@@ -100,7 +100,14 @@ Inherited shortcomings (left as-is from the handoff):
         true public/unauthenticated self-service registration (this
         module's opening paragraph's "self-service portal" line) is a
         separate, undecided product question — not resolved by this fix.
-  * Consents are inserted one at a time (a commit per consent).
+  * Consents are inserted one at a time (a commit per consent). PR #20
+    round-12 review: a failed consent insert used to be swallowed (rollback
+    + log, no raise), so /intake could return 201 with a real patient_id
+    even though a required consent (npp_ack, treatment_consent) never
+    persisted — an irreversible partial registration reported as success.
+    _record_consents now raises HTTPException(503) on any consent write
+    failure, matching _create_patient/_create_coverage's existing
+    convention — see _record_consents.
 
 Stage 3 (RIV-088 / RIV-141 fix): eligibility used to be verified INLINE on
 this request thread with no timeout — a slow or down payer blocked /intake
@@ -548,6 +555,15 @@ def _create_coverage(db: Session, patient_id: int, ins: Insurance) -> int:
 def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
     # Inefficient by design: one INSERT + COMMIT per consent (a separate
     # transaction round-trip each) rather than a single batched insert.
+    #
+    # Round-12 review (2026-08-05): a consent write failure used to be
+    # swallowed here (rollback + log, no raise) — create_intake still
+    # returned 201 with a real patient_id even though a required consent
+    # (e.g. npp_ack, treatment_consent) never persisted, an irreversible
+    # partial registration reported as a success with no signal to retry.
+    # Now raises HTTPException(503), matching _create_patient/_create_coverage's
+    # existing "store unavailable" convention, so the caller sees a failure
+    # instead of a false success.
     for kind in kinds:
         try:
             db.add(Consent(patient_id=patient_id, kind=kind))
@@ -560,6 +576,7 @@ def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
                 "intake: failed to record consent %s for patient %s (error_type=%s)",
                 kind, patient_id, type(e).__name__,
             )
+            raise HTTPException(status_code=503, detail="consent store unavailable")
 
 
 def _start_eligibility_check(

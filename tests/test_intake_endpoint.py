@@ -112,6 +112,26 @@ class _RaisingFakeSession(_FakeSession):
         raise app_mod.SQLAlchemyError(self._message)
 
 
+class _ConsentFailingSession(_FakeSession):
+    """Round-12 review: lets patient (and coverage, if any) commit normally,
+    then raises on the Nth consent commit specifically — proving a consent
+    write failure is no longer swallowed regardless of which consent in the
+    list fails."""
+
+    def __init__(self, fail_at_consent_index, **kwargs):
+        super().__init__(**kwargs)
+        self._fail_at_consent_index = fail_at_consent_index
+        self._consent_commit_count = 0
+
+    def commit(self):
+        if self.added and type(self.added[-1]).__tablename__ == "consents":
+            index = self._consent_commit_count
+            self._consent_commit_count += 1
+            if index == self._fail_at_consent_index:
+                raise app_mod.SQLAlchemyError("simulated consent write failure")
+        super().commit()
+
+
 def _request(**overrides):
     payload = {
         "demographics": {"name": "Jane Roe", "dob": "1990-01-01"},
@@ -548,6 +568,34 @@ def test_coverage_insert_failure_never_logs_member_id(caplog):
     assert "AET-SECRET-123456" not in log_text
     assert "GRP-9987" not in log_text
     assert "SQLAlchemyError" in log_text
+
+
+# --- Round-12 review: consent write failures must not report a false 201 ---
+
+
+def test_first_consent_write_failure_returns_503_not_201(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _ConsentFailingSession(fail_at_consent_index=0)
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(_request(), db=db)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.status_code != 201
+
+
+def test_second_consent_write_failure_also_returns_503_not_201(monkeypatch):
+    # The first consent (npp_ack) persists fine; the second (treatment_consent)
+    # fails — the caller must still see a failure, not a 201 reporting only
+    # the first consent as if the registration were legally complete.
+    _mock_eligibility_post(monkeypatch)
+    db = _ConsentFailingSession(fail_at_consent_index=1)
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(_request(), db=db)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.status_code != 201
 
 
 # --- Week 2-3 catch-up: adr/0004/RIV-160 match-key lookup -------------------
