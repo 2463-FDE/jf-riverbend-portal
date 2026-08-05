@@ -1,5 +1,5 @@
 """Pydantic v2 request/response schemas for intake-service."""
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -88,9 +88,30 @@ class Insurance(BaseModel):
 
 
 class IntakeRequest(BaseModel):
+    """demographics/insurance/consents are the original contract.
+    duplicate_override/link_to_patient_id/confirmed_by are additive (Week
+    2-3 catch-up, adr/0004/RIV-160): unset for every pre-existing caller, so
+    behavior is unchanged unless a caller explicitly opts into resolving an
+    exact-match duplicate — see app.py::create_intake and
+    _find_match_candidates. There is no server-derived actor identity
+    anywhere in this system yet (no session/auth propagation to
+    intake-service — a known, pre-existing trust-boundary gap), so
+    confirmed_by is trusted verbatim from the caller, same trust level as
+    every other field here.
+    """
+
     demographics: Demographics
     insurance: Optional[Insurance] = None
     consents: list[str] = Field(default_factory=lambda: ["npp_ack", "treatment_consent"])
+    duplicate_override: Optional[Literal["create_new", "link_to_existing"]] = None
+    link_to_patient_id: Optional[int] = None
+    confirmed_by: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_duplicate_override(self) -> "IntakeRequest":
+        if self.duplicate_override == "link_to_existing" and self.link_to_patient_id is None:
+            raise ValueError("link_to_patient_id is required when duplicate_override is link_to_existing")
+        return self
 
 
 class IntakeResponse(BaseModel):
@@ -103,3 +124,7 @@ class IntakeResponse(BaseModel):
     eligibility: Optional[dict[str, Any]] = None
     eligibility_status: Optional[str] = None
     eligibility_job_id: Optional[str] = None
+    # Week 2-3 catch-up (adr/0004/RIV-160): patient ids this intake partially
+    # matched against (ssn agreed, dob did not) — never blocking, just a
+    # pointer for staff review. None when there were no partial matches.
+    possible_duplicates: Optional[list[int]] = None

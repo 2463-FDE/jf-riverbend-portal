@@ -44,8 +44,29 @@ CREATE TABLE IF NOT EXISTS patients (
     created_via TEXT,                          -- self_service | front_desk
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- NOTE: no unique match key on (name, dob, ssn) — self-service intake forks
--- one person into several rows. See intake.yaml match_key: none.
+-- NOTE: still no UNIQUE constraint on (name, dob, ssn) — self-service intake
+-- can still fork one person into several rows. Week 2-3 catch-up
+-- (adr/0004, RIV-160) added a deterministic (dob, ssn) match-key lookup at
+-- intake and the patient_links table below to make a duplicate reviewable
+-- instead of a silent, untracked fragment — see
+-- services/intake-service/app.py::_find_match_candidates. It does not
+-- retroactively merge or backfill any duplicate that already existed
+-- before this migration (adr/0004 explicitly scopes that out).
+
+CREATE TABLE IF NOT EXISTS patient_links (
+    id                SERIAL PRIMARY KEY,
+    patient_id        INTEGER NOT NULL REFERENCES patients(id),
+    linked_patient_id INTEGER NOT NULL REFERENCES patients(id),
+    confidence        TEXT NOT NULL CHECK (confidence IN ('exact', 'partial')),
+    basis             TEXT,
+    confirmed         BOOLEAN NOT NULL DEFAULT FALSE,
+    confirmed_by      TEXT,
+    confirmed_at      TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (patient_id <> linked_patient_id)
+);
+CREATE INDEX IF NOT EXISTS patient_links_patient_id_idx ON patient_links (patient_id);
+CREATE INDEX IF NOT EXISTS patient_links_linked_patient_id_idx ON patient_links (linked_patient_id);
 
 CREATE TABLE IF NOT EXISTS insurance_coverages (
     id            SERIAL PRIMARY KEY,

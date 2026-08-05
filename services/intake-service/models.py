@@ -1,5 +1,5 @@
 """ORM models intake-service touches. (Copy-paste per service — no shared lib yet.)"""
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, Text
 from sqlalchemy.sql import func
 
 from db import Base
@@ -48,3 +48,26 @@ class Consent(Base):
     patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
     kind = Column(Text)                               # npp_ack | treatment_consent | roi_consent
     signed_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PatientLink(Base):
+    """Non-destructive identity-link audit trail (adr/0004, RIV-160,
+    migration 012). See app.py::_find_match_candidates for how rows here
+    get created; this table is never used to merge or rewrite any other
+    table's patient_id foreign keys."""
+
+    __tablename__ = "patient_links"
+    __table_args__ = (
+        CheckConstraint("confidence IN ('exact', 'partial')", name="patient_links_confidence_check"),
+        CheckConstraint("patient_id <> linked_patient_id", name="patient_links_no_self_link_check"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
+    linked_patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
+    confidence = Column(Text, nullable=False)         # exact | partial
+    basis = Column(Text)                              # coded reason only, never raw PHI values
+    confirmed = Column(Boolean, nullable=False, default=False)
+    confirmed_by = Column(Text)                       # staff identifier; NULL until confirmed
+    confirmed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

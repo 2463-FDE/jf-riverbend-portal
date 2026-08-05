@@ -41,9 +41,30 @@ Inherited shortcomings (left as-is from the handoff):
         patient's answers to any question on the form.
     This does not retroactively scrub prior log entries written before this
     fix — see docs/runbook.md for that gap.
-  * D5 — no master patient index / match key: every /intake creates a brand new
-    patients row, so one person forks into several charts (intake.yaml match_key:
-    none).
+  * D5 — PARTIALLY RESOLVED (Week 2-3 catch-up, adr/0004/RIV-160): every
+    /intake used to create a brand-new patients row unconditionally, no
+    matter how many existing rows already matched the same person (the
+    seeded Maria Gonzalez fixture — 3 rows, one penicillin allergy visible
+    from only one of them). intake.yaml's match_key hook is still `none`
+    (this fix lives in code, not that config), but /intake now runs a
+    deterministic (dob, ssn) match-key lookup — see _find_match_candidates —
+    before creating a patient:
+      - An EXACT match (same ssn, same dob) blocks silent creation with a
+        409 unless the caller explicitly resolves it via
+        `duplicate_override` ("link_to_existing" reuses the existing
+        patient_id for this visit's coverage/consents instead of creating a
+        new row; "create_new" proceeds anyway but still records the
+        resemblance in patient_links so it's reviewable, not silent).
+      - A PARTIAL match (same ssn, different dob) never blocks — it
+        proceeds exactly as before, but records an unconfirmed
+        patient_links row and returns `possible_duplicates` for staff to
+        review later.
+      - No match, or no ssn supplied at all, behaves exactly as before this
+        fix — this only engages when there's a reliable key to compare.
+    This does NOT retroactively merge/backfill any duplicate that already
+    existed before this migration (adr/0004 explicitly scopes that out —
+    Maria Gonzalez's 3 existing rows stay 3 rows) and does not implement the
+    staff-confirmation UI (API/backend only this stage).
   * Consents are inserted one at a time (a commit per consent).
 
 Stage 3 (RIV-088 / RIV-141 fix): eligibility used to be verified INLINE on
@@ -68,6 +89,7 @@ from typing import Any, Optional
 import httpx
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -75,7 +97,7 @@ from config import settings
 from db import get_db
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
-from models import Consent, InsuranceCoverage, Patient
+from models import Consent, InsuranceCoverage, Patient, PatientLink
 from schemas import Demographics, Insurance, IntakeRequest, IntakeResponse
 
 log = configure(settings.service_name)
@@ -140,9 +162,46 @@ def create_intake(
     log.info('POST /intake summary=%s', json.dumps(_intake_log_summary(req, correlation_id)))
 
     with safe_span(_TRACER_NAME, "intake.create", {"correlation_id": correlation_id}) as span:
-        # D5 (flagged, not fixed): no MPI / match-key lookup on (name, dob, ssn).
-        # Every intake inserts a brand new chart, even for a returning patient.
-        patient_id = _create_patient(db, req.demographics)
+        # D5 (Week 2-3 catch-up, adr/0004/RIV-160): deterministic (dob, ssn)
+        # match-key lookup before creating a patient — see module docstring.
+        exact_ids, partial_ids = _find_match_candidates(db, req.demographics)
+        span.set_attribute("exact_match_count", len(exact_ids))
+        span.set_attribute("partial_match_count", len(partial_ids))
+
+        possible_duplicates: Optional[list[int]] = None
+        if exact_ids:
+            if req.duplicate_override is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "possible_duplicate_patient",
+                        "confidence": "exact",
+                        "candidates": exact_ids,
+                    },
+                )
+            if req.duplicate_override == "link_to_existing":
+                if req.link_to_patient_id not in exact_ids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="link_to_patient_id must be one of the exact-match candidates",
+                    )
+                patient_id = req.link_to_patient_id
+            else:  # "create_new" — proceed, but keep the resemblance on record
+                patient_id = _create_patient(db, req.demographics)
+                for candidate_id in exact_ids:
+                    _record_patient_link(
+                        db, patient_id, candidate_id, "exact",
+                        confirmed=True, confirmed_by=req.confirmed_by,
+                    )
+        else:
+            patient_id = _create_patient(db, req.demographics)
+
+        if partial_ids and not (req.duplicate_override == "link_to_existing"):
+            # Partial matches never block — recorded unconfirmed for staff
+            # review, surfaced back via possible_duplicates.
+            for candidate_id in partial_ids:
+                _record_patient_link(db, patient_id, candidate_id, "partial", confirmed=False, confirmed_by=None)
+            possible_duplicates = partial_ids
 
         coverage_id = None
         if req.insurance is not None:
@@ -173,6 +232,7 @@ def create_intake(
         eligibility=eligibility,
         eligibility_status=eligibility_status,
         eligibility_job_id=eligibility_job_id,
+        possible_duplicates=possible_duplicates,
     )
 
 
@@ -213,6 +273,92 @@ def _intake_log_summary(req: IntakeRequest, correlation_id: str) -> dict[str, An
         "correlation_id": correlation_id,
         "created_via": req.demographics.created_via,
     }
+
+
+def _normalize_ssn(ssn: Optional[str]) -> Optional[str]:
+    """Digits only, so "412-55-9981" and "412559981" compare equal. Returns
+    None for a blank/missing SSN — never an empty string, so callers can
+    treat falsy as "no reliable key"."""
+    if not ssn:
+        return None
+    digits = re.sub(r"\D", "", ssn)
+    return digits or None
+
+
+def _find_match_candidates(db: Session, demo: Demographics) -> tuple[list[int], list[int]]:
+    """adr/0004 (AUD-09/RIV-160) deterministic match-key lookup: (patient
+    ids with an EXACT match, patient ids with only a PARTIAL match).
+
+    Exact = same normalized ssn AND same dob (adr/0004: "dob + full ssn
+    agree" -> certain duplicate). Partial = same normalized ssn but a
+    different dob (adr/0004's own worked example: the seeded Maria Gonzalez
+    rows all share one ssn; 1042/1330 share a dob too (exact), 1588's dob is
+    transposed (partial) despite an identical name-adjacent spelling
+    difference — name is informative context in the ADR, not what gates
+    this tier).
+
+    Returns ([], []) whenever no ssn was supplied — there is no reliable key
+    to compare, and matching on name/dob alone isn't part of this proposal
+    (name variation is exactly what makes this fixture hard: "Maria
+    Gonzalez" / "Maria Gonzales" / "M. Gonzalez").
+
+    Scans every patient row with a non-null ssn and compares in Python
+    rather than adding a normalized/indexed ssn column — acceptable at this
+    system's current seed-data scale (~hundreds of rows), the same
+    "deliberate simplicity" character as records-service's existing
+    full-scan search debt (D8). This does NOT scale to a real production
+    patient volume without a normalized, indexed column — flagged here
+    rather than silently assumed away.
+    """
+    normalized_ssn = _normalize_ssn(demo.ssn)
+    if not normalized_ssn:
+        return [], []
+
+    exact_ids: list[int] = []
+    partial_ids: list[int] = []
+    rows = db.execute(select(Patient).where(Patient.ssn.isnot(None))).scalars().all()
+    for row in rows:
+        if _normalize_ssn(row.ssn) != normalized_ssn:
+            continue
+        if demo.dob and row.dob and demo.dob == row.dob:
+            exact_ids.append(row.id)
+        else:
+            partial_ids.append(row.id)
+    return exact_ids, partial_ids
+
+
+def _record_patient_link(
+    db: Session,
+    patient_id: int,
+    linked_patient_id: int,
+    confidence: str,
+    confirmed: bool,
+    confirmed_by: Optional[str],
+) -> None:
+    """Non-destructive audit row (adr/0004 item 3) — never merges or
+    rewrites any other table's patient_id. basis is a coded reason only,
+    never a raw PHI value (see PatientLink docstring in models.py)."""
+    try:
+        link = PatientLink(
+            patient_id=patient_id,
+            linked_patient_id=linked_patient_id,
+            confidence=confidence,
+            basis="ssn_dob_match" if confidence == "exact" else "ssn_match_dob_differs",
+            confirmed=confirmed,
+            confirmed_by=confirmed_by,
+            confirmed_at=datetime.now(timezone.utc) if confirmed else None,
+        )
+        db.add(link)
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        # Non-fatal by design: a failure to record the audit link must not
+        # block or fail the registration itself (same principle as the
+        # eligibility enqueue step). error_type only — see _create_patient.
+        log.error(
+            "intake: failed to record patient_link for patient %s (error_type=%s)",
+            patient_id, type(e).__name__,
+        )
 
 
 def _create_patient(db: Session, demo: Demographics) -> int:

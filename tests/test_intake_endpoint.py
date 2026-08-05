@@ -20,11 +20,27 @@ app_mod = load_module("services/intake-service/app.py", "intake_app_endpoint")
 IntakeRequest = load_module("services/intake-service/schemas.py", "intake_schemas_for_endpoint").IntakeRequest
 
 
+class _FakeQueryResult:
+    def __init__(self, items):
+        self._items = items
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._items
+
+
 class _FakeSession:
-    def __init__(self):
+    def __init__(self, existing_patients=None):
         self.added = []
         self.commit_count = 0
         self._next_id = 1
+        # Week 2-3 catch-up: rows _find_match_candidates should "find" via
+        # db.execute(select(Patient)...). Ignores the actual query — this
+        # fake just returns whatever the test configured, since we're
+        # testing app.py's branching logic, not real SQL.
+        self.existing_patients = existing_patients or []
 
     def add(self, obj):
         self.added.append(obj)
@@ -41,6 +57,9 @@ class _FakeSession:
 
     def rollback(self):
         pass
+
+    def execute(self, _stmt):
+        return _FakeQueryResult(self.existing_patients)
 
 
 class _RaisingFakeSession(_FakeSession):
@@ -67,6 +86,16 @@ def _request(**overrides):
     }
     payload.update(overrides)
     return IntakeRequest(**payload)
+
+
+class _FakePatientRow:
+    """Stand-in for an existing patients row, as read by
+    _find_match_candidates (only .id/.ssn/.dob are touched)."""
+
+    def __init__(self, id, ssn, dob):
+        self.id = id
+        self.ssn = ssn
+        self.dob = dob
 
 
 def test_intake_returns_201_shape_promptly_when_eligibility_service_is_slow(monkeypatch):
@@ -406,3 +435,130 @@ def test_coverage_insert_failure_never_logs_member_id(caplog):
     assert "AET-SECRET-123456" not in log_text
     assert "GRP-9987" not in log_text
     assert "SQLAlchemyError" in log_text
+
+
+# --- Week 2-3 catch-up: adr/0004/RIV-160 match-key lookup -------------------
+
+
+def test_no_ssn_means_no_match_lookup_and_unaffected_behavior(monkeypatch):
+    # Without an ssn there is no reliable key (adr/0004 doesn't propose
+    # matching on name/dob alone) — intake must behave exactly as before
+    # this feature existed, even with existing candidate rows present.
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111223333", dob="1990-01-01")])
+
+    result = app_mod.create_intake(_request(), db=db, x_request_id=None)  # default demographics has no ssn
+
+    assert result.patient_id != 42
+    assert result.possible_duplicates is None
+
+
+def test_exact_match_blocks_with_409_when_no_override(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod.create_intake(
+            _request(demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"}),
+            db=db, x_request_id=None,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["confidence"] == "exact"
+    assert exc_info.value.detail["candidates"] == [42]
+    # Nothing was persisted — the block happens before any create/commit.
+    assert db.commit_count == 0
+    assert db.added == []
+
+
+def test_exact_match_link_to_existing_reuses_patient_id_no_new_patient_row(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
+
+    result = app_mod.create_intake(
+        _request(
+            demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
+            duplicate_override="link_to_existing",
+            link_to_patient_id=42,
+        ),
+        db=db, x_request_id=None,
+    )
+
+    assert result.patient_id == 42
+    assert result.possible_duplicates is None
+    # No new Patient row, and no patient_links row either — there's only
+    # ever one row involved when linking directly to an existing patient.
+    table_names = {type(obj).__tablename__ for obj in db.added}
+    assert "patients" not in table_names
+    assert "patient_links" not in table_names
+    # But the visit's coverage/consents DID attach to the existing patient.
+    assert "insurance_coverages" in table_names
+    assert "consents" in table_names
+    for obj in db.added:
+        if type(obj).__tablename__ in ("insurance_coverages", "consents"):
+            assert obj.patient_id == 42
+
+
+def test_exact_match_link_to_existing_rejects_id_outside_candidates(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod.create_intake(
+            _request(
+                demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
+                duplicate_override="link_to_existing",
+                link_to_patient_id=999,  # not a real candidate
+            ),
+            db=db, x_request_id=None,
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+def test_exact_match_create_new_override_creates_and_records_link(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
+
+    result = app_mod.create_intake(
+        _request(
+            demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
+            duplicate_override="create_new",
+            confirmed_by="frontdesk",
+        ),
+        db=db, x_request_id=None,
+    )
+
+    assert result.patient_id != 42  # a genuinely new row
+    assert result.possible_duplicates is None  # exact, not partial — no warning field
+
+    links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
+    assert len(links) == 1
+    assert links[0].patient_id == result.patient_id
+    assert links[0].linked_patient_id == 42
+    assert links[0].confidence == "exact"
+    assert links[0].confirmed is True
+    assert links[0].confirmed_by == "frontdesk"
+    assert links[0].basis == "ssn_dob_match"  # coded reason only, never a raw PHI value
+
+
+def test_partial_match_never_blocks_and_returns_possible_duplicates(monkeypatch):
+    # Same ssn, different dob — adr/0004's own worked Maria Gonzalez example
+    # (three rows, one ssn, one differing dob).
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")])
+
+    result = app_mod.create_intake(
+        _request(demographics={"name": "M. Gonzalez", "ssn": "111-22-3333", "dob": "1971-03-02"}),
+        db=db, x_request_id=None,
+    )
+
+    assert result.patient_id != 42
+    assert result.possible_duplicates == [42]
+
+    links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
+    assert len(links) == 1
+    assert links[0].confidence == "partial"
+    assert links[0].confirmed is False
+    assert links[0].confirmed_by is None
+    assert links[0].basis == "ssn_match_dob_differs"

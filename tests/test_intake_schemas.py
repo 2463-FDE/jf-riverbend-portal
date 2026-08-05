@@ -143,6 +143,28 @@ def test_created_via_outside_known_set_is_normalized_to_unknown():
     assert req.demographics.created_via == "unknown"
 
 
-# NOTE (coverage gap, deliberate): nothing here asserts SSN format, that DOB is
-# a real date, or that duplicate patients are prevented — the service does none
-# of those (no input normalization, no MPI/match key). See SEEDED-DEBT.
+# --- Week 2-3 catch-up: adr/0004/RIV-160 duplicate-override contract -------
+
+
+def test_link_to_existing_requires_link_to_patient_id():
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(
+            demographics={"name": "Jane Roe"},
+            duplicate_override="link_to_existing",
+            # link_to_patient_id omitted — must be rejected, not silently
+            # ignored, since app.py's create_intake relies on this being set
+            # whenever this override is chosen.
+        )
+
+
+def test_create_new_override_does_not_require_link_to_patient_id():
+    req = schemas.IntakeRequest(demographics={"name": "Jane Roe"}, duplicate_override="create_new")
+    assert req.link_to_patient_id is None
+
+
+# NOTE (coverage gap, deliberate): nothing here asserts SSN format or that DOB
+# is a real date — the service does neither (no input normalization). Unlike
+# when this note was first written, /intake does now have a match-key check
+# (adr/0004/RIV-160, see tests/test_intake_endpoint.py) — but it is a
+# deterministic (dob, ssn) lookup, not the fuzzy-name/no-input-normalization
+# gap this note originally meant. See SEEDED-DEBT.
