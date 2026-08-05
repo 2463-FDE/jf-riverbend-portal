@@ -240,15 +240,14 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
     # fail this test rather than silently ship, per the round-2 review ask.
     assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
     assert summary["created_via"] == "self_service"
-    assert summary["consent_count"] == 2
     assert isinstance(summary["correlation_id"], str) and summary["correlation_id"]
 
 
-def test_intake_log_summary_excludes_plan_type_and_consent_names(monkeypatch, caplog):
-    # Round-2 review's specific regression ask: post an intake with a
-    # sensitive plan type (Medicaid) and named consents, assert neither
-    # reaches the log — a coarse consent_count is fine, the consent names
-    # and the plan type itself are not.
+def test_intake_log_summary_excludes_plan_type_and_consent_detail(monkeypatch, caplog):
+    # Round-2 + round-4 review's regression ask: post an intake with a
+    # sensitive plan type (Medicaid) and extra (optional) consents, assert
+    # none of that — including a bare consent count, per round 4 — reaches
+    # the log.
     _mock_eligibility_post(monkeypatch)
 
     db = _FakeSession()
@@ -273,7 +272,7 @@ def test_intake_log_summary_excludes_plan_type_and_consent_names(monkeypatch, ca
 
     summary = _intake_summary_dict(caplog)
     assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
-    assert summary["consent_count"] == 3
+    assert "consent_count" not in summary  # round-4 review: even a bare count leaks a signal
 
 
 def test_hostile_created_via_never_reaches_the_log(monkeypatch, caplog):
@@ -304,3 +303,43 @@ def test_hostile_created_via_never_reaches_the_log(monkeypatch, caplog):
     summary = _intake_summary_dict(caplog)
     assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
     assert summary["created_via"] == "unknown"
+
+
+def test_hostile_x_request_id_header_never_reaches_the_log(monkeypatch, caplog):
+    # Round-4 review: intake-service is exposed directly on the host
+    # (docker-compose.yml, port 8071) and correlation_id was taken verbatim
+    # from the caller-supplied X-Request-Id header — a caller could put
+    # PHI-shaped text there and have it persisted in the log, bypassing the
+    # allowlist entirely. _safe_correlation_id must reject anything that
+    # isn't UUID-shaped and generate a fresh one instead.
+    _mock_eligibility_post(monkeypatch)
+    hostile_header = "patient is Jane Roe, SSN 123-45-6789"
+
+    db = _FakeSession()
+    caplog.set_level(logging.INFO, logger=app_mod.log.name)
+    app_mod.create_intake(_request(), db=db, x_request_id=hostile_header)
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert hostile_header not in log_text
+    assert "123-45-6789" not in log_text
+    assert "Jane Roe" not in log_text
+
+    summary = _intake_summary_dict(caplog)
+    assert set(summary.keys()) == app_mod._INTAKE_LOG_SUMMARY_KEYS
+    assert summary["correlation_id"] != hostile_header
+    assert app_mod._CORRELATION_ID_PATTERN.fullmatch(summary["correlation_id"])
+
+
+def test_legitimate_uuid_x_request_id_header_is_preserved(monkeypatch, caplog):
+    # The fix for the above must not break legitimate distributed tracing: a
+    # caller supplying a real UUID-shaped X-Request-Id should see that exact
+    # value carried through as correlation_id, not silently replaced.
+    _mock_eligibility_post(monkeypatch)
+    real_uuid = "5f0f4b7e-2c3a-4d5e-8f9a-1b2c3d4e5f6a"
+
+    db = _FakeSession()
+    caplog.set_level(logging.INFO, logger=app_mod.log.name)
+    app_mod.create_intake(_request(), db=db, x_request_id=real_uuid)
+
+    summary = _intake_summary_dict(caplog)
+    assert summary["correlation_id"] == real_uuid

@@ -22,11 +22,23 @@ Inherited shortcomings (left as-is from the handoff):
         tie e.g. "Medicaid" or a declined consent back to a specific patient
         — a real re-identification/inference risk even with no raw
         identifier present.
-      - Current state: _intake_log_summary logs only correlation_id,
-        created_via, and consent_count (a bare integer, not which consents)
-        — nothing health- or payment-derived, and nothing that combines with
-        the adjacent patient_id line to reveal a sensitive attribute about
-        that patient.
+      - Revision 3 fixed created_via (validated to a closed set) and a
+        migration hardening issue, but a fourth review caught two more:
+        (a) `correlation_id` was taken verbatim from the caller-supplied
+        `X-Request-Id` header with no validation — intake-service is
+        exposed directly on the host (docker-compose.yml, port 8071), so
+        any caller could put PHI-shaped text in that header and have it
+        logged, bypassing the allowlist entirely; (b) `consent_count`
+        still revealed a patient-linkable signal, since 2 required consents
+        is the baseline and a count of 3-4 discloses that the patient
+        accepted an optional (financial/communications) consent.
+      - Current state: correlation_id is only ever trusted from the caller
+        if it's UUID-shaped (see _safe_correlation_id); anything else is
+        replaced with a fresh server-generated one before it's used
+        anywhere, logging included. consent_count is removed from the log
+        summary entirely — _intake_log_summary now logs only
+        correlation_id and created_via, nothing that varies with a
+        patient's answers to any question on the form.
     This does not retroactively scrub prior log entries written before this
     fix — see docs/runbook.md for that gap.
   * D5 — no master patient index / match key: every /intake creates a brand new
@@ -48,6 +60,7 @@ caller that reads it.
 """
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -71,6 +84,26 @@ app = FastAPI(title="Riverbend intake-service", version="1.4.0")
 _TRACER_NAME = "intake-service"
 
 INTAKE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "intake.yaml")
+
+# UUID-shaped, with or without hyphens — matches libs.tracing.new_correlation_id()
+# (uuid4().hex) and standard hyphenated UUIDs. Fixed length, hex charset only:
+# cannot carry free-text/PHI, regardless of length or content of what a caller
+# sends in X-Request-Id.
+_CORRELATION_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
+)
+
+
+def _safe_correlation_id(x_request_id: Optional[str]) -> str:
+    """Only trust a caller-supplied X-Request-Id if it's UUID-shaped;
+    otherwise generate a fresh server-side one (PR #20 review: intake-service
+    is exposed directly on the host — docker-compose.yml, port 8071 — so this
+    header is untrusted input like any other, and a caller could otherwise
+    put PHI-shaped text in it and have it persisted verbatim wherever
+    correlation_id is logged or forwarded)."""
+    if x_request_id and _CORRELATION_ID_PATTERN.fullmatch(x_request_id):
+        return x_request_id
+    return new_correlation_id()
 
 
 @app.get("/healthz")
@@ -99,7 +132,7 @@ def create_intake(
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
 ):
     started = time.time()
-    correlation_id = x_request_id or new_correlation_id()
+    correlation_id = _safe_correlation_id(x_request_id)
 
     # D1 (Week 1 catch-up fix, revised twice): log an explicit allowlist
     # summary containing no health/payment-derived or patient-linkable
@@ -143,7 +176,7 @@ def create_intake(
     )
 
 
-_INTAKE_LOG_SUMMARY_KEYS = frozenset({"correlation_id", "created_via", "consent_count"})
+_INTAKE_LOG_SUMMARY_KEYS = frozenset({"correlation_id", "created_via"})
 
 
 def _intake_log_summary(req: IntakeRequest, correlation_id: str) -> dict[str, Any]:
@@ -154,7 +187,7 @@ def _intake_log_summary(req: IntakeRequest, correlation_id: str) -> dict[str, An
     regardless of what fields exist on IntakeRequest/Demographics/Insurance
     today or are added to them in the future.
 
-    Two PR review rounds narrowed this down:
+    Four PR review rounds narrowed this down to just two fields:
       1. A blocklist-based redact() call on the whole body still leaked
          insurance.member_id/group_number (not in the blocklist).
       2. A first allowlist attempt still logged consents, has_dob/has_ssn/...
@@ -162,17 +195,23 @@ def _intake_log_summary(req: IntakeRequest, correlation_id: str) -> dict[str, An
          identifiers, but the very next log line records the newly created
          patient_id, so log-order correlation could tie a specific patient
          to a health/payment attribute (e.g. "Medicaid", a declined
-         consent). Anything health- or payment-derived, or that varies with
-         a patient's answers to a sensitive question, is excluded now, even
-         in coarse/boolean form — only operational metadata remains:
-         correlation_id (opaque, not PHI-derived), created_via
-         (self_service | front_desk — a channel, not a patient attribute),
-         and consent_count (how many consents were included, not which).
+         consent).
+      3. created_via was trusted without validating it against its
+         documented closed set (fixed in schemas.py).
+      4. correlation_id was trusted verbatim from the caller-supplied
+         X-Request-Id header (fixed by _safe_correlation_id), and
+         consent_count — a bare integer, no consent names — still disclosed
+         whether a patient accepted an optional consent (2 required is the
+         baseline; 3-4 means they accepted financial and/or communications
+         consent), correlatable to the adjacent patient_id line.
+    What remains logs no information that varies with anything the patient
+    answered on the form: correlation_id (opaque, UUID-validated, not
+    PHI-derived) and created_via (self_service | front_desk | unknown — a
+    channel, validated against a closed set, not a patient attribute).
     """
     return {
         "correlation_id": correlation_id,
         "created_via": req.demographics.created_via,
-        "consent_count": len(req.consents),
     }
 
 
