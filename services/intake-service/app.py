@@ -239,7 +239,12 @@ def _create_patient(db: Session, demo: Demographics) -> int:
         return patient.id
     except SQLAlchemyError as e:
         db.rollback()
-        log.error("intake: failed to create patient: %s", e)
+        # PR #20 review (round 6): never log str(e) here — SQLAlchemy embeds
+        # the failed statement's bound parameters (name/dob/ssn/address/...)
+        # in a DBAPIError's string form, so this would otherwise dump PHI to
+        # logs/intake-service.log on every insert failure. Error TYPE only,
+        # same pattern already used by _start_eligibility_check.
+        log.error("intake: failed to create patient (error_type=%s)", type(e).__name__)
         raise HTTPException(status_code=503, detail="patient store unavailable")
 
 
@@ -258,7 +263,10 @@ def _create_coverage(db: Session, patient_id: int, ins: Insurance) -> int:
         return coverage.id
     except SQLAlchemyError as e:
         db.rollback()
-        log.error("intake: failed to record coverage for patient %s: %s", patient_id, e)
+        # Same reasoning as _create_patient: str(e) would embed member_id/
+        # group_number in plaintext. patient_id is an internal integer, not
+        # PHI, and safe to keep.
+        log.error("intake: failed to record coverage for patient %s (error_type=%s)", patient_id, type(e).__name__)
         raise HTTPException(status_code=503, detail="coverage store unavailable")
 
 
@@ -271,7 +279,12 @@ def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
             db.commit()
         except SQLAlchemyError as e:
             db.rollback()
-            log.error("intake: failed to record consent %s for patient %s: %s", kind, patient_id, e)
+            # kind (e.g. "npp_ack") and patient_id aren't PHI, but str(e) is
+            # avoided here too for consistency with the other two handlers.
+            log.error(
+                "intake: failed to record consent %s for patient %s (error_type=%s)",
+                kind, patient_id, type(e).__name__,
+            )
 
 
 def _start_eligibility_check(

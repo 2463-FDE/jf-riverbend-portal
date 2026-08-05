@@ -12,6 +12,7 @@ payer latency" acceptance test called for by the Stage 3 plan.
 import logging
 import time
 
+import pytest
 from conftest import load_module
 
 app_mod = load_module("services/intake-service/app.py", "intake_app_endpoint")
@@ -40,6 +41,22 @@ class _FakeSession:
 
     def rollback(self):
         pass
+
+
+class _RaisingFakeSession(_FakeSession):
+    """A fake session whose commit() raises a SQLAlchemyError carrying a
+    PHI-shaped message — simulating what a real DBAPIError's str() embeds
+    (the failed statement's bound parameters) when the engine isn't
+    configured with hide_parameters=True. See the PR #20 round-6 fix: the
+    live reproduction against a real Postgres confirmed a genuine insert
+    failure's str(e) contains name/dob/ssn/address/... verbatim."""
+
+    def __init__(self, message):
+        super().__init__()
+        self._message = message
+
+    def commit(self):
+        raise app_mod.SQLAlchemyError(self._message)
 
 
 def _request(**overrides):
@@ -343,3 +360,49 @@ def test_legitimate_uuid_x_request_id_header_is_preserved(monkeypatch, caplog):
 
     summary = _intake_summary_dict(caplog)
     assert summary["correlation_id"] == real_uuid
+
+
+def test_patient_insert_failure_never_logs_phi(caplog):
+    # PR #20 round-6 review: _create_patient's error handler used to log
+    # str(e) directly. A real SQLAlchemyError's string form embeds the
+    # failed statement's bound parameters (verified live against a real
+    # Postgres instance missing migration 011's columns), so this asserts
+    # only the exception TYPE name reaches the log, never the PHI-shaped
+    # message text itself.
+    phi_shaped_message = (
+        "[parameters: {'name': 'Jane Roe', 'ssn': '111-22-3333', "
+        "'dob': '1990-01-01', 'address': '1 Test Way'}]"
+    )
+    db = _RaisingFakeSession(phi_shaped_message)
+    caplog.set_level(logging.ERROR, logger=app_mod.log.name)
+
+    demo = app_mod.Demographics(name="Jane Roe", ssn="111-22-3333", dob="1990-01-01")
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod._create_patient(db, demo)
+    assert exc_info.value.status_code == 503
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Jane Roe" not in log_text
+    assert "111-22-3333" not in log_text
+    assert "1 Test Way" not in log_text
+    assert "SQLAlchemyError" in log_text  # the type name is expected/safe
+
+
+def test_coverage_insert_failure_never_logs_member_id(caplog):
+    # Same fix, coverage path: member_id/group_number must never reach the
+    # log via a raw exception string either.
+    phi_shaped_message = (
+        "[parameters: {'member_id': 'AET-SECRET-123456', 'group_number': 'GRP-9987'}]"
+    )
+    db = _RaisingFakeSession(phi_shaped_message)
+    caplog.set_level(logging.ERROR, logger=app_mod.log.name)
+
+    ins = app_mod.Insurance(payer_name="Aetna", member_id="AET-SECRET-123456", group_number="GRP-9987")
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        app_mod._create_coverage(db, patient_id=1, ins=ins)
+    assert exc_info.value.status_code == 503
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "AET-SECRET-123456" not in log_text
+    assert "GRP-9987" not in log_text
+    assert "SQLAlchemyError" in log_text
