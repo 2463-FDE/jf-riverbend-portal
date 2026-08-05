@@ -12,6 +12,7 @@ StaffAccessGate outcomes but NEVER on an internal-token rejection.
 """
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 
 from conftest import load_module
 
@@ -19,7 +20,7 @@ app_mod = load_module("services/records-service/app.py", "records_app_patient_vi
 
 from libs.patient_view_agent.contracts import ChartResult, EncounterRow  # noqa: E402
 
-TEST_TOKEN = "test-internal-token-abc123"
+TEST_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
 
 def _internal_header():
@@ -30,22 +31,32 @@ created_sessions = []
 
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, *, fail_commit=False):
         self.added = []
         self.commit_count = 0
+        self.rollback_count = 0
+        self._fail_commit = fail_commit
 
     def add(self, obj):
         self.added.append(obj)
 
     def commit(self):
+        if self._fail_commit:
+            raise SQLAlchemyError("simulated audit_logs write failure")
         self.commit_count += 1
 
     def rollback(self):
-        pass
+        self.rollback_count += 1
 
 
 def _fake_get_db():
     session = FakeSession()
+    created_sessions.append(session)
+    yield session
+
+
+def _fake_get_db_failing_commit():
+    session = FakeSession(fail_commit=True)
     created_sessions.append(session)
     yield session
 
@@ -114,6 +125,17 @@ def test_unconfigured_token_fails_closed_even_with_matching_empty_values(client,
     assert created_sessions[0].added == []
 
 
+def test_short_placeholder_token_is_rejected_even_when_it_matches_exactly(client, monkeypatch):
+    # Review round 2: .env.example used to ship INTERNAL_SERVICE_TOKEN=changeme
+    # — a valid-looking placeholder a real deployment could ship unmodified.
+    # A short, human-typed value must fail closed even if both sides somehow
+    # agree on it (e.g. an operator typed "changeme" on both services).
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "changeme")
+    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": "changeme"})
+    assert resp.status_code == 401
+    assert created_sessions[0].added == []
+
+
 # --- StaffAccessGate, once the internal-token check passes -----------------
 
 
@@ -172,3 +194,39 @@ def test_legacy_records_endpoint_is_unaffected(client):
     import inspect
 
     assert "no ownership / authorization check" in inspect.getsource(app_mod.get_patient_records)
+
+
+# --- audit-write-must-not-fail-open: the review fix (round 2, 2026-08-05) --
+
+
+def test_allowed_view_does_not_return_chart_data_if_audit_write_fails(monkeypatch):
+    # This is exactly what the review flagged: a prior version returned 200
+    # with real chart data even though the access was never durably recorded.
+    monkeypatch.setattr(app_mod, "SqlChartRepository", FakeChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_failing_commit
+    try:
+        resp = TestClient(app_mod.app).get(
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+        )
+    finally:
+        app_mod.app.dependency_overrides.clear()
+
+    assert resp.status_code != 200
+    assert resp.status_code == 503
+    assert "patient_id" not in resp.json()
+    assert "evidence_ids" not in resp.json()
+
+
+def test_denial_also_fails_closed_if_audit_write_fails(monkeypatch):
+    monkeypatch.setattr(app_mod, "SqlChartRepository", FakeChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_failing_commit
+    try:
+        resp = TestClient(app_mod.app).get("/patients/1042/view", headers=_internal_header())
+    finally:
+        app_mod.app.dependency_overrides.clear()
+
+    # Even a denial must be durably recordable, or this now surfaces as a
+    # 503 rather than silently confirming/denying with no trace.
+    assert resp.status_code == 503

@@ -18,7 +18,7 @@ app_mod = load_module("services/gateway/app.py", "gateway_app_patient_view")
 
 VALID_TOKEN = "valid-token-abc"
 _VALID_SESSION = {"username": "frontdesk", "role": "staff"}
-TEST_INTERNAL_TOKEN = "test-internal-token-abc123"
+TEST_INTERNAL_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
 
 @pytest.fixture

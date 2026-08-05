@@ -158,36 +158,60 @@ def get_patient_records(patient_id: int, db: Session = Depends(get_db)):
 
 
 def _write_audit(db: Session, *, actor: str, message: str) -> None:
-    """Best-effort audit_logs write. `audit_logs` is mutable/soft-delete
-    logging, not a tamper-evident trail (db/schema.sql) — it is not the
-    security control here (StaffAccessGate already decided access before
-    this is ever called), so a write failure is logged and swallowed rather
-    than turned into a 5xx for an otherwise-legitimate, already-authorized
-    view."""
+    """Review fix (round 2, 2026-08-05): audit_logs is not tamper-evident
+    (db/schema.sql), but it is the only durable record this route produces of
+    who accessed a patient's chart. A prior version of this function
+    swallowed a write failure and let the caller's request succeed anyway —
+    a chart view (or a denial) could complete with zero trace of it ever
+    happening. Fails closed instead: an audit write that doesn't commit turns
+    into a 503 for the whole request, matching this file's existing
+    "database unavailable" convention (see get_patient/get_patient_records/
+    search_records above) — the caller never sees chart data (or even a
+    confirmed denial) that this service couldn't also durably record.
+    """
     try:
         db.add(AuditLog(actor=actor, message=message))
         db.commit()
     except SQLAlchemyError:
         db.rollback()
         log.exception("patient_view: failed to write audit_logs entry")
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+
+# Review fix (round 2, 2026-08-05): a real INTERNAL_SERVICE_TOKEN is expected
+# to be a long random value (e.g. `openssl rand -hex 32` = 64 chars); this
+# floor exists specifically to reject short, human-typed placeholder values
+# like "changeme" (8 chars) that a naive deployment might type in by hand
+# even though .env.example now ships this var empty, not pre-filled.
+_MIN_INTERNAL_TOKEN_LENGTH = 32
 
 
 def _verify_internal_token(x_internal_token: Optional[str]) -> None:
-    """Review fix (round, 2026-08-05): `X-Actor-Id` alone is a caller-controlled
+    """Review fix (round 1, 2026-08-05): `X-Actor-Id` alone is a caller-controlled
     header, not proof the request came from the gateway. records-service's
     port is published to the host (docker-compose.yml), so without this check
     anyone could hit this route directly with `X-Actor-Id: anything` and
     StaffAccessGate would allow it — unauthenticated chart access, plus an
     audit_logs row attributed to a spoofed actor.
 
-    Fails closed both ways: an unconfigured `INTERNAL_SERVICE_TOKEN` (empty on
-    both sides) must never be treated as "no check needed" — that would let
-    the same bypass through via two matching empty strings. Raises before any
-    audit_logs write, so a rejected direct-access attempt is not recorded
-    under whatever actor name the caller supplied.
+    Fails closed multiple ways: an unconfigured `INTERNAL_SERVICE_TOKEN`
+    (empty on both sides) must never be treated as "no check needed" — that
+    would let the same bypass through via two matching empty strings. Round 2
+    (2026-08-05) added the length floor below after review found
+    `.env.example`'s original `changeme` placeholder was itself a valid-
+    looking secret a real deployment could ship unmodified — a short,
+    human-typed value like that must be rejected as confidently as an empty
+    one, not just compared byte-for-byte. Raises before any audit_logs write,
+    so a rejected direct-access attempt is not recorded under whatever actor
+    name the caller supplied.
     """
     configured = settings.internal_service_token
-    if not configured or not x_internal_token or not hmac.compare_digest(x_internal_token, configured):
+    if (
+        not configured
+        or len(configured) < _MIN_INTERNAL_TOKEN_LENGTH
+        or not x_internal_token
+        or not hmac.compare_digest(x_internal_token, configured)
+    ):
         raise HTTPException(status_code=401, detail="missing or invalid internal service token")
 
 
