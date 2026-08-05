@@ -109,7 +109,11 @@ def me(session: dict = Depends(require_session)):
 # --------------------------------------------------------------------------- #
 @app.post("/intake")
 def proxy_intake(payload: dict, session: dict = Depends(require_session)):
-    return _post("intake", "/intake", payload)
+    # PR #20 round-8 review: forward_status=True — the old default silently
+    # flattened intake-service's 409 duplicate-patient response into a bare
+    # 200, so the frontend read it as a successful submission with no
+    # patient/coverage/consent rows actually created.
+    return _post("intake", "/intake", payload, forward_status=True)
 
 
 @app.get("/eligibility")

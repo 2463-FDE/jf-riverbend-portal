@@ -51,20 +51,38 @@ Inherited shortcomings (left as-is from the handoff):
     before creating a patient:
       - An EXACT match (same ssn, same dob) blocks silent creation with a
         409 unless the caller explicitly resolves it via
-        `duplicate_override` ("link_to_existing" reuses the existing
-        patient_id for this visit's coverage/consents instead of creating a
-        new row; "create_new" proceeds anyway but still records the
-        resemblance in patient_links so it's reviewable, not silent).
+        `duplicate_override="create_new"`, which proceeds anyway but still
+        records the resemblance in patient_links so it's reviewable, not
+        silent.
       - A PARTIAL match (same ssn, different dob) never blocks — it
         proceeds exactly as before, but records an unconfirmed
-        patient_links row and returns `possible_duplicates` for staff to
-        review later.
+        patient_links row and returns `possible_duplicate_match=True` for
+        staff to review later.
       - No match, or no ssn supplied at all, behaves exactly as before this
         fix — this only engages when there's a reliable key to compare.
+      - Concurrent /intake calls for the same ssn are serialized with a
+        transaction-scoped Postgres advisory lock (PR #20 round-8 review:
+        the match-then-create sequence is otherwise a check-then-insert race
+        — two simultaneous requests for a brand-new ssn could both see no
+        candidates and both create a row, with neither recording a
+        patient_links entry) — see _match_key_lock.
     This does NOT retroactively merge/backfill any duplicate that already
     existed before this migration (adr/0004 explicitly scopes that out —
     Maria Gonzalez's 3 existing rows stay 3 rows) and does not implement the
     staff-confirmation UI (API/backend only this stage).
+      - PR #20 round-8 review also caught that the original version of this
+        fix returned exact/partial candidate patient_ids straight to the
+        caller and let an unauthenticated caller attach coverage/consents to
+        an existing patient via `duplicate_override="link_to_existing"` +
+        caller-supplied `link_to_patient_id`. intake-service has no auth
+        dependency and is exposed directly on the host (docker-compose.yml,
+        port 8071), so that was both a patient-enumeration oracle and an
+        unauthorized chart-modification path. Fixed by dropping
+        `link_to_existing` entirely and never returning a candidate
+        patient_id from this endpoint — see IntakeResponse.possible_duplicate_match
+        and the 409 detail in create_intake. Staff-mediated linking onto an
+        existing patient is deferred until there's a trusted,
+        staff-authenticated path with a server-derived actor identity.
   * Consents are inserted one at a time (a commit per consent).
 
 Stage 3 (RIV-088 / RIV-141 fix): eligibility used to be verified INLINE on
@@ -89,7 +107,7 @@ from typing import Any, Optional
 import httpx
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -162,13 +180,20 @@ def create_intake(
     log.info('POST /intake summary=%s', json.dumps(_intake_log_summary(req, correlation_id)))
 
     with safe_span(_TRACER_NAME, "intake.create", {"correlation_id": correlation_id}) as span:
+        # PR #20 round-8 review: check-then-insert on (ssn, dob) is a race
+        # between two concurrent /intake calls for the same new patient —
+        # serialize per-ssn with a transaction-scoped advisory lock, held
+        # until the first commit below (patient create or link record) ends
+        # this transaction and releases it.
+        _acquire_match_key_lock(db, req.demographics)
+
         # D5 (Week 2-3 catch-up, adr/0004/RIV-160): deterministic (dob, ssn)
         # match-key lookup before creating a patient — see module docstring.
         exact_ids, partial_ids = _find_match_candidates(db, req.demographics)
         span.set_attribute("exact_match_count", len(exact_ids))
         span.set_attribute("partial_match_count", len(partial_ids))
 
-        possible_duplicates: Optional[list[int]] = None
+        possible_duplicate_match = False
         if exact_ids:
             if req.duplicate_override is None:
                 raise HTTPException(
@@ -176,32 +201,26 @@ def create_intake(
                     detail={
                         "error": "possible_duplicate_patient",
                         "confidence": "exact",
-                        "candidates": exact_ids,
                     },
                 )
-            if req.duplicate_override == "link_to_existing":
-                if req.link_to_patient_id not in exact_ids:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="link_to_patient_id must be one of the exact-match candidates",
-                    )
-                patient_id = req.link_to_patient_id
-            else:  # "create_new" — proceed, but keep the resemblance on record
-                patient_id = _create_patient(db, req.demographics)
-                for candidate_id in exact_ids:
-                    _record_patient_link(
-                        db, patient_id, candidate_id, "exact",
-                        confirmed=True, confirmed_by=req.confirmed_by,
-                    )
+            # Only "create_new" is accepted (see schemas.IntakeRequest) —
+            # proceed, but keep the resemblance on record.
+            patient_id = _create_patient(db, req.demographics)
+            for candidate_id in exact_ids:
+                _record_patient_link(
+                    db, patient_id, candidate_id, "exact",
+                    confirmed=True, confirmed_by=req.confirmed_by,
+                )
         else:
             patient_id = _create_patient(db, req.demographics)
 
-        if partial_ids and not (req.duplicate_override == "link_to_existing"):
+        if partial_ids:
             # Partial matches never block — recorded unconfirmed for staff
-            # review, surfaced back via possible_duplicates.
+            # review, surfaced back only as a boolean (never the candidate
+            # patient_id — see IntakeResponse.possible_duplicate_match).
             for candidate_id in partial_ids:
                 _record_patient_link(db, patient_id, candidate_id, "partial", confirmed=False, confirmed_by=None)
-            possible_duplicates = partial_ids
+            possible_duplicate_match = True
 
         coverage_id = None
         if req.insurance is not None:
@@ -232,7 +251,7 @@ def create_intake(
         eligibility=eligibility,
         eligibility_status=eligibility_status,
         eligibility_job_id=eligibility_job_id,
-        possible_duplicates=possible_duplicates,
+        possible_duplicate_match=possible_duplicate_match,
     )
 
 
@@ -283,6 +302,28 @@ def _normalize_ssn(ssn: Optional[str]) -> Optional[str]:
         return None
     digits = re.sub(r"\D", "", ssn)
     return digits or None
+
+
+def _acquire_match_key_lock(db: Session, demo: Demographics) -> None:
+    """Serialize concurrent /intake calls for the same normalized ssn (PR #20
+    round-8 review): without this, two simultaneous requests for a brand-new
+    ssn can both run _find_match_candidates before either commits a
+    _create_patient, both see zero candidates, and both create a patient row
+    — the exact silent-duplicate failure mode this feature exists to catch,
+    now happening unrecorded (no patient_links row either, since each
+    request believed it was the first).
+
+    pg_advisory_xact_lock is held for the rest of the current transaction —
+    released automatically at the next commit/rollback on this connection,
+    which in create_intake's flow is the very next commit (_create_patient
+    or _record_patient_link), so this covers exactly the check-then-insert
+    window and nothing longer. A no-op when there's no ssn to key on, same as
+    _find_match_candidates.
+    """
+    normalized_ssn = _normalize_ssn(demo.ssn)
+    if not normalized_ssn:
+        return
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key)::bigint)"), {"key": normalized_ssn})
 
 
 def _find_match_candidates(db: Session, demo: Demographics) -> tuple[list[int], list[int]]:

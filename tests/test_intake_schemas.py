@@ -146,20 +146,21 @@ def test_created_via_outside_known_set_is_normalized_to_unknown():
 # --- Week 2-3 catch-up: adr/0004/RIV-160 duplicate-override contract -------
 
 
-def test_link_to_existing_requires_link_to_patient_id():
+def test_link_to_existing_is_no_longer_a_valid_override():
+    # PR #20 round-8 review: intake-service has no auth dependency and is
+    # exposed directly on the host, so "link_to_existing" let an
+    # unauthenticated caller attach coverage/consents to a caller-chosen
+    # existing patient_id. Only "create_new" remains accepted.
     with pytest.raises(ValidationError):
         schemas.IntakeRequest(
             demographics={"name": "Jane Roe"},
             duplicate_override="link_to_existing",
-            # link_to_patient_id omitted — must be rejected, not silently
-            # ignored, since app.py's create_intake relies on this being set
-            # whenever this override is chosen.
         )
 
 
-def test_create_new_override_does_not_require_link_to_patient_id():
+def test_create_new_override_is_accepted():
     req = schemas.IntakeRequest(demographics={"name": "Jane Roe"}, duplicate_override="create_new")
-    assert req.link_to_patient_id is None
+    assert req.duplicate_override == "create_new"
 
 
 # NOTE (coverage gap, deliberate): nothing here asserts SSN format or that DOB

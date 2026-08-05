@@ -96,9 +96,22 @@ export default function IntakePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data: IntakeResponse & { error?: string } = await res.json();
+      const data: IntakeResponse & {
+        error?: string;
+        detail?: { error?: string; confidence?: string };
+      } = await res.json();
       if (!res.ok || data?.error) {
-        setResult({ ok: false, text: data?.error || "Submission failed." });
+        // A blocked exact-match duplicate (services/intake-service/app.py,
+        // adr/0004/RIV-160) comes back as a 409 with detail.error set —
+        // no patient/coverage/consent rows were created, unlike a generic
+        // failure, so this gets its own message rather than "Submission failed."
+        const isDuplicate = res.status === 409 && data?.detail?.error === "possible_duplicate_patient";
+        setResult({
+          ok: false,
+          text: isDuplicate
+            ? "We found an existing record that may match this patient. Please see the front desk to continue."
+            : data?.error || "Submission failed.",
+        });
       } else {
         setEligibilityJobId(data.eligibility_job_id ?? null);
         setResult({

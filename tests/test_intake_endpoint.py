@@ -13,6 +13,8 @@ import logging
 import time
 
 import pytest
+from pydantic import ValidationError
+
 from conftest import load_module
 
 app_mod = load_module("services/intake-service/app.py", "intake_app_endpoint")
@@ -35,6 +37,7 @@ class _FakeSession:
     def __init__(self, existing_patients=None):
         self.added = []
         self.commit_count = 0
+        self.lock_calls = []
         self._next_id = 1
         # Week 2-3 catch-up: rows _find_match_candidates should "find" via
         # db.execute(select(Patient)...). Ignores the actual query — this
@@ -58,7 +61,13 @@ class _FakeSession:
     def rollback(self):
         pass
 
-    def execute(self, _stmt):
+    def execute(self, _stmt, _params=None):
+        # Week 2-3 catch-up round-8 fix: create_intake also issues a
+        # pg_advisory_xact_lock statement before the match-key select (see
+        # _acquire_match_key_lock) — recorded here so tests can assert it
+        # happened, then falls through to the same fake patient rows for the
+        # actual match-key select.
+        self.lock_calls.append(_params)
         return _FakeQueryResult(self.existing_patients)
 
 
@@ -450,7 +459,8 @@ def test_no_ssn_means_no_match_lookup_and_unaffected_behavior(monkeypatch):
     result = app_mod.create_intake(_request(), db=db, x_request_id=None)  # default demographics has no ssn
 
     assert result.patient_id != 42
-    assert result.possible_duplicates is None
+    assert result.possible_duplicate_match is False
+    assert db.lock_calls == []  # no ssn -> no reliable key -> lock never acquired
 
 
 def test_exact_match_blocks_with_409_when_no_override(monkeypatch):
@@ -465,55 +475,26 @@ def test_exact_match_blocks_with_409_when_no_override(monkeypatch):
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["confidence"] == "exact"
-    assert exc_info.value.detail["candidates"] == [42]
+    # PR #20 round-8 review: no candidate patient_id in the response — this
+    # endpoint has no auth dependency, so returning real ids would let an
+    # unauthenticated caller enumerate patients via ssn/dob probing.
+    assert "candidates" not in exc_info.value.detail
     # Nothing was persisted — the block happens before any create/commit.
     assert db.commit_count == 0
     assert db.added == []
 
 
-def test_exact_match_link_to_existing_reuses_patient_id_no_new_patient_row(monkeypatch):
-    _mock_eligibility_post(monkeypatch)
-    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
-
-    result = app_mod.create_intake(
+def test_link_to_existing_override_is_rejected_before_reaching_create_intake():
+    # PR #20 round-8 review: "link_to_existing" (+ link_to_patient_id) let an
+    # unauthenticated caller attach coverage/consents to a caller-chosen
+    # existing patient — removed from the accepted contract entirely, so an
+    # attempt to use it never becomes a valid IntakeRequest in the first
+    # place (see tests/test_intake_schemas.py).
+    with pytest.raises(ValidationError):
         _request(
             demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
             duplicate_override="link_to_existing",
-            link_to_patient_id=42,
-        ),
-        db=db, x_request_id=None,
-    )
-
-    assert result.patient_id == 42
-    assert result.possible_duplicates is None
-    # No new Patient row, and no patient_links row either — there's only
-    # ever one row involved when linking directly to an existing patient.
-    table_names = {type(obj).__tablename__ for obj in db.added}
-    assert "patients" not in table_names
-    assert "patient_links" not in table_names
-    # But the visit's coverage/consents DID attach to the existing patient.
-    assert "insurance_coverages" in table_names
-    assert "consents" in table_names
-    for obj in db.added:
-        if type(obj).__tablename__ in ("insurance_coverages", "consents"):
-            assert obj.patient_id == 42
-
-
-def test_exact_match_link_to_existing_rejects_id_outside_candidates(monkeypatch):
-    _mock_eligibility_post(monkeypatch)
-    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
-
-    with pytest.raises(app_mod.HTTPException) as exc_info:
-        app_mod.create_intake(
-            _request(
-                demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"},
-                duplicate_override="link_to_existing",
-                link_to_patient_id=999,  # not a real candidate
-            ),
-            db=db, x_request_id=None,
         )
-
-    assert exc_info.value.status_code == 400
 
 
 def test_exact_match_create_new_override_creates_and_records_link(monkeypatch):
@@ -530,7 +511,7 @@ def test_exact_match_create_new_override_creates_and_records_link(monkeypatch):
     )
 
     assert result.patient_id != 42  # a genuinely new row
-    assert result.possible_duplicates is None  # exact, not partial — no warning field
+    assert result.possible_duplicate_match is False  # exact, not partial — no warning flag
 
     links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
     assert len(links) == 1
@@ -541,8 +522,12 @@ def test_exact_match_create_new_override_creates_and_records_link(monkeypatch):
     assert links[0].confirmed_by == "frontdesk"
     assert links[0].basis == "ssn_dob_match"  # coded reason only, never a raw PHI value
 
+    # Concurrent-intake protection: the advisory lock was acquired, keyed on
+    # the normalized ssn, before the match-key select ran.
+    assert db.lock_calls[0] == {"key": "111223333"}
 
-def test_partial_match_never_blocks_and_returns_possible_duplicates(monkeypatch):
+
+def test_partial_match_never_blocks_and_returns_possible_duplicate_flag(monkeypatch):
     # Same ssn, different dob — adr/0004's own worked Maria Gonzalez example
     # (three rows, one ssn, one differing dob).
     _mock_eligibility_post(monkeypatch)
@@ -554,7 +539,9 @@ def test_partial_match_never_blocks_and_returns_possible_duplicates(monkeypatch)
     )
 
     assert result.patient_id != 42
-    assert result.possible_duplicates == [42]
+    # PR #20 round-8 review: a boolean flag only — never the candidate
+    # patient_id, which this unauthenticated endpoint must not disclose.
+    assert result.possible_duplicate_match is True
 
     links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
     assert len(links) == 1
@@ -562,3 +549,18 @@ def test_partial_match_never_blocks_and_returns_possible_duplicates(monkeypatch)
     assert links[0].confirmed is False
     assert links[0].confirmed_by is None
     assert links[0].basis == "ssn_match_dob_differs"
+
+
+def test_exact_match_lock_is_scoped_to_normalized_ssn_not_raw_input(monkeypatch):
+    # "412-55-9981" and "412559981" must serialize against each other —
+    # the lock key has to be the normalized form, same as the match lookup
+    # itself, or the two representations would race past each other.
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    app_mod.create_intake(
+        _request(demographics={"name": "Jane Roe", "ssn": "412-55-9981", "dob": "1990-01-01"}),
+        db=db, x_request_id=None,
+    )
+
+    assert db.lock_calls[0] == {"key": "412559981"}
