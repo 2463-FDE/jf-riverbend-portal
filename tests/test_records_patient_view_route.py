@@ -3,10 +3,12 @@
 Drives the real FastAPI route with a fake DB session (dependency override)
 and a fake repository (monkeypatched in place of SqlChartRepository), so
 this runs with no Postgres — mirroring tests/test_intake_endpoint.py's
-direct-function/fake-session style. Confirms: the real StaffAccessGate
-denies a missing actor (403) and allows a present one (200), an invalid
-purpose is rejected before authorization runs, and a real audit_logs row is
-written on BOTH outcomes.
+direct-function/fake-session style. Confirms: the internal-token check
+(review fix, round 2026-08-05) rejects a direct caller before StaffAccessGate
+ever runs, the real StaffAccessGate denies a missing actor (403) and allows a
+present one (200) once that check passes, an invalid purpose is rejected
+before authorization runs, and a real audit_logs row is written on BOTH
+StaffAccessGate outcomes but NEVER on an internal-token rejection.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +18,13 @@ from conftest import load_module
 app_mod = load_module("services/records-service/app.py", "records_app_patient_view")
 
 from libs.patient_view_agent.contracts import ChartResult, EncounterRow  # noqa: E402
+
+TEST_TOKEN = "test-internal-token-abc123"
+
+
+def _internal_header():
+    return {"X-Internal-Token": TEST_TOKEN}
+
 
 created_sessions = []
 
@@ -65,13 +74,51 @@ class FakeChartRepository:
 def client(monkeypatch):
     created_sessions.clear()
     monkeypatch.setattr(app_mod, "SqlChartRepository", FakeChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db
     yield TestClient(app_mod.app)
     app_mod.app.dependency_overrides.clear()
 
 
+# --- internal-token check: the review fix (round, 2026-08-05) --------------
+
+
+def test_direct_caller_with_spoofed_actor_and_no_token_is_rejected(client):
+    # This is exactly the bypass the review flagged: a caller hitting this
+    # service directly (as it would if reached via records-service's
+    # published host port) with a made-up X-Actor-Id and no proof it came
+    # through the gateway.
+    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "attacker"})
+
+    assert resp.status_code == 401
+    # No audit row under the spoofed actor name — rejected before StaffAccessGate
+    # (and therefore before any _write_audit call) ever runs.
+    assert created_sessions[0].added == []
+
+
+def test_wrong_token_with_valid_looking_actor_is_rejected(client):
+    resp = client.get(
+        "/patients/1042/view", headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": "not-the-real-token"}
+    )
+    assert resp.status_code == 401
+    assert created_sessions[0].added == []
+
+
+def test_unconfigured_token_fails_closed_even_with_matching_empty_values(client, monkeypatch):
+    # The bug this guards against: if INTERNAL_SERVICE_TOKEN is unset on both
+    # services, an empty configured value must NOT compare equal to an empty
+    # header — that would silently reopen the exact bypass being fixed.
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "")
+    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": ""})
+    assert resp.status_code == 401
+    assert created_sessions[0].added == []
+
+
+# --- StaffAccessGate, once the internal-token check passes -----------------
+
+
 def test_missing_actor_header_is_denied_and_audited(client):
-    resp = client.get("/patients/1042/view")
+    resp = client.get("/patients/1042/view", headers=_internal_header())
 
     assert resp.status_code == 403
     assert resp.json()["detail"]["reason"] == "unknown_actor"
@@ -85,7 +132,7 @@ def test_missing_actor_header_is_denied_and_audited(client):
 
 
 def test_authenticated_actor_gets_completed_view_and_is_audited(client):
-    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "frontdesk"})
+    resp = client.get("/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -102,14 +149,16 @@ def test_authenticated_actor_gets_completed_view_and_is_audited(client):
 def test_a_different_actor_can_view_the_same_patient(client):
     # Demonstrates the gate is authenticated-staff, not patient-specific:
     # an unrelated actor is not denied for the same patient_id.
-    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "billing-clerk"})
+    resp = client.get("/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "billing-clerk"})
     assert resp.status_code == 200
     assert resp.json()["outcome"] == "completed"
 
 
 def test_invalid_purpose_is_rejected_before_authorization(client):
     resp = client.get(
-        "/patients/1042/view", params={"purpose": "not-a-real-purpose"}, headers={"X-Actor-Id": "frontdesk"}
+        "/patients/1042/view",
+        params={"purpose": "not-a-real-purpose"},
+        headers={**_internal_header(), "X-Actor-Id": "frontdesk"},
     )
     assert resp.status_code == 400
     # get_db is a FastAPI dependency, so a session is still created, but

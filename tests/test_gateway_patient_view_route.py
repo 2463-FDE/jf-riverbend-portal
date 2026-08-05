@@ -4,6 +4,9 @@ Mirrors tests/test_gateway_eligibility_routes.py's pattern: fake the Redis
 session lookup and httpx call, then check auth gating and that the session's
 username/correlation id are forwarded, upstream status codes are not
 flattened, and the client-supplied purpose is passed through untouched.
+Also covers the review fix (round, 2026-08-05): the gateway must send
+X-Internal-Token so records-service can tell this call apart from a direct
+caller hitting its published host port with a spoofed X-Actor-Id.
 """
 import httpx
 import pytest
@@ -15,6 +18,7 @@ app_mod = load_module("services/gateway/app.py", "gateway_app_patient_view")
 
 VALID_TOKEN = "valid-token-abc"
 _VALID_SESSION = {"username": "frontdesk", "role": "staff"}
+TEST_INTERNAL_TOKEN = "test-internal-token-abc123"
 
 
 @pytest.fixture
@@ -23,6 +27,7 @@ def client(monkeypatch):
         return _VALID_SESSION if token == VALID_TOKEN else None
 
     monkeypatch.setattr(app_mod, "get_session", fake_get_session)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_INTERNAL_TOKEN)
     return TestClient(app_mod.app)
 
 
@@ -60,6 +65,7 @@ def test_forwards_actor_id_from_session_and_a_correlation_header(client, monkeyp
     assert resp.status_code == 200
     assert captured["url"].endswith("/patients/1042/view")
     assert captured["headers"]["X-Actor-Id"] == "frontdesk"
+    assert captured["headers"]["X-Internal-Token"] == TEST_INTERNAL_TOKEN
     assert "X-Request-Id" in captured["headers"]
     assert len(captured["headers"]["X-Request-Id"]) == 32
 

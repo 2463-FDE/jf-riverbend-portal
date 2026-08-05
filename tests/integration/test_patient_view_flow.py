@@ -8,6 +8,15 @@ against seeded demo data only (db/seed/patients.csv: 1042 Maria Gonzalez,
 1043 James O'Brien). Confirms the new route's actual behavior, and that it
 leaves the sibling IDOR endpoint's documented behavior (tested in
 test_records_flow.py) untouched.
+
+Also covers the review fix (round, 2026-08-05): records-service's host port
+is published (docker-compose.yml), so a caller can reach it directly,
+bypassing the gateway entirely. test_direct_call_with_spoofed_actor_is_rejected
+proves that path is closed even though the gateway path above still works —
+this requires INTERNAL_SERVICE_TOKEN to be set identically on both gateway
+and records-service in .env; if it isn't, every request in this file 401s,
+including the ones that are supposed to succeed, which is itself a proof the
+fix fails closed rather than silently reopening the bypass.
 """
 import os
 
@@ -18,6 +27,7 @@ httpx = pytest.importorskip("httpx")
 pytestmark = pytest.mark.integration
 
 GATEWAY = os.getenv("GATEWAY_URL", "http://localhost:8070")
+RECORDS = os.getenv("RECORDS_URL", "http://localhost:8073")
 
 
 def _token(username: str = "frontdesk", password: str = "portal123") -> str:
@@ -53,6 +63,15 @@ def test_gate_is_authenticated_staff_not_patient_specific():
     r = httpx.get(f"{GATEWAY}/patients/1043/view", headers=headers, timeout=10)
     assert r.status_code == 200
     assert r.json()["patient_id"] == 1043
+
+
+def test_direct_call_with_spoofed_actor_is_rejected():
+    # The exact bypass the review flagged: records-service is reachable
+    # directly on its published host port, so a caller could try to skip the
+    # gateway entirely and hand-craft X-Actor-Id. Must 401 — the internal
+    # token check runs before StaffAccessGate ever sees this request.
+    r = httpx.get(f"{RECORDS}/patients/1042/view", headers={"X-Actor-Id": "attacker"}, timeout=10)
+    assert r.status_code == 401
 
 
 def test_legacy_idor_endpoint_is_unchanged_by_this_route():

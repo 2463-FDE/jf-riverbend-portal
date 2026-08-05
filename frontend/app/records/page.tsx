@@ -45,7 +45,9 @@ export default function RecordsPage() {
       const res = await apiFetch(`/api/patients/${encodeURIComponent(patientId)}/view`);
       const json = await res.json();
       if (!res.ok) {
-        setAiStatus(json?.detail?.reason ? `Access denied: ${json.detail.reason}` : "Could not load AI chart view.");
+        const detail = json?.detail;
+        const reason = typeof detail === "string" ? detail : detail?.reason;
+        setAiStatus(reason ? `Could not load AI chart view: ${reason}` : "Could not load AI chart view.");
         return;
       }
       setAiView(json as PatientViewResult);

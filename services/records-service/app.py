@@ -11,6 +11,7 @@ library's fixture `FakePolicyAuthorization`/`SeededChartRepository`. This
 does not touch or remediate `get_patient_records`/`get_patient` below
 (DEBT D11 / RIV-201) — see docs/analysis/RIV-201-patient-records-IDOR.md.
 """
+import hmac
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -171,12 +172,32 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
         log.exception("patient_view: failed to write audit_logs entry")
 
 
+def _verify_internal_token(x_internal_token: Optional[str]) -> None:
+    """Review fix (round, 2026-08-05): `X-Actor-Id` alone is a caller-controlled
+    header, not proof the request came from the gateway. records-service's
+    port is published to the host (docker-compose.yml), so without this check
+    anyone could hit this route directly with `X-Actor-Id: anything` and
+    StaffAccessGate would allow it — unauthenticated chart access, plus an
+    audit_logs row attributed to a spoofed actor.
+
+    Fails closed both ways: an unconfigured `INTERNAL_SERVICE_TOKEN` (empty on
+    both sides) must never be treated as "no check needed" — that would let
+    the same bypass through via two matching empty strings. Raises before any
+    audit_logs write, so a rejected direct-access attempt is not recorded
+    under whatever actor name the caller supplied.
+    """
+    configured = settings.internal_service_token
+    if not configured or not x_internal_token or not hmac.compare_digest(x_internal_token, configured):
+        raise HTTPException(status_code=401, detail="missing or invalid internal service token")
+
+
 @app.get("/patients/{patient_id}/view", response_model=PatientViewResult)
 def get_patient_view(
     patient_id: int,
     purpose: str = Query(default="treatment"),
     x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
 ):
     """
@@ -184,16 +205,20 @@ def get_patient_view(
     `libs.patient_view_agent.run_patient_view`, backed by real data
     (`SqlChartRepository`) and gated by `StaffAccessGate`.
 
+    Two layers of trust, in order: (1) `_verify_internal_token` proves this
+    call actually came from the gateway (not a direct caller hitting this
+    service's published host port with a spoofed `X-Actor-Id`); (2)
     `StaffAccessGate` is an authenticated-staff access gate, NOT
-    patient-specific authorization: it ALLOWs any request that carries a
-    non-empty `X-Actor-Id` (i.e. the gateway already authenticated a staff
-    session) and DENIES an unknown/missing one. It does not, and cannot,
-    verify that `x_actor_id` is entitled to `patient_id` specifically —
-    `users` has no relationship to `patients` in this schema (see
-    docs/analysis/RIV-201-patient-records-IDOR.md §6). This route does not
-    fix RIV-201; `get_patient_records`/`get_patient` below remain exactly as
-    IDOR-exploitable as documented.
+    patient-specific authorization — once (1) passes, it ALLOWs any request
+    carrying a non-empty `X-Actor-Id` and DENIES an unknown/missing one. It
+    does not, and cannot, verify that `x_actor_id` is entitled to
+    `patient_id` specifically — `users` has no relationship to `patients` in
+    this schema (see docs/analysis/RIV-201-patient-records-IDOR.md §6). This
+    route does not fix RIV-201; `get_patient_records`/`get_patient` below
+    remain exactly as IDOR-exploitable as documented.
     """
+    _verify_internal_token(x_internal_token)
+
     try:
         purpose_enum = Purpose(purpose)
     except ValueError:

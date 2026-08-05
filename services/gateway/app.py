@@ -205,6 +205,13 @@ def proxy_search(q: str, session: dict = Depends(require_session)):
 # docs/analysis/RIV-201-patient-records-IDOR.md §6). This route is additive;
 # it does not fix RIV-201 and proxy_records/proxy_patient remain exactly as
 # exploitable as documented above.
+#
+# Review fix (round, 2026-08-05): `X-Actor-Id` by itself is only trustworthy
+# if the request is guaranteed to have come from this gateway — but
+# records-service's port is published to the host (docker-compose.yml), so a
+# direct caller could spoof it. `X-Internal-Token` is a shared secret
+# (INTERNAL_SERVICE_TOKEN) records-service verifies before honoring
+# X-Actor-Id at all; records-service fails closed if it's unset.
 # --------------------------------------------------------------------------- #
 @app.get("/patients/{patient_id}/view")
 def proxy_patient_view(
@@ -214,6 +221,7 @@ def proxy_patient_view(
 ):
     headers = _correlation_headers()
     headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
     return _get(
         "records",
         f"/patients/{patient_id}/view",
