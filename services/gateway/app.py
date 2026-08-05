@@ -113,7 +113,17 @@ def proxy_intake(payload: dict, session: dict = Depends(require_session)):
     # flattened intake-service's 409 duplicate-patient response into a bare
     # 200, so the frontend read it as a successful submission with no
     # patient/coverage/consent rows actually created.
-    return _post("intake", "/intake", payload, forward_status=True)
+    #
+    # Round-11 review: X-Internal-Token proves this call came through the
+    # gateway (require_session above already gated it on a real staff
+    # session) rather than a direct caller hitting intake-service's
+    # published host port, which had no way to tell the two apart and let
+    # an unauthenticated caller probe the duplicate-detection response as a
+    # patient/SSN-existence oracle. Same shared secret as proxy_patient_view.
+    return _post(
+        "intake", "/intake", payload, headers={"X-Internal-Token": settings.internal_service_token},
+        forward_status=True,
+    )
 
 
 @app.get("/eligibility")

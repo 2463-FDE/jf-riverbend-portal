@@ -20,6 +20,23 @@ app_mod = load_module("services/intake-service/app.py", "intake_app_endpoint")
 
 IntakeRequest = load_module("services/intake-service/schemas.py", "intake_schemas_for_endpoint").IntakeRequest
 
+# Round-11 review: /intake now requires a gateway-forwarded internal token
+# (mirrors records-service's _verify_internal_token). Configured once here
+# and defaulted onto every call via _create_intake below, so every existing
+# test keeps exercising create_intake's actual business logic rather than
+# tripping over the new transport-trust check — tests that specifically
+# target that check pass their own x_internal_token explicitly.
+TEST_TOKEN = "test-internal-token-for-intake-well-over-32-chars"
+
+
+@pytest.fixture(autouse=True)
+def _configured_internal_token(monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+
+
+def _create_intake(req, *, db, x_request_id=None, x_internal_token=TEST_TOKEN):
+    return app_mod.create_intake(req, db=db, x_request_id=x_request_id, x_internal_token=x_internal_token)
+
 
 class _FakeQueryResult:
     def __init__(self, items):
@@ -115,6 +132,85 @@ class _FakePatientRow:
         self.dob = dob
 
 
+# --- Round-11 review: intake-service's internal-token gate ------------------
+#
+# The gateway already requires a valid staff session before it will forward
+# to /intake (services/gateway/app.py::proxy_intake), but intake-service
+# itself had no way to tell a genuine gateway-forwarded call apart from a
+# caller hitting its own published host port (docker-compose.yml, port 8071)
+# directly — bypassing that session check and turning the duplicate-
+# detection response into an unauthenticated patient/SSN-existence oracle.
+# These mirror tests/test_records_patient_view_route.py's token coverage.
+
+
+def test_missing_internal_token_is_rejected_before_any_work(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(_request(), db=db, x_internal_token=None)
+
+    assert exc_info.value.status_code == 401
+    assert db.commit_count == 0
+    assert db.added == []
+
+
+def test_wrong_internal_token_is_rejected(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(_request(), db=db, x_internal_token="not-the-real-token")
+
+    assert exc_info.value.status_code == 401
+    assert db.added == []
+
+
+def test_unconfigured_internal_token_fails_closed_even_with_matching_empty_values(monkeypatch):
+    # If INTERNAL_SERVICE_TOKEN is unset on both services, an empty configured
+    # value must NOT compare equal to an empty header — that would silently
+    # reopen the exact bypass being fixed.
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "")
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(_request(), db=db, x_internal_token="")
+
+    assert exc_info.value.status_code == 401
+    assert db.added == []
+
+
+def test_short_placeholder_internal_token_is_rejected_even_on_exact_match(monkeypatch):
+    # A short, human-typed stand-in (e.g. literally "changeme") must fail
+    # closed even if both sides somehow agree on it — matches
+    # records-service's identical _MIN_INTERNAL_TOKEN_LENGTH floor.
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "changeme")
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(
+            _request(demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"}),
+            db=db, x_internal_token="changeme",
+        )
+
+    assert exc_info.value.status_code == 401
+    assert db.added == []
+
+
+def test_valid_internal_token_preserves_existing_behavior(monkeypatch):
+    # Sanity check: the gate itself doesn't change create_intake's actual
+    # business logic once it passes — a genuine gateway-forwarded call still
+    # behaves exactly as every other test in this file already proves.
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    result = _create_intake(_request(), db=db)
+
+    assert result.patient_id == 1
+
+
 def test_intake_returns_201_shape_promptly_when_eligibility_service_is_slow(monkeypatch):
     # Simulate eligibility-service's own enqueue endpoint being slow-ish (but
     # still within the bounded timeout) — /intake as a whole must not spin
@@ -135,7 +231,7 @@ def test_intake_returns_201_shape_promptly_when_eligibility_service_is_slow(monk
 
     db = _FakeSession()
     started = time.time()
-    result = app_mod.create_intake(_request(), db=db, x_request_id=None)
+    result = _create_intake(_request(), db=db, x_request_id=None)
     wall_clock = time.time() - started
 
     assert result.patient_id == 1
@@ -154,7 +250,7 @@ def test_patient_coverage_and_consent_persist_even_if_eligibility_enqueue_fails(
     monkeypatch.setattr(app_mod.httpx, "post", _raise)
 
     db = _FakeSession()
-    result = app_mod.create_intake(_request(), db=db, x_request_id=None)
+    result = _create_intake(_request(), db=db, x_request_id=None)
 
     # The registration itself succeeded regardless of the eligibility hop.
     assert result.patient_id == 1
@@ -176,7 +272,7 @@ def test_intake_without_insurance_never_calls_eligibility_service(monkeypatch):
     monkeypatch.setattr(app_mod.httpx, "post", _post)
 
     db = _FakeSession()
-    result = app_mod.create_intake(_request(insurance=None), db=db, x_request_id=None)
+    result = _create_intake(_request(insurance=None), db=db, x_request_id=None)
 
     assert calls["n"] == 0
     assert result.eligibility is None
@@ -200,7 +296,7 @@ def test_response_never_leaks_the_raw_request_body_pattern(monkeypatch):
     monkeypatch.setattr(app_mod.httpx, "post", _post)
 
     db = _FakeSession()
-    result = app_mod.create_intake(_request(), db=db, x_request_id=None)
+    result = _create_intake(_request(), db=db, x_request_id=None)
 
     dumped = result.model_dump_json()
     assert "Jane Roe" not in dumped
@@ -250,7 +346,7 @@ def test_intake_request_log_line_is_phi_redacted(monkeypatch, caplog):
 
     db = _FakeSession()
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
-    app_mod.create_intake(
+    _create_intake(
         _request(
             demographics={
                 "name": "Jane Roe",
@@ -315,7 +411,7 @@ def test_intake_log_summary_excludes_plan_type_and_consent_detail(monkeypatch, c
 
     db = _FakeSession()
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
-    app_mod.create_intake(
+    _create_intake(
         _request(
             insurance={
                 "payer_name": "State Medicaid Office",
@@ -348,7 +444,7 @@ def test_hostile_created_via_never_reaches_the_log(monkeypatch, caplog):
 
     db = _FakeSession()
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
-    app_mod.create_intake(
+    _create_intake(
         _request(
             demographics={
                 "name": "Jane Roe",
@@ -380,7 +476,7 @@ def test_hostile_x_request_id_header_never_reaches_the_log(monkeypatch, caplog):
 
     db = _FakeSession()
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
-    app_mod.create_intake(_request(), db=db, x_request_id=hostile_header)
+    _create_intake(_request(), db=db, x_request_id=hostile_header)
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert hostile_header not in log_text
@@ -402,7 +498,7 @@ def test_legitimate_uuid_x_request_id_header_is_preserved(monkeypatch, caplog):
 
     db = _FakeSession()
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
-    app_mod.create_intake(_request(), db=db, x_request_id=real_uuid)
+    _create_intake(_request(), db=db, x_request_id=real_uuid)
 
     summary = _intake_summary_dict(caplog)
     assert summary["correlation_id"] == real_uuid
@@ -464,7 +560,7 @@ def test_no_ssn_means_no_match_lookup_and_unaffected_behavior(monkeypatch):
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111223333", dob="1990-01-01")])
 
-    result = app_mod.create_intake(_request(), db=db, x_request_id=None)  # default demographics has no ssn
+    result = _create_intake(_request(), db=db, x_request_id=None)  # default demographics has no ssn
 
     assert result.patient_id != 42
     assert result.possible_duplicate_match is False
@@ -478,7 +574,7 @@ def test_exact_match_always_blocks_with_409(monkeypatch):
     db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1990-01-01")])
 
     with pytest.raises(app_mod.HTTPException) as exc_info:
-        app_mod.create_intake(
+        _create_intake(
             _request(demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"}),
             db=db, x_request_id=None,
         )
@@ -514,7 +610,7 @@ def test_exact_match_ignores_smuggled_override_and_confirmed_by(monkeypatch):
     assert not hasattr(req, "confirmed_by")
 
     with pytest.raises(app_mod.HTTPException) as exc_info:
-        app_mod.create_intake(req, db=db, x_request_id=None)
+        _create_intake(req, db=db, x_request_id=None)
 
     assert exc_info.value.status_code == 409
     assert db.commit_count == 0
@@ -527,7 +623,7 @@ def test_partial_match_never_blocks_and_returns_possible_duplicate_flag(monkeypa
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")])
 
-    result = app_mod.create_intake(
+    result = _create_intake(
         _request(demographics={"name": "M. Gonzalez", "ssn": "111-22-3333", "dob": "1971-03-02"}),
         db=db, x_request_id=None,
     )
@@ -548,7 +644,7 @@ def test_partial_match_link_confirmed_by_never_comes_from_the_request_body(monke
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession(existing_patients=[_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")])
 
-    result = app_mod.create_intake(
+    result = _create_intake(
         _request(
             demographics={"name": "M. Gonzalez", "ssn": "111-22-3333", "dob": "1971-03-02"},
             confirmed_by="dr.smith",  # not a real field anymore — silently ignored
@@ -570,7 +666,7 @@ def test_partial_match_does_not_succeed_if_link_write_fails(monkeypatch):
     db.existing_patients = [_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")]
 
     with pytest.raises(app_mod.HTTPException) as exc_info:
-        app_mod.create_intake(
+        _create_intake(
             _request(demographics={"name": "M. Gonzalez", "ssn": "111-22-3333", "dob": "1971-03-02"}),
             db=db, x_request_id=None,
         )
@@ -593,7 +689,7 @@ def test_exact_match_lock_is_scoped_to_normalized_ssn_not_raw_input(monkeypatch)
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession()
 
-    app_mod.create_intake(
+    _create_intake(
         _request(demographics={"name": "Jane Roe", "ssn": "412-55-9981", "dob": "1990-01-01"}),
         db=db, x_request_id=None,
     )

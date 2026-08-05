@@ -83,6 +83,23 @@ Inherited shortcomings (left as-is from the handoff):
         and the 409 detail in create_intake. Staff-mediated linking onto an
         existing patient is deferred until there's a trusted,
         staff-authenticated path with a server-derived actor identity.
+      - PR #20 round-11 review: the gateway already requires a valid staff
+        session before it will forward to /intake (services/gateway/app.py::
+        proxy_intake), but intake-service had no way to tell a genuine
+        gateway-forwarded call apart from a caller hitting its own published
+        host port directly (docker-compose.yml, port 8071) — which bypassed
+        that session check entirely and let an unauthenticated caller probe
+        the exact/partial/no-match distinction above as a patient/SSN-
+        existence oracle. _verify_internal_token (same shared-secret pattern
+        as records-service's StaffAccessGate path) now rejects any call that
+        doesn't carry the gateway's INTERNAL_SERVICE_TOKEN, before any
+        duplicate-detection logic runs. This is a transport-trust check
+        (proves the call came through the gateway), not per-patient
+        authorization, and it does not change the authenticated, staff-
+        mediated intake flow itself. Whether Riverbend should ever offer
+        true public/unauthenticated self-service registration (this
+        module's opening paragraph's "self-service portal" line) is a
+        separate, undecided product question — not resolved by this fix.
   * Consents are inserted one at a time (a commit per consent).
 
 Stage 3 (RIV-088 / RIV-141 fix): eligibility used to be verified INLINE on
@@ -97,6 +114,7 @@ safe opaque `eligibility_job_id` for the caller to poll. The old
 pending/degraded summary, for backward compatibility with any existing
 caller that reads it.
 """
+import hmac
 import json
 import os
 import re
@@ -132,6 +150,30 @@ INTAKE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "intake.yaml")
 _CORRELATION_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
 )
+
+
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # rejects "changeme" and any other short/example value
+
+
+def _verify_internal_token(x_internal_token: Optional[str]) -> None:
+    """Round-11 review fix (2026-08-05): proves this call came through the
+    gateway (which already requires a staff session — services/gateway/
+    app.py::proxy_intake), not a direct caller hitting this service's
+    published host port (docker-compose.yml, port 8071). Mirrors
+    services/records-service/app.py::_verify_internal_token exactly — same
+    shared INTERNAL_SERVICE_TOKEN, same fail-closed semantics: an unset/empty
+    configured token, or one shorter than _MIN_INTERNAL_TOKEN_LENGTH (a
+    human-typed placeholder like "changeme"), must never be treated as "no
+    check needed" or accepted as a real secret.
+    """
+    configured = settings.internal_service_token
+    if (
+        not configured
+        or len(configured) < _MIN_INTERNAL_TOKEN_LENGTH
+        or not x_internal_token
+        or not hmac.compare_digest(x_internal_token, configured)
+    ):
+        raise HTTPException(status_code=401, detail="missing or invalid internal service token")
 
 
 def _safe_correlation_id(x_request_id: Optional[str]) -> str:
@@ -170,7 +212,10 @@ def create_intake(
     req: IntakeRequest,
     db: Session = Depends(get_db),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
 ):
+    _verify_internal_token(x_internal_token)
+
     started = time.time()
     correlation_id = _safe_correlation_id(x_request_id)
 
