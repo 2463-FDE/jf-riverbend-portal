@@ -97,6 +97,22 @@ class FakeChartRepository:
         )
 
 
+class FakeFailingChartRepository:
+    """Round-19 review (2026-08-06): stands in for a real backend read
+    failure — a schema-drifted column, a dropped connection, a flaky query
+    — surfacing as SqlChartRepository.load_chart raising instead of
+    returning a ChartResult. run_patient_view's own custom runtime catches
+    this (libs/patient_view_agent/runtimes/custom.py) and converts it to
+    outcome=ESCALATED, reasons=[NODE_FAILURE] — this fake exists to prove
+    get_patient_view turns THAT into a 503, not a 200."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def load_chart(self, patient_id, *, correlation_id=""):
+        raise SQLAlchemyError("simulated chart read failure")
+
+
 @pytest.fixture
 def client(monkeypatch):
     created_sessions.clear()
@@ -275,11 +291,15 @@ def test_nonexistent_patient_id_returns_404_and_writes_no_audit_row(monkeypatch)
     assert created_sessions[-1].commit_count == 0
 
 
-def test_nonexistent_patient_id_is_404_even_for_an_actor_who_would_be_denied(monkeypatch):
-    # The existence check runs before StaffAccessGate too — a request that
-    # would otherwise be denied (missing X-Actor-Id) must still surface as
-    # "patient not found," not fall through to a 403 that would confirm the
-    # patient exists.
+def test_denied_actor_gets_403_not_404_for_a_nonexistent_patient(monkeypatch):
+    # Round-19 review (2026-08-06): the opposite of what this test asserted
+    # before. Authorization now runs before the existence check specifically
+    # so a denied actor (missing X-Actor-Id) gets the SAME 403 whether
+    # patient_id exists or not — the earlier "404 for a denied actor on a
+    # missing id" behavior let a caller with the internal token but no valid
+    # actor tell existing patient_ids apart from nonexistent ones (404 vs
+    # 403), an existence oracle for exactly the callers StaffAccessGate is
+    # supposed to keep at zero reads.
     monkeypatch.setattr(app_mod, "SqlChartRepository", FakeChartRepository)
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_missing_patient
@@ -288,5 +308,65 @@ def test_nonexistent_patient_id_is_404_even_for_an_actor_who_would_be_denied(mon
     finally:
         app_mod.app.dependency_overrides.clear()
 
-    assert resp.status_code == 404
-    assert created_sessions[-1].added == []
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["reason"] == "unknown_actor"
+    # Denied before db.get(Patient, ...) ever runs — the audit row records
+    # the denial, same as test_missing_actor_header_is_denied_and_audited.
+    audit = created_sessions[-1].added[0]
+    assert audit.actor == "unknown"
+    assert "outcome=denied" in audit.message
+
+
+def test_denied_actor_gets_the_same_403_for_an_existing_patient_too(client):
+    # The other half of the oracle check: an existing id (1042, the default
+    # in FakeSession/the `client` fixture) must produce the identical
+    # denial, not a different status that would let a denied caller
+    # distinguish "exists" from "doesn't."
+    resp = client.get("/patients/1042/view", headers=_internal_header())
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["reason"] == "unknown_actor"
+
+
+# --- backend read failures must not look like a successful chart view -----
+# round-19 review (2026-08-06)
+
+
+def test_repository_failure_returns_503_not_200(monkeypatch):
+    # Before this fix: SqlChartRepository raising was caught INSIDE
+    # run_patient_view and turned into a normal outcome=ESCALATED result,
+    # which this route returned as a plain 200 — a database error looked
+    # identical to a real (if unhelpful) clinical answer to callers and
+    # uptime monitors.
+    monkeypatch.setattr(app_mod, "SqlChartRepository", FakeFailingChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db
+    try:
+        resp = TestClient(app_mod.app).get(
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+        )
+    finally:
+        app_mod.app.dependency_overrides.clear()
+
+    assert resp.status_code == 503
+    assert resp.status_code != 200
+
+
+def test_repository_failure_still_writes_an_audit_row(monkeypatch):
+    # The 503 above must not come at the cost of losing the access record —
+    # this failure happens well after authorization, so it's still a real
+    # (if unsuccessful) chart-view attempt.
+    monkeypatch.setattr(app_mod, "SqlChartRepository", FakeFailingChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db
+    try:
+        TestClient(app_mod.app).get(
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+        )
+    finally:
+        app_mod.app.dependency_overrides.clear()
+
+    audit = created_sessions[-1].added[0]
+    assert audit.actor == "frontdesk"
+    assert "outcome=escalated" in audit.message
+    assert "patient_id=1042" in audit.message

@@ -26,9 +26,11 @@ from libs.patient_view_agent import (
     Action,
     AuthorizationDenied,
     AuthorizationRequest,
+    PatientViewOutcome,
     PatientViewResult,
     Purpose,
     StaffAccessGate,
+    ViewReason,
     run_patient_view,
 )
 from logging_config import configure
@@ -214,6 +216,28 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
         raise HTTPException(status_code=503, detail="database unavailable")
 
 
+def _deny_patient_view(
+    db: Session, x_actor_id: Optional[str], patient_id: int, denial: "AuthorizationDenied"
+) -> None:
+    """Shared by both places get_patient_view calls into StaffAccessGate
+    (round-19 review, 2026-08-06) — the standalone pre-check and
+    run_patient_view's own internal one — so a denial is audited and
+    rejected identically regardless of which call raised it. Always raises;
+    never returns."""
+    _write_audit(
+        db,
+        actor=x_actor_id or "unknown",
+        message=(
+            f"patient_view outcome=denied patient_id={patient_id} "
+            f"reason={denial.denial.reason.value} correlation_id={denial.denial.correlation_id}"
+        ),
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={"reason": denial.denial.reason.value, "correlation_id": denial.denial.correlation_id},
+    )
+
+
 # Review fix (round 2, 2026-08-05): a real INTERNAL_SERVICE_TOKEN is expected
 # to be a long random value (e.g. `openssl rand -hex 32` = 64 chars); this
 # floor exists specifically to reject short, human-typed placeholder values
@@ -284,25 +308,6 @@ def get_patient_view(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid purpose '{purpose}'")
 
-    # Round-15 review (2026-08-06): SqlChartRepository's first read only
-    # loads encounters for patient_id — an unknown id returns an empty
-    # result set, not an error, so run_patient_view would previously produce
-    # a normal "no evidence" COMPLETED/escalated result for a patient that
-    # does not exist at all. A typo'd or stale patient_id then looked
-    # identical to a real patient with an empty chart, which is a clinical
-    # safety problem for a chart summary a clinician is meant to trust.
-    # Checked here, same 404 idiom get_patient already uses above, before
-    # authorization or any chart read runs. No audit_logs row is written for
-    # a nonexistent id — same reasoning as _verify_internal_token's own
-    # rejection path: this is a not-found response, not a chart access.
-    try:
-        patient_exists = db.get(Patient, patient_id) is not None
-    except SQLAlchemyError:
-        log.exception("get_patient_view: database error for patient_id=%s", patient_id)
-        raise HTTPException(status_code=503, detail="database unavailable")
-    if not patient_exists:
-        raise HTTPException(status_code=404, detail="patient not found")
-
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -311,6 +316,46 @@ def get_patient_view(
         correlation_id=x_request_id,
     )
 
+    # Round-19 review (2026-08-06): authorization now runs before any patient
+    # lookup. Round-15's fix put the existence check first, which let a
+    # caller holding the internal token but no valid actor get 404 for a
+    # nonexistent patient_id and 403 for an existing one — a patient-ID
+    # existence oracle for exactly the callers StaffAccessGate exists to
+    # keep at zero reads. Calling authorize() directly here (the same
+    # AuthorizationPort run_patient_view uses internally) denies before any
+    # db.get(Patient, ...) runs, so a denied actor now gets an identical 403
+    # regardless of whether patient_id exists.
+    try:
+        _STAFF_ACCESS_GATE.authorize(request)
+    except AuthorizationDenied as denial:
+        _deny_patient_view(db, x_actor_id, patient_id, denial)
+
+    # Round-15 review (2026-08-06): SqlChartRepository's first read only
+    # loads encounters for patient_id — an unknown id returns an empty
+    # result set, not an error, so run_patient_view would previously produce
+    # a normal "no evidence" COMPLETED/escalated result for a patient that
+    # does not exist at all. A typo'd or stale patient_id then looked
+    # identical to a real patient with an empty chart, which is a clinical
+    # safety problem for a chart summary a clinician is meant to trust.
+    # Checked here, same 404 idiom get_patient already uses above, now after
+    # authorization (round-19) but still before any chart read runs. No
+    # audit_logs row is written for a nonexistent id — same reasoning as
+    # _verify_internal_token's own rejection path: this is a not-found
+    # response, not a chart access.
+    try:
+        patient_exists = db.get(Patient, patient_id) is not None
+    except SQLAlchemyError:
+        log.exception("get_patient_view: database error for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+    if not patient_exists:
+        raise HTTPException(status_code=404, detail="patient not found")
+
+    # run_patient_view re-authorizes internally — its own contract runs
+    # authorize() exactly once before either read specialist, regardless of
+    # the pre-check above. Given the identical `request`, StaffAccessGate is
+    # a deterministic function of its inputs, so this can only ever ALLOW
+    # here; kept fenced against AuthorizationDenied anyway rather than
+    # assuming that invariant can never change.
     try:
         result = run_patient_view(
             request,
@@ -318,18 +363,7 @@ def get_patient_view(
             repository=SqlChartRepository(db),
         )
     except AuthorizationDenied as denial:
-        _write_audit(
-            db,
-            actor=x_actor_id or "unknown",
-            message=(
-                f"patient_view outcome=denied patient_id={patient_id} "
-                f"reason={denial.denial.reason.value} correlation_id={denial.denial.correlation_id}"
-            ),
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={"reason": denial.denial.reason.value, "correlation_id": denial.denial.correlation_id},
-        )
+        _deny_patient_view(db, x_actor_id, patient_id, denial)
 
     _write_audit(
         db,
@@ -340,6 +374,20 @@ def get_patient_view(
             f"reasons={','.join(r.value for r in result.reasons)}"
         ),
     )
+
+    # Round-19 review: a repository/specialist exception during the chart
+    # read is caught inside run_patient_view itself and surfaces as
+    # outcome=ESCALATED with reasons=[NODE_FAILURE] (see
+    # libs/patient_view_agent/runtime.py::node_failure_result) — not an
+    # exception this route can catch. Without this check, a database error,
+    # schema drift, or any other backend read failure returned a normal 200
+    # patient-view result, indistinguishable from a real (if unhelpful)
+    # clinical answer to callers and uptime monitors. The audit row above is
+    # still written either way; `result.summary` is already a safe,
+    # non-PHI, pre-templated string for exactly this case.
+    if result.outcome == PatientViewOutcome.ESCALATED and ViewReason.NODE_FAILURE in result.reasons:
+        raise HTTPException(status_code=503, detail=result.summary)
+
     return result
 
 
