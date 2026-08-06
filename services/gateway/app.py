@@ -286,6 +286,27 @@ def proxy_patient_view(
     )
 
 
+# Stage 2 (Week 6) — read-only "possible duplicate patient" reconciliation
+# view. Same trust model as proxy_patient_view above (X-Actor-Id +
+# X-Internal-Token); this route is additive and does not fix RIV-201 either.
+# No `purpose` param — records-service always requests Purpose.TREATMENT for
+# this endpoint.
+@app.get("/patients/{patient_id}/reconciliation")
+def proxy_patient_reconciliation(
+    patient_id: int,
+    session: dict = Depends(require_session),
+):
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records",
+        f"/patients/{patient_id}/reconciliation",
+        headers=headers,
+        forward_status=True,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # scheduling
 # --------------------------------------------------------------------------- #

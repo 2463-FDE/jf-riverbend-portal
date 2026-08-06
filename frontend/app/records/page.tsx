@@ -5,7 +5,7 @@ import Card from "../components/Card";
 import StatusBadge, { statusVariant } from "../components/StatusBadge";
 import { IconRecords, IconLab, IconSearch, IconStethoscope } from "../components/icons";
 import { apiFetch } from "../lib/session";
-import type { EncounterBlock, PatientViewResult, RecordItem } from "../lib/types";
+import type { EncounterBlock, PatientViewResult, ReconciliationResult, RecordItem } from "../lib/types";
 import { fmtDate } from "../lib/format";
 
 function isResult(r: RecordItem): boolean {
@@ -36,6 +36,37 @@ export default function RecordsPage() {
   const [aiView, setAiView] = useState<PatientViewResult | null>(null);
   const [aiStatus, setAiStatus] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
+
+  // Stage 2 (Week 6) — read-only "possible duplicate patient" reconciliation
+  // check (GET /api/patients/[id]/reconciliation). Its own on-demand button
+  // and its own audit trail — a distinct, more sensitive read than the AI
+  // chart view above, so it is never auto-fetched.
+  const [reconciliation, setReconciliation] = useState<ReconciliationResult | null>(null);
+  const [reconciliationStatus, setReconciliationStatus] = useState("");
+  const [reconciliationBusy, setReconciliationBusy] = useState(false);
+
+  async function loadReconciliation() {
+    setReconciliationBusy(true);
+    setReconciliationStatus("");
+    setReconciliation(null);
+    try {
+      const res = await apiFetch(`/api/patients/${encodeURIComponent(patientId)}/reconciliation`);
+      const json = await res.json();
+      if (!res.ok) {
+        const detail = json?.detail;
+        const reason = typeof detail === "string" ? detail : detail?.reason;
+        setReconciliationStatus(
+          reason ? `Could not check for related records: ${reason}` : "Could not check for related records."
+        );
+        return;
+      }
+      setReconciliation(json as ReconciliationResult);
+    } catch (e) {
+      setReconciliationStatus(e instanceof Error ? e.message : "Could not check for related records.");
+    } finally {
+      setReconciliationBusy(false);
+    }
+  }
 
   async function loadAiView() {
     setAiBusy(true);
@@ -151,6 +182,142 @@ export default function RecordsPage() {
             {aiView.escalation && (
               <div className="rb-alert rb-alert--info" role="status">
                 This view requires human review before use.
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Possible Duplicate Records" icon={<IconSearch />}>
+        <p className="rb-muted" style={{ marginTop: 0 }}>
+          Checks whether any other chart shares this patient&apos;s exact Social
+          Security Number — a read-only candidate signal for a clinician to
+          review, never an automatic match or merge.
+        </p>
+        <button
+          className="rb-btn rb-btn--ghost"
+          onClick={loadReconciliation}
+          disabled={reconciliationBusy}
+          type="button"
+        >
+          {reconciliationBusy ? "Checking…" : "Check for related records"}
+        </button>
+
+        {reconciliationStatus && (
+          <div className="rb-alert rb-alert--err" role="status" style={{ marginTop: 12 }}>
+            {reconciliationStatus}
+          </div>
+        )}
+
+        {reconciliation && (
+          <div style={{ marginTop: 14 }}>
+            <span className="rb-eyebrow">Record review</span>
+            <h3 style={{ margin: 0 }}>
+              {reconciliation.source_records.length > 1
+                ? "These records may describe one patient."
+                : "No reconciliation candidates were returned for this chart."}
+            </h3>
+
+            {reconciliation.escalation && (
+              <div className="rb-alert rb-alert--warn" role="alert" style={{ marginTop: 10 }}>
+                <strong>Clinician review required.</strong> This is evidence for a
+                clinician to assess — not an automatic merge, diagnosis, or
+                treatment decision.
+              </div>
+            )}
+
+            {reconciliation.source_records.length > 1 && (
+              <div className="rb-table-scroll">
+                <table className="rb-table">
+                  <thead>
+                    <tr>
+                      <th>Chart</th>
+                      <th>Name on file</th>
+                      <th>Date of birth</th>
+                      <th>Allergies</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconciliation.source_records.map((r) => (
+                      <tr key={r.patient_id}>
+                        <td>
+                          {r.patient_id}
+                          <div className="rb-muted" style={{ fontSize: "0.78rem" }}>
+                            {r.source_label}
+                          </div>
+                        </td>
+                        <td>{r.name_on_file}</td>
+                        <td>{r.dob ?? "—"}</td>
+                        <td>
+                          {r.allergies.length === 0
+                            ? "none recorded"
+                            : r.allergies.map((a) => {
+                                const flagged = reconciliation.discrepancies.some(
+                                  (d) =>
+                                    d.category === "allergy" &&
+                                    d.value === a &&
+                                    d.present_on_patient_ids.includes(r.patient_id)
+                                );
+                                return (
+                                  <span
+                                    key={a}
+                                    style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 8 }}
+                                  >
+                                    {a}
+                                    {flagged && (
+                                      <span className="rb-badge rb-badge--warn">not on all charts</span>
+                                    )}
+                                  </span>
+                                );
+                              })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {reconciliation.discrepancies.length > 0 && (
+              <ul className="rb-muted" style={{ marginTop: 10 }}>
+                {reconciliation.discrepancies.map((d) => (
+                  <li key={`${d.category}-${d.value}`}>
+                    {d.category === "allergy" ? "Allergy" : "Medication"} &quot;{d.value}&quot; recorded on
+                    chart{d.present_on_patient_ids.length > 1 ? "s" : ""}{" "}
+                    {d.present_on_patient_ids.join(", ")}, not on{" "}
+                    {d.missing_on_patient_ids.join(", ")}.
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {reconciliation.identity_signals.length > 0 && (
+              <p className="rb-muted" style={{ marginTop: 10 }}>
+                Matching signal: {reconciliation.identity_signals.map((s) => s.masked_value).join(", ")}
+              </p>
+            )}
+
+            {reconciliation.discrepancies.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div className="rb-eyebrow">Evidence</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {Array.from(new Set(reconciliation.discrepancies.flatMap((d) => d.evidence_ids))).map((id) => (
+                    <span key={id} className="rb-badge rb-badge--neutral">
+                      {id}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {reconciliation.limitations.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div className="rb-eyebrow">Limitations</div>
+                <ul className="rb-muted" style={{ marginTop: 0 }}>
+                  {reconciliation.limitations.map((l) => (
+                    <li key={l}>{l}</li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>

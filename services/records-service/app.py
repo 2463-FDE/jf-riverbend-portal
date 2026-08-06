@@ -36,6 +36,7 @@ from libs.patient_view_agent import (
 from logging_config import configure
 from models import AuditLog, Encounter, Patient, Record
 from patient_view_repository import SqlChartRepository
+from reconciliation import build_reconciliation_result
 from schemas import (
     EncounterOut,
     EncounterWithRecords,
@@ -43,6 +44,7 @@ from schemas import (
     PatientDetail,
     PatientPage,
     PatientSummary,
+    ReconciliationResult,
     RecordOut,
     RecordSearchHit,
 )
@@ -217,18 +219,26 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
 
 
 def _deny_patient_view(
-    db: Session, x_actor_id: Optional[str], patient_id: int, denial: "AuthorizationDenied"
+    db: Session,
+    x_actor_id: Optional[str],
+    patient_id: int,
+    denial: "AuthorizationDenied",
+    *,
+    action: str = "patient_view",
 ) -> None:
-    """Shared by both places get_patient_view calls into StaffAccessGate
-    (round-19 review, 2026-08-06) — the standalone pre-check and
-    run_patient_view's own internal one — so a denial is audited and
-    rejected identically regardless of which call raised it. Always raises;
-    never returns."""
+    """Shared by every place a route calls into StaffAccessGate (round-19
+    review, 2026-08-06: get_patient_view's standalone pre-check and
+    run_patient_view's own internal one; Stage 2 (Week 6): also
+    get_patient_reconciliation) — so a denial is audited and rejected
+    identically regardless of which call raised it. `action` labels the
+    audit message with the route that was denied (default "patient_view"
+    keeps every existing call site/test unchanged); always raises, never
+    returns."""
     _write_audit(
         db,
         actor=x_actor_id or "unknown",
         message=(
-            f"patient_view outcome=denied patient_id={patient_id} "
+            f"{action} outcome=denied patient_id={patient_id} "
             f"reason={denial.denial.reason.value} correlation_id={denial.denial.correlation_id}"
         ),
     )
@@ -387,6 +397,74 @@ def get_patient_view(
     # non-PHI, pre-templated string for exactly this case.
     if result.outcome == PatientViewOutcome.ESCALATED and ViewReason.NODE_FAILURE in result.reasons:
         raise HTTPException(status_code=503, detail=result.summary)
+
+    return result
+
+
+@app.get("/patients/{patient_id}/reconciliation", response_model=ReconciliationResult)
+def get_patient_reconciliation(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """
+    Stage 2 (Week 6) — read-only "possible duplicate patient" reconciliation
+    view (see reconciliation.py). Same two-layer trust as get_patient_view
+    above: (1) _verify_internal_token proves this call came from the gateway;
+    (2) StaffAccessGate is authenticated-staff access, NOT patient-specific
+    authorization — this route does not fix RIV-201 either. Reuses
+    Action.VIEW_PATIENT_CHART (no dedicated Action exists for this, and
+    adding one would mean editing libs/patient_view_agent's shared contract,
+    out of scope here) and always requests Purpose.TREATMENT — there is no
+    legitimate non-treatment purpose for this view in this slice, so unlike
+    get_patient_view it takes no `purpose` query param.
+
+    Never returns a raw ssn; matches are exact-SSN-only (reconciliation.py);
+    every read is audited, success or denial, same as get_patient_view.
+    """
+    _verify_internal_token(x_internal_token)
+
+    request = AuthorizationRequest(
+        actor_id=x_actor_id or "",
+        patient_id=patient_id,
+        action=Action.VIEW_PATIENT_CHART,
+        purpose=Purpose.TREATMENT,
+        correlation_id=x_request_id,
+    )
+
+    # Same anti-oracle ordering as get_patient_view (round-19): authorization
+    # before any patient lookup, so a denied actor gets an identical 403
+    # regardless of whether patient_id exists.
+    try:
+        scope = _STAFF_ACCESS_GATE.authorize(request)
+    except AuthorizationDenied as denial:
+        _deny_patient_view(db, x_actor_id, patient_id, denial, action="reconciliation")
+
+    try:
+        patient = db.get(Patient, patient_id)
+    except SQLAlchemyError:
+        log.exception("get_patient_reconciliation: database error for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+    if patient is None:
+        raise HTTPException(status_code=404, detail="patient not found")
+
+    try:
+        result = build_reconciliation_result(db, patient_id, patient, scope.correlation_id)
+    except SQLAlchemyError:
+        log.exception("get_patient_reconciliation: database error for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    _write_audit(
+        db,
+        actor=x_actor_id or "unknown",
+        message=(
+            f"reconciliation outcome=completed patient_id={patient_id} "
+            f"match_count={len(result.source_records) - 1} "
+            f"discrepancy_count={len(result.discrepancies)} correlation_id={result.correlation_id}"
+        ),
+    )
 
     return result
 

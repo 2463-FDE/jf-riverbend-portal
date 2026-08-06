@@ -100,3 +100,44 @@ class RecordSearchHit(BaseModel):
     kind: str | None = None
     title: str | None = None
     body: str | None = None
+
+
+# --- Stage 2 (Week 6) — records reconciliation ("possible duplicate patient")
+# view, GET /patients/{id}/reconciliation. Read-only evidence for a clinician;
+# see app.py::get_patient_reconciliation for the authorization/audit sequence
+# and app.py::_find_ssn_matches for the exact-SSN-only match definition this
+# was scoped to (adr/0004 / RIV-160). Never carries a raw ssn.
+
+
+class IdentitySignal(BaseModel):
+    signal_type: str  # "ssn_exact_match" — the only signal this slice computes
+    masked_value: str  # e.g. "•••-••-9981" — last 4 digits only, never the full ssn
+
+
+class ReconciliationSourceRecord(BaseModel):
+    patient_id: int
+    is_requested_patient: bool
+    source_label: str  # "Current chart" | "Possible match"
+    name_on_file: str
+    dob: str | None = None
+    allergies: list[str] = []
+    medications: list[str] = []
+
+
+class ReconciliationDiscrepancy(BaseModel):
+    category: str  # "allergy" | "medication"
+    value: str
+    present_on_patient_ids: list[int]
+    missing_on_patient_ids: list[int]
+    evidence_ids: list[str]
+    review_required: bool = True
+
+
+class ReconciliationResult(BaseModel):
+    patient_id: int
+    identity_signals: list[IdentitySignal]
+    source_records: list[ReconciliationSourceRecord]
+    discrepancies: list[ReconciliationDiscrepancy]
+    limitations: list[str]
+    escalation: bool
+    correlation_id: str
