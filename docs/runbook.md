@@ -3,6 +3,31 @@
 Practical "how do I run / fix this" notes for whoever is on call. Stack is Docker
 Compose; one stack per clinic region.
 
+## Required one-time setup: INTERNAL_SERVICE_TOKEN
+
+Round-17 review (2026-08-06, PR #20): `gateway`, `intake-service`, and
+`records-service` all now refuse to start (see each service's `lifespan`
+handler in `app.py`) unless `INTERNAL_SERVICE_TOKEN` in `.env` is set to a
+real random value at least 32 characters long — this is the shared secret
+that proves an intake/patient-view call actually came through the gateway,
+not a direct caller hitting a service's published host port. `.env.example`
+ships this **empty on purpose** (a placeholder like `changeme` would be a
+public, guessable secret every deployment shipped unmodified), so `.env`
+needs it set explicitly before the first `make up`:
+
+```bash
+# generates a 64-char hex value; set the SAME value on all three services —
+# they already share one .env, so setting it once here is enough
+openssl rand -hex 32
+```
+
+Put that value in `.env`'s `INTERNAL_SERVICE_TOKEN=` line (see the detailed
+comment above that line in `.env.example` for the full history). Without
+it, the three services now fail fast at container startup with a clear
+`RuntimeError` in `docker compose logs` (rather than starting and sitting
+"unhealthy" until the healthcheck's retry budget runs out) — that log line
+is the signal to come back here.
+
 ## Start / stop
 
 ```bash

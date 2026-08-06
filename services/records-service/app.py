@@ -12,6 +12,7 @@ does not touch or remediate `get_patient_records`/`get_patient` below
 (DEBT D11 / RIV-201) — see docs/analysis/RIV-201-patient-records-IDOR.md.
 """
 import hmac
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -46,10 +47,6 @@ from schemas import (
 
 log = configure(settings.service_name)
 
-app = FastAPI(title="Riverbend records-service")
-
-_STAFF_ACCESS_GATE = StaffAccessGate()
-
 
 def _internal_token_is_configured() -> bool:
     """Round-13 review (2026-08-06, PR #20): the same presence/length floor
@@ -58,6 +55,34 @@ def _internal_token_is_configured() -> bool:
     request — see gateway's and intake-service's identical fix."""
     configured = settings.internal_service_token
     return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Round-17 review (2026-08-06): failing only at /healthz (round-13)
+    means a misconfigured container sits "unhealthy" until the healthcheck's
+    retry budget expires, with the actual cause buried behind a generic
+    failure. This fails at process startup instead: uvicorn logs the exact
+    RuntimeError below and exits non-zero immediately, so
+    `docker compose ps`/`logs` shows "Exited" with a clear message, not a
+    slow unhealthy churn. Verified this does not fire under this repo's
+    TestClient(app).get(...) pattern (no `with` block — Starlette only runs
+    lifespan startup/shutdown for a context-managed TestClient), so it
+    cannot break any existing test; it only ever runs for a real
+    uvicorn-started process. See gateway's and intake-service's identical
+    fix."""
+    if not _internal_token_is_configured():
+        raise RuntimeError(
+            f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
+            f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
+            f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
+        )
+    yield
+
+
+app = FastAPI(title="Riverbend records-service", lifespan=lifespan)
+
+_STAFF_ACCESS_GATE = StaffAccessGate()
 
 
 @app.get("/healthz")

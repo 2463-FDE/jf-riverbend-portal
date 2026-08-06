@@ -154,6 +154,7 @@ import json
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -172,7 +173,43 @@ from models import Consent, InsuranceCoverage, Patient, PatientLink
 from schemas import Demographics, Insurance, IntakeRequest, IntakeResponse
 
 log = configure(settings.service_name)
-app = FastAPI(title="Riverbend intake-service", version="1.4.0")
+
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # rejects "changeme" and any other short/example value
+
+
+def _internal_token_is_configured() -> bool:
+    """Round-13 review (2026-08-06): the same presence/length floor
+    _verify_internal_token enforces on every request, checked once here so
+    /healthz can fail before a misconfigured deploy ever serves a real
+    request. See the module docstring's round-13 entry."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Round-17 review (2026-08-06): failing only at /healthz (round-13)
+    means a misconfigured container sits "unhealthy" until the healthcheck's
+    retry budget expires, with the actual cause buried behind a generic
+    failure. This fails at process startup instead: uvicorn logs the exact
+    RuntimeError below and exits non-zero immediately, so
+    `docker compose ps`/`logs` shows "Exited" with a clear message, not a
+    slow unhealthy churn. Verified this does not fire under this repo's
+    TestClient(app).get(...) pattern (no `with` block — Starlette only runs
+    lifespan startup/shutdown for a context-managed TestClient), so it
+    cannot break any existing test; it only ever runs for a real
+    uvicorn-started process. See gateway's and records-service's identical
+    fix."""
+    if not _internal_token_is_configured():
+        raise RuntimeError(
+            f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
+            f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
+            f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
+        )
+    yield
+
+
+app = FastAPI(title="Riverbend intake-service", version="1.4.0", lifespan=lifespan)
 
 _TRACER_NAME = "intake-service"
 
@@ -221,15 +258,6 @@ def _safe_correlation_id(x_request_id: Optional[str]) -> str:
     if x_request_id and _CORRELATION_ID_PATTERN.fullmatch(x_request_id):
         return x_request_id
     return new_correlation_id()
-
-
-def _internal_token_is_configured() -> bool:
-    """Round-13 review (2026-08-06): the same presence/length floor
-    _verify_internal_token enforces on every request, checked once here so
-    /healthz can fail before a misconfigured deploy ever serves a real
-    request. See the module docstring's round-13 entry."""
-    configured = settings.internal_service_token
-    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
 
 
 @app.get("/healthz")

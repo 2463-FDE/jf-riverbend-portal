@@ -11,6 +11,7 @@ Inherited shortcomings (left as-is from the handoff):
   * One role for everyone; no per-action authorization beyond "is logged in".
 """
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
@@ -28,7 +29,49 @@ from models import User
 from security import create_session, destroy_session, get_session, verify_password
 
 log = configure(settings.service_name)
-app = FastAPI(title="Riverbend gateway", version="1.4.0")
+
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # matches intake-service/records-service's own floor
+
+
+def _internal_token_is_configured() -> bool:
+    """Round-13 review (2026-08-06, PR #20): the gateway forwards
+    X-Internal-Token on every intake/records call (see proxy_intake and the
+    patient-view fan-out below) but never checked its own configured value
+    before this fix — an empty/placeholder INTERNAL_SERVICE_TOKEN meant the
+    gateway started and passed docker-compose's healthcheck while every
+    forwarded call was fail-closed 401'd downstream, a healthy-looking
+    outage of the whole intake/patient-view path. /healthz now applies the
+    same presence/length floor intake-service and records-service already
+    enforce on the receiving end."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Round-17 review (2026-08-06): the round-13 healthz check above only
+    surfaces a missing/placeholder INTERNAL_SERVICE_TOKEN once something
+    polls /healthz — a container starts, sits "unhealthy" until the
+    healthcheck's retry budget expires, and the actual cause is buried
+    behind a generic health-check failure with no message in
+    `docker compose ps`. This fails at process startup instead: uvicorn logs
+    the exact RuntimeError below and exits non-zero immediately (verified:
+    `docker compose ps`/`logs` shows "Exited", not a slow unhealthy churn),
+    so a misconfigured deploy fails as loudly and as early as possible.
+    Does not fire under this repo's TestClient(app).get(...) pattern (no
+    `with` block — Starlette only runs lifespan startup/shutdown for a
+    context-managed TestClient), so it cannot break existing tests; it only
+    ever runs for a real uvicorn-started process."""
+    if not _internal_token_is_configured():
+        raise RuntimeError(
+            f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
+            f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
+            f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
+        )
+    yield
+
+
+app = FastAPI(title="Riverbend gateway", version="1.4.0", lifespan=lifespan)
 
 SERVICES = {
     "intake": settings.intake_url,
@@ -60,23 +103,6 @@ def require_session(authorization: Optional[str] = Header(default=None)) -> dict
     if not sess:
         raise HTTPException(status_code=401, detail="not authenticated")
     return sess
-
-
-_MIN_INTERNAL_TOKEN_LENGTH = 32  # matches intake-service/records-service's own floor
-
-
-def _internal_token_is_configured() -> bool:
-    """Round-13 review (2026-08-06, PR #20): the gateway forwards
-    X-Internal-Token on every intake/records call (see proxy_intake and the
-    patient-view fan-out below) but never checked its own configured value
-    before this fix — an empty/placeholder INTERNAL_SERVICE_TOKEN meant the
-    gateway started and passed docker-compose's healthcheck while every
-    forwarded call was fail-closed 401'd downstream, a healthy-looking
-    outage of the whole intake/patient-view path. /healthz now applies the
-    same presence/length floor intake-service and records-service already
-    enforce on the receiving end."""
-    configured = settings.internal_service_token
-    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
 
 
 @app.get("/healthz")
