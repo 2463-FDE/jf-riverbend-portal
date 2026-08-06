@@ -305,7 +305,11 @@ def proxy_list_appointments(patient_id: int, session: dict = Depends(require_ses
 
 @app.post("/appointments")
 def proxy_book(payload: dict, session: dict = Depends(require_session)):
-    return _post("scheduling", "/appointments", payload)
+    # Stage 4 (Week 5, RIV-175): forward_status=True, same round-8 fix as
+    # proxy_intake — the default silently flattened scheduling-service's
+    # real 201 into a bare 200, which also would have masked a 422 (e.g. a
+    # missing idempotency_key) as a false-looking 200 with an error body.
+    return _post("scheduling", "/appointments", payload, forward_status=True)
 
 
 @app.post("/appointments/{appointment_id}/cancel")

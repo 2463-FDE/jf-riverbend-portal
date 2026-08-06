@@ -94,13 +94,19 @@ def list_appointments(
 def create_appointment(req: BookingRequest):
     """Book a slot for a patient.
 
-    Delegates to book.py, which performs a read-check-then-insert with no UNIQUE
-    constraint on slot_id and no idempotency key (intentional race — D5).
+    Stage 4 (Week 5, RIV-175, migration 013): book.py now does the
+    idempotency check and the insert in one transaction, guarded by a real
+    database UNIQUE index (at most one confirmed appointment per slot) — see
+    book.py's own docstring for the full design. This route just reports
+    what book() found: a fresh booking, a replay of the same idempotency_key
+    (still 201 with the original appointment_id — a retry of a slow POST
+    must not look like a failure to the caller), or a genuine slot_taken.
     """
     try:
-        appointment_id = book(
+        appointment_id, is_replay = book(
             req.patient_id,
             req.slot_id,
+            req.idempotency_key,
             provider=req.provider,
             reason=req.reason,
             location=req.location,
@@ -117,10 +123,11 @@ def create_appointment(req: BookingRequest):
         return BookingResponse(status="slot_taken")
 
     log.info(
-        "booked appointment %s (patient=%s slot=%s)",
+        "booked appointment %s (patient=%s slot=%s replay=%s)",
         appointment_id,
         req.patient_id,
         req.slot_id,
+        is_replay,
     )
     return BookingResponse(appointment_id=appointment_id, status="confirmed")
 

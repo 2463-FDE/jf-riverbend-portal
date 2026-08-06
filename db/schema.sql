@@ -102,16 +102,36 @@ CREATE TABLE IF NOT EXISTS slots (
 );
 
 CREATE TABLE IF NOT EXISTS appointments (
-    id            SERIAL PRIMARY KEY,
-    patient_id    INTEGER NOT NULL REFERENCES patients(id),
-    slot_id       INTEGER NOT NULL,            -- NOTE: no UNIQUE constraint, no FK
-    provider      TEXT,
-    reason        TEXT,
-    location      TEXT,
-    scheduled_for TIMESTAMPTZ,
-    status        TEXT NOT NULL DEFAULT 'confirmed',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    id                      SERIAL PRIMARY KEY,
+    patient_id              INTEGER NOT NULL REFERENCES patients(id),
+    slot_id                 INTEGER NOT NULL,   -- NOTE: no FK to slots(id) yet
+    provider                TEXT,
+    reason                  TEXT,
+    location                TEXT,
+    scheduled_for           TIMESTAMPTZ,
+    status                  TEXT NOT NULL DEFAULT 'confirmed',  -- confirmed | cancelled | cancelled_duplicate | completed
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    -- Stage 4 (Week 5, RIV-175, migration 013): idempotency_key lets a client
+    -- retry of a slow POST return the original booking instead of racing a
+    -- second insert; NULL for every pre-migration row. reconciled_duplicate_of
+    -- is set only on a 'cancelled_duplicate' row, pointing at the appointment
+    -- it lost the confirmed slot to during migration 013's one-time
+    -- reconciliation.
+    idempotency_key         TEXT,
+    reconciled_duplicate_of INTEGER REFERENCES appointments(id)
 );
+
+-- migration 013: at most one CONFIRMED appointment per slot — the actual fix
+-- for RIV-175's double-booking race. Partial (not a plain UNIQUE on slot_id)
+-- so a slot can be legitimately rebooked once its one confirmed appointment
+-- is cancelled.
+CREATE UNIQUE INDEX IF NOT EXISTS appointments_confirmed_slot_unique
+    ON appointments(slot_id) WHERE status = 'confirmed';
+
+-- migration 013: a client-supplied idempotency key is unique per patient, not
+-- globally — two different patients may coincidentally reuse the same key.
+CREATE UNIQUE INDEX IF NOT EXISTS appointments_idempotency_key_unique
+    ON appointments(patient_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Clinical records
@@ -214,7 +234,7 @@ CREATE TABLE IF NOT EXISTS rag_embeddings (
     model        TEXT NOT NULL DEFAULT '',  -- e.g. OLLAMA_EMBED_MODEL; '' for the fake provider
     dimension    INTEGER NOT NULL,
     content_hash TEXT NOT NULL,             -- sha256 of the embedded text; drives re-embed/re-write skip
-    embedding    VECTOR(16) NOT NULL,       -- fixed to FakeEmbeddingProvider's dimension; see migration 010
+    embedding    VECTOR(768) NOT NULL,      -- nomic-embed-text (Ollama) dimension; see migration 011
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (record_id, provider, model)

@@ -46,6 +46,14 @@ class AppointmentListResponse(BaseModel):
 class BookingRequest(BaseModel):
     patient_id: int = Field(..., gt=0)
     slot_id: int = Field(..., gt=0)
+    # Stage 4 (Week 5, RIV-175): required, not optional-with-a-server-default —
+    # an idempotency key that silently defaults to "no retry protection" is
+    # exactly the kind of gap that turned out to matter in this same PR's
+    # intake-consents fix. Scoped per patient (see migration 013's
+    # (patient_id, idempotency_key) unique index) — the client generates one
+    # UUID per booking attempt and resends the SAME value on any retry of the
+    # same click, never a fresh one.
+    idempotency_key: str = Field(..., min_length=1, max_length=200)
     provider: Optional[str] = Field(None, max_length=200)
     reason: Optional[str] = Field(None, max_length=2000)
     location: Optional[str] = Field(None, max_length=200)
