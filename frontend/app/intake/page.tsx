@@ -84,11 +84,35 @@ export default function IntakePage() {
   async function submit() {
     setBusy(true);
     setResult(null);
-    // Combined payload: demographics + insurance + consents.
+    // Map the wizard's UI state to the intake-service contract
+    // (services/intake-service/schemas.py):
+    //  * consents — the backend expects a list of signed-consent kinds
+    //    (list[str], persisted one row each), not the checkbox object. Send
+    //    only the boxes the patient actually checked. Sending the object was
+    //    a hard 422 ("Input should be a valid list"), so intake never
+    //    submitted end-to-end.
+    //  * insurance — the backend field is `payer_name`; the UI labels it
+    //    "carrier". Only send an insurance block when there is something to
+    //    send, so a patient with no coverage doesn't create an empty
+    //    coverage row / eligibility job. (policy_holder has no backend
+    //    column yet — dropped here; tracked as Stage 4 debt.)
+    const consentKinds: string[] = [];
+    if (consents.treatment) consentKinds.push("treatment_consent");
+    if (consents.privacy) consentKinds.push("npp_ack");
+    if (consents.financial) consentKinds.push("financial_agreement");
+    if (consents.communications) consentKinds.push("communications_consent");
+    const hasInsurance = Boolean(ins.carrier.trim() || ins.member_id.trim());
     const payload = {
       demographics: demo,
-      insurance: ins,
-      consents,
+      insurance: hasInsurance
+        ? {
+            payer_name: ins.carrier,
+            member_id: ins.member_id,
+            group_number: ins.group_number,
+            plan_type: ins.plan_type,
+          }
+        : null,
+      consents: consentKinds,
     };
     try {
       const res = await apiFetch("/api/intake", {
