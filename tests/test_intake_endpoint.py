@@ -53,6 +53,7 @@ class _FakeSession:
     def __init__(self, existing_patients=None):
         self.added = []
         self.commit_count = 0
+        self.rollback_count = 0
         self.lock_calls = []
         self._next_id = 1
         # Week 2-3 catch-up: rows _find_match_candidates should "find" via
@@ -84,7 +85,7 @@ class _FakeSession:
         pass
 
     def rollback(self):
-        pass
+        self.rollback_count += 1
 
     def execute(self, _stmt, _params=None):
         # Week 2-3 catch-up round-8 fix: create_intake also issues a
@@ -110,7 +111,8 @@ class _RaisingFakeSession(_FakeSession):
     call fails: "flush" (default) to test one of those helpers' own error
     handling in isolation, "commit" to test create_intake's single
     top-level commit that finalizes the whole patient+coverage+consent
-    group together.
+    group together, "execute" to test the round-8 advisory-lock/round-20
+    match-key-select phase (both go through db.execute()).
     """
 
     def __init__(self, message, raise_on="flush"):
@@ -127,6 +129,11 @@ class _RaisingFakeSession(_FakeSession):
         if self._raise_on == "commit":
             raise app_mod.SQLAlchemyError(self._message)
         super().commit()
+
+    def execute(self, _stmt, _params=None):
+        if self._raise_on == "execute":
+            raise app_mod.SQLAlchemyError(self._message)
+        return super().execute(_stmt, _params)
 
 
 class _ConsentFailingSession(_FakeSession):
@@ -776,3 +783,27 @@ def test_exact_match_lock_is_scoped_to_normalized_ssn_not_raw_input(monkeypatch)
     )
 
     assert db.lock_calls[0] == {"key": "412559981"}
+
+
+def test_db_failure_during_lock_or_match_select_returns_503_with_rollback(monkeypatch):
+    # Round-20 review (2026-08-06): _acquire_match_key_lock and
+    # _find_match_candidates both issue real statements via db.execute() —
+    # an advisory-lock acquisition, then a SELECT — but previously ran
+    # outside any SQLAlchemyError handler. A DB timeout or statement
+    # failure there used to surface as an unhandled 500 instead of this
+    # service's rollback-then-503 convention. Needs an ssn so
+    # _acquire_match_key_lock doesn't take its no-reliable-key early return
+    # (which never calls db.execute() at all).
+    _mock_eligibility_post(monkeypatch)
+    db = _RaisingFakeSession("simulated lock/select failure", raise_on="execute")
+
+    with pytest.raises(app_mod.HTTPException) as exc_info:
+        _create_intake(
+            _request(demographics={"name": "Jane Roe", "ssn": "111-22-3333", "dob": "1990-01-01"}),
+            db=db, x_request_id=None,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert db.rollback_count == 1
+    assert db.commit_count == 0
+    assert db.added == []

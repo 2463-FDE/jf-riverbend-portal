@@ -304,11 +304,23 @@ def create_intake(
         # serialize per-ssn with a transaction-scoped advisory lock, held
         # until the first commit below (patient create or link record) ends
         # this transaction and releases it.
-        _acquire_match_key_lock(db, req.demographics)
-
+        #
         # D5 (Week 2-3 catch-up, adr/0004/RIV-160): deterministic (dob, ssn)
         # match-key lookup before creating a patient — see module docstring.
-        exact_ids, partial_ids = _find_match_candidates(db, req.demographics)
+        #
+        # Round-20 review (2026-08-06): both calls issue real statements (an
+        # advisory-lock acquisition, a SELECT) but previously sat outside
+        # any SQLAlchemyError handler — a DB timeout or statement failure
+        # here surfaced as an unhandled 500 instead of this service's
+        # existing rollback-then-503 convention (_create_patient/
+        # _create_coverage/_record_consents). Wrapped the same way now.
+        try:
+            _acquire_match_key_lock(db, req.demographics)
+            exact_ids, partial_ids = _find_match_candidates(db, req.demographics)
+        except SQLAlchemyError as e:
+            db.rollback()
+            log.error("intake: failed to check for duplicate patients (error_type=%s)", type(e).__name__)
+            raise HTTPException(status_code=503, detail="patient store unavailable")
         span.set_attribute("exact_match_count", len(exact_ids))
         span.set_attribute("partial_match_count", len(partial_ids))
 
