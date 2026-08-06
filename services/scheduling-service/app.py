@@ -1,8 +1,11 @@
 """
 scheduling-service — appointment slots (FHIR Appointment / Slot shaped).
 
-Read endpoints use the SQLAlchemy ORM. Booking deliberately still goes through
-the legacy raw-psycopg2 path in book.py to preserve the check-then-insert race.
+Read endpoints use the SQLAlchemy ORM. Booking goes through the raw-psycopg2
+path in book.py, not the ORM — kept that way through the Stage 4 (RIV-175)
+fix because book()'s SAVEPOINT-based unique-violation handling needs direct
+control over statement-level error recovery within one transaction that the
+ORM's session/unit-of-work model doesn't offer as directly.
 """
 from typing import Optional
 
@@ -10,7 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from book import book
+from book import IdempotencyKeyConflict, book
 from config import settings
 from db import get_db
 from logging_config import configure
@@ -94,17 +97,37 @@ def list_appointments(
 def create_appointment(req: BookingRequest):
     """Book a slot for a patient.
 
-    Delegates to book.py, which performs a read-check-then-insert with no UNIQUE
-    constraint on slot_id and no idempotency key (intentional race — D5).
+    Stage 4 (Week 5, RIV-175, migration 013): book.py does the idempotency
+    check and the insert in one transaction, guarded by a real database
+    UNIQUE index (at most one confirmed appointment per slot) — see book.py's
+    own docstring for the full design. Only two outcomes get the 201 this
+    route is declared with: a fresh booking, or a genuine replay of the
+    SAME request via the same idempotency_key (a retry of a slow POST must
+    not look like a failure to the caller). Everything else the route can
+    detect is a real failure, not a variant of success — round-22 review
+    (2026-08-06): a losing concurrent booking used to get 201 with
+    status="slot_taken" in the body, and the frontend's `if (!r.ok)` check
+    never caught it, so a losing booker saw "appointment booked."
     """
     try:
-        appointment_id = book(
+        appointment_id, is_replay = book(
             req.patient_id,
             req.slot_id,
+            req.idempotency_key,
             provider=req.provider,
             reason=req.reason,
             location=req.location,
             scheduled_for=req.scheduled_for,
+        )
+    except IdempotencyKeyConflict as e:
+        log.warning(
+            "booking rejected: idempotency_key reused with different booking details "
+            "(patient=%s, existing_appointment_id=%s)",
+            req.patient_id, e.existing_appointment_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "idempotency_key_conflict", "existing_appointment_id": e.existing_appointment_id},
         )
     except Exception:
         log.exception(
@@ -114,13 +137,14 @@ def create_appointment(req: BookingRequest):
 
     if appointment_id is None:
         log.info("slot %s already taken (patient=%s)", req.slot_id, req.patient_id)
-        return BookingResponse(status="slot_taken")
+        raise HTTPException(status_code=409, detail={"error": "slot_taken"})
 
     log.info(
-        "booked appointment %s (patient=%s slot=%s)",
+        "booked appointment %s (patient=%s slot=%s replay=%s)",
         appointment_id,
         req.patient_id,
         req.slot_id,
+        is_replay,
     )
     return BookingResponse(appointment_id=appointment_id, status="confirmed")
 

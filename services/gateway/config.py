@@ -23,6 +23,13 @@ class Settings:
     interop_url = os.getenv("INTEROP_URL", "http://interop-service:8075")
     roi_url = os.getenv("ROI_URL", "http://roi-service:8076")
 
+    # Review fix (round, 2026-08-05): shared secret proving a /patients/{id}/view
+    # call actually came from this gateway, not a direct caller hitting
+    # records-service's published host port (docker-compose.yml) with a
+    # spoofed X-Actor-Id. Empty by default — records-service fails closed
+    # (denies everyone) until a real value is set in .env on both services.
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
     @property
     def db_url(self) -> str:
         return (

@@ -5,11 +5,17 @@ import Card from "../components/Card";
 import StatusBadge, { statusVariant } from "../components/StatusBadge";
 import { IconRecords, IconLab, IconSearch, IconStethoscope } from "../components/icons";
 import { apiFetch } from "../lib/session";
-import type { EncounterBlock, RecordItem } from "../lib/types";
+import type { EncounterBlock, PatientViewResult, RecordItem } from "../lib/types";
 import { fmtDate } from "../lib/format";
 
 function isResult(r: RecordItem): boolean {
   return Boolean(r.test || r.value !== undefined || r.reference_range);
+}
+
+function aiOutcomeBadgeClass(outcome: PatientViewResult["outcome"]): string {
+  if (outcome === "completed") return "rb-badge--ok";
+  if (outcome === "escalated") return "rb-badge--warn";
+  return "rb-badge--bad";
 }
 
 export default function RecordsPage() {
@@ -22,6 +28,35 @@ export default function RecordsPage() {
   const [selected, setSelected] = useState<EncounterBlock | null>(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Stage 3 — bounded, evidence-cited AI chart view (libs.patient_view_agent
+  // via GET /api/patients/[id]/view). Separate from the plain records load
+  // above: this is gated by an authenticated-staff access check, not a
+  // patient-specific one — see the route's own comments.
+  const [aiView, setAiView] = useState<PatientViewResult | null>(null);
+  const [aiStatus, setAiStatus] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+
+  async function loadAiView() {
+    setAiBusy(true);
+    setAiStatus("");
+    setAiView(null);
+    try {
+      const res = await apiFetch(`/api/patients/${encodeURIComponent(patientId)}/view`);
+      const json = await res.json();
+      if (!res.ok) {
+        const detail = json?.detail;
+        const reason = typeof detail === "string" ? detail : detail?.reason;
+        setAiStatus(reason ? `Could not load AI chart view: ${reason}` : "Could not load AI chart view.");
+        return;
+      }
+      setAiView(json as PatientViewResult);
+    } catch (e) {
+      setAiStatus(e instanceof Error ? e.message : "Could not load AI chart view.");
+    } finally {
+      setAiBusy(false);
+    }
+  }
 
   async function load() {
     setBusy(true);
@@ -76,6 +111,51 @@ export default function RecordsPage() {
           {status}
         </div>
       )}
+
+      <Card title="AI-Assisted Chart View" icon={<IconStethoscope />}>
+        <p className="rb-muted" style={{ marginTop: 0 }}>
+          A bounded, evidence-cited summary of the same patient ID above, produced by the
+          Stage&nbsp;3 patient-view assistant. This checks that you are logged in as staff — it
+          does not verify you are assigned to this specific patient.
+        </p>
+        <button className="rb-btn rb-btn--ghost" onClick={loadAiView} disabled={aiBusy} type="button">
+          {aiBusy ? "Loading…" : "Generate AI chart view"}
+        </button>
+
+        {aiStatus && (
+          <div className="rb-alert rb-alert--err" role="status" style={{ marginTop: 12 }}>
+            {aiStatus}
+          </div>
+        )}
+
+        {aiView && (
+          <div style={{ marginTop: 14 }}>
+            <span className={`rb-badge ${aiOutcomeBadgeClass(aiView.outcome)}`}>{aiView.outcome}</span>
+            <p style={{ marginTop: 10 }}>{aiView.summary}</p>
+            {aiView.evidence_ids.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                {aiView.evidence_ids.map((id) => (
+                  <span key={id} className="rb-badge rb-badge--neutral">
+                    {id}
+                  </span>
+                ))}
+              </div>
+            )}
+            {aiView.limitations.length > 0 && (
+              <ul className="rb-muted" style={{ marginTop: 0 }}>
+                {aiView.limitations.map((l) => (
+                  <li key={l}>{l}</li>
+                ))}
+              </ul>
+            )}
+            {aiView.escalation && (
+              <div className="rb-alert rb-alert--info" role="status">
+                This view requires human review before use.
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
 
       {data && data.length > 0 && (
         <div className="rb-grid rb-grid--2">

@@ -1,8 +1,12 @@
 """ORM models scheduling-service touches. (Copy-paste per service — no shared lib yet.)
 
-Columns mirror db/schema.sql exactly. NOTE: appointments.slot_id deliberately
-has no UNIQUE constraint and no FK in the schema — the double-booking race in
-book.py depends on that. Do not add a UniqueConstraint here.
+Columns mirror db/schema.sql exactly.
+
+Stage 4 (Week 5, RIV-175, migration 013): appointments.slot_id used to have
+no UNIQUE constraint at all, which was the double-booking race book.py's own
+docstring documented. That's now closed at the database level by a partial
+unique index (at most one 'confirmed' appointment per slot_id) plus a
+per-patient idempotency_key index — see migration 013 and book.py.
 """
 from sqlalchemy import Column, DateTime, Integer, Text
 from sqlalchemy.sql import func
@@ -35,13 +39,19 @@ class Appointment(Base):
 
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, nullable=False)
-    slot_id = Column(Integer, nullable=False)  # no UNIQUE, no FK — see book.py race
+    slot_id = Column(Integer, nullable=False)  # no FK to slots(id) yet
     provider = Column(Text)
     reason = Column(Text)
     location = Column(Text)
     scheduled_for = Column(DateTime(timezone=True))
-    status = Column(Text, nullable=False, default="confirmed")
+    status = Column(Text, nullable=False, default="confirmed")  # confirmed | cancelled | cancelled_duplicate | completed
     created_at = Column(DateTime(timezone=True), server_default=func.clock_timestamp())
+    # Migration 013 (RIV-175): NULL on every pre-migration row.
+    idempotency_key = Column(Text)
+    # Set only on a 'cancelled_duplicate' row — points at the appointment it
+    # lost the confirmed slot to (migration 013's reconciliation, or book.py's
+    # own unique-violation handling going forward).
+    reconciled_duplicate_of = Column(Integer)
 
 
 class Patient(Base):

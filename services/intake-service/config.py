@@ -28,6 +28,15 @@ class Settings:
     payer_api_url = os.getenv("PAYER_API_URL", "https://edi.example.com/v1/eligibility")
     payer_api_key = os.getenv("PAYER_API_KEY", "")
 
+    # Review fix (round 11, 2026-08-05): the gateway already gates /intake with
+    # a real staff session (require_session), but intake-service itself has no
+    # auth of its own and is directly reachable on its published host port
+    # (docker-compose.yml) — bypassing that session check entirely. Same
+    # shared secret already used to gate records-service's patient-view route
+    # (services/records-service/config.py); empty by default so the route
+    # fails closed (denies everyone) until a real value is set in .env.
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
     @property
     def db_url(self) -> str:
         return (

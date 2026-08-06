@@ -56,3 +56,20 @@ class Record(Base):
     status = Column(Text)
     reference_range = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class AuditLog(Base):
+    """Mutable, soft-delete request-dump logging (db/schema.sql) — NOT a
+    tamper-evident access trail. Stage 3's `/patients/{id}/view` route is the
+    first writer of this table in the codebase (see docs/handover/
+    auditor-questionnaire.md and roi-service/app.py's comment on the same
+    gap); a real append-only per-patient disclosure-accounting store remains
+    unbuilt, documented future work."""
+
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    actor = Column(Text)
+    message = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    deleted_at = Column(TIMESTAMP(timezone=True))

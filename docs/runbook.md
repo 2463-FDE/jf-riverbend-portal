@@ -3,6 +3,31 @@
 Practical "how do I run / fix this" notes for whoever is on call. Stack is Docker
 Compose; one stack per clinic region.
 
+## Required one-time setup: INTERNAL_SERVICE_TOKEN
+
+Round-17 review (2026-08-06, PR #20): `gateway`, `intake-service`, and
+`records-service` all now refuse to start (see each service's `lifespan`
+handler in `app.py`) unless `INTERNAL_SERVICE_TOKEN` in `.env` is set to a
+real random value at least 32 characters long — this is the shared secret
+that proves an intake/patient-view call actually came through the gateway,
+not a direct caller hitting a service's published host port. `.env.example`
+ships this **empty on purpose** (a placeholder like `changeme` would be a
+public, guessable secret every deployment shipped unmodified), so `.env`
+needs it set explicitly before the first `make up`:
+
+```bash
+# generates a 64-char hex value; set the SAME value on all three services —
+# they already share one .env, so setting it once here is enough
+openssl rand -hex 32
+```
+
+Put that value in `.env`'s `INTERNAL_SERVICE_TOKEN=` line (see the detailed
+comment above that line in `.env.example` for the full history). Without
+it, the three services now fail fast at container startup with a clear
+`RuntimeError` in `docker compose logs` (rather than starting and sitting
+"unhealthy" until the healthcheck's retry budget runs out) — that log line
+is the signal to come back here.
+
 ## Start / stop
 
 ```bash
@@ -32,6 +57,81 @@ To regenerate the seed file (deterministic):
 ```bash
 python3 db/seed/generate_seed.py > db/seed/seed.sql
 ```
+
+## Deploying a new release / rollback (Week 1 catch-up)
+
+There is still no CI/CD pipeline that deploys to a clinic VM (see
+`ARCHITECTURE.md` §1) — this section covers what to do manually once new code
+reaches a VM, however that happens.
+
+**Before restarting any service after a `git pull`:** apply any new database
+migrations against the running Postgres *first*.
+
+```bash
+db/migrations/apply.sh
+```
+
+This runs every file in `db/migrations/` in order against the running
+`postgres` compose service. It is safe to run on **any** existing database —
+whether freshly seeded, stopped at an old migration, or already fully
+migrated — because every migration in this directory uses `IF NOT EXISTS` /
+guarded DDL: re-applying an already-applied migration is a no-op (you'll see
+`NOTICE: ... already exists, skipping`), not an error. Run it after every
+deploy, even if you're not sure whether the target migration already ran.
+
+Skipping this step before restarting a service whose code expects a new
+column (e.g. `patients.first_name`/`last_name`/`city`/`state`/`zip_code`,
+added in migration 011) will make every request touching that column fail —
+`intake-service` returns `503` from `_create_patient`'s
+`except SQLAlchemyError` handler in that case. This was flagged in PR #19's
+review and is exactly what `apply.sh` prevents.
+
+**Rollback:** revert the code (`git revert`/redeploy the previous image).
+Every migration in this repo so far only *adds* nullable columns, tables, or
+indexes — nothing drops or renames existing columns — so rolling back the
+application code is safe without rolling back the schema; the old code
+simply ignores the newer columns it doesn't know about. If a future
+migration ever needs to drop/rename something, write its own rollback note
+here before merging it, and prefer an additive-then-backfill-then-drop
+sequence over a single destructive migration.
+
+**Exception — migration 009 touches data, not just schema** (PR #20 review):
+adding the `insurance_coverages.status` CHECK constraint requires every
+existing row to already satisfy it. If a real deployment has a row with a
+status value outside `active | inactive | unknown | pending | stale`
+(a manual repair, an old bug), 009 remaps it to `'unknown'` — but first
+copies the original value into the new `status_legacy` column and raises a
+Postgres `NOTICE` naming how many rows were affected, so the remap is
+visible in deploy output and the original value stays recoverable. Check
+`docker compose logs postgres` (or your deploy tool's captured output) after
+running `apply.sh` for any `insurance_coverages_status_check: remapping ...`
+notice, and review `SELECT * FROM insurance_coverages WHERE status_legacy IS
+NOT NULL;` afterward — a non-null `status_legacy` means that row's status was
+changed and should be checked by a human before trusting the new
+`'unknown'` value operationally.
+
+**Before applying migration 013 — check for duplicate-confirmed
+appointments first (Stage 4, RIV-175):** migration 013 adds a UNIQUE index
+guaranteeing at most one `'confirmed'` appointment per slot (the fix for
+"charged twice"/two confirmations for one appointment). Its own preflight
+check will **refuse to run** — `apply.sh`'s `set -e` then stops the whole
+deploy — if any slot still has more than one confirmed appointment. This is
+deliberate: an earlier version of this migration auto-cancelled the losing
+row(s) based only on `created_at`/`id`, and a PR #20 review correctly
+flagged that as too consequential to do silently — cancelling a real
+confirmed appointment is a patient-facing state change that deserves human
+review, not a migration-time heuristic.
+
+If `apply.sh` stops with an `appointments_confirmed_slot_unique: N slot(s)
+still have more than one confirmed appointment` error: run
+`db/migrations/scripts/reconcile_duplicate_confirmed_appointments.sql` —
+**read its header first** and review the flagged appointments with clinical
+ops/billing before running its `UPDATE` (it reclassifies every
+non-earliest confirmed row per duplicated slot to `'cancelled_duplicate'`,
+stamped with `reconciled_duplicate_of` — nothing is deleted, but whoever
+was counting on the cancelled appointment needs to be told). Re-run
+`apply.sh` afterward; migration 013's preflight will pass once no slot has
+more than one confirmed appointment left.
 
 ## Demo accounts
 
@@ -181,9 +281,37 @@ next team.
 
 ## Logs & PHI warning
 
-`logs/intake-service.log` currently contains full request bodies **including
-PHI** (name/DOB/SSN). Treat the logs directory as sensitive; do not copy it off
-the host. Removing PHI from logs is an open remediation item.
+`logs/intake-service.log` records one line per `/intake` request:
+`POST /intake summary=<json>`. That JSON is built by
+`_intake_log_summary` (`services/intake-service/app.py`) from an
+**allowlist**, not a redacted copy of the request — it contains exactly two
+keys, `correlation_id` and `created_via`, and nothing else, regardless of
+what fields exist on the request schema today or are added later. An
+earlier version of this fix ran the whole request body through
+`libs/safe_logging.redact()` (a blocklist), but that missed several fields
+across three separate review rounds before the allowlist replaced it
+entirely — see `services/intake-service/app.py`'s `_intake_log_summary`
+docstring for the full history. `redact()` itself is unaffected and remains
+available as a general-purpose backstop for other code that logs structured
+data; it just isn't what powers this particular log line anymore.
+
+Insert **failures** on the patient/coverage/consent paths (`_create_patient`,
+`_create_coverage`, `_record_consents`) log only the exception's type name
+(e.g. `error_type=IntegrityError`), never `str(exc)` — a real SQLAlchemy
+error's string form embeds the failed statement's bound parameters
+(name/dob/ssn/address/... for patients, member_id/group_number for
+coverage) unless avoided. The intake-service database engine is also
+configured with `hide_parameters=True` (`services/intake-service/db.py`) as
+a second, engine-level layer of defense against any other call site that
+logs a SQLAlchemy exception directly.
+
+**None of this retroactively scrubs log entries written before these
+fixes** — any `logs/*.log` file that predates them may still contain
+plaintext PHI, including from the request-body and blocklist-redaction
+versions of this line that existed briefly during development. Treat the
+logs directory as sensitive regardless; do not copy it off the host. No
+other service's logging has been audited/fixed by this work — only
+`intake-service`'s `/intake` path (happy path and error paths).
 
 ## CI
 

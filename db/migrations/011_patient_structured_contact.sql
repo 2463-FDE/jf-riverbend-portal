@@ -19,8 +19,8 @@
 -- reliable way to split a free-text legacy `name`/`address` back into these
 -- structured parts, so no backfill is attempted here.
 
-ALTER TABLE patients ADD COLUMN first_name TEXT;
-ALTER TABLE patients ADD COLUMN last_name  TEXT;
-ALTER TABLE patients ADD COLUMN city       TEXT;
-ALTER TABLE patients ADD COLUMN state      TEXT;
-ALTER TABLE patients ADD COLUMN zip_code   TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS last_name  TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS city       TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS state      TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS zip_code   TEXT;

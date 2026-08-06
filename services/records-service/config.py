@@ -14,6 +14,14 @@ class Settings:
     db_user = os.getenv("DB_USER", "riverbend_app")
     db_password = os.getenv("DB_PASSWORD", "")
 
+    # Review fix (round, 2026-08-05): GET /patients/{id}/view must verify this
+    # request actually came from the gateway, not a caller hitting this
+    # service's published host port (docker-compose.yml) directly with a
+    # spoofed X-Actor-Id. Empty by default so the route fails closed (denies
+    # everyone) until a real shared value is set in .env on both services —
+    # an unset/mismatched token must never be treated as "no check configured".
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
     @property
     def db_url(self) -> str:
         return (

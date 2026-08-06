@@ -272,24 +272,59 @@ emit(f"SELECT setval('records_id_seq', {rec_id-1}, true);")
 emit()
 
 # ---------------------------------------------------------------------------
-# appointments — fixtures (double-booked slot 88231) then generated
+# appointments — fixtures (RIV-175 double-booking, reconciled) then generated
 # ---------------------------------------------------------------------------
-emit("INSERT INTO appointments (patient_id, slot_id, provider, reason, location, scheduled_for, status, created_at) VALUES")
+# Stage 4 (Week 5, RIV-175, migration 013) added a partial UNIQUE index (at
+# most one 'confirmed' appointment per slot_id) plus idempotency_key /
+# reconciled_duplicate_of columns. A fresh volume loads db/schema.sql (which
+# now includes that index) BEFORE this file, so seed data itself must never
+# have two 'confirmed' rows for the same slot_id or the INSERT below fails
+# outright. Two things follow from that:
+#   1. The hand-authored slot-88231 fixture now reflects the
+#      POST-reconciliation state migration 013 actually produces on real
+#      dirty data (see the migration's own comment) — one confirmed row,
+#      one reclassified to cancelled_duplicate pointing back at it — rather
+#      than the two-confirmed-rows race it used to depict. It still exists
+#      specifically to demonstrate that race happened; it just can no
+#      longer be *stored* mid-race. idempotency_key is NULL on both: this
+#      fixture predates idempotency keys entirely, which is exactly why the
+#      race wasn't caught before now.
+#   2. The generator must not hand out a slot_id already used by a
+#      'confirmed' row to a second 'confirmed' row — confirmed_slots_used
+#      tracks every slot already spent this way (seeded with the fixture's
+#      own slots) and only picks from what's left.
+emit("INSERT INTO appointments (patient_id, slot_id, provider, reason, location, scheduled_for, status, created_at, idempotency_key, reconciled_duplicate_of) VALUES")
 arows = [
-    " (1042, 88231, 'Dr. Patel', 'Follow-up', 'Riverbend Main', '2026-06-26 08:00:00', 'confirmed', '2026-06-22 09:31:04.120')",
-    " (1588, 88231, 'Dr. Patel', 'Follow-up', 'Riverbend Main', '2026-06-26 08:00:00', 'confirmed', '2026-06-22 09:31:04.519')",
-    " (1043, 88240, 'Dr. Nguyen', 'Hearing follow-up', 'Riverbend Main', '2026-06-27 09:00:00', 'confirmed', '2026-06-22 10:05:00.000')",
+    " (1042, 88231, 'Dr. Patel', 'Follow-up', 'Riverbend Main', '2026-06-26 08:00:00', 'confirmed', '2026-06-22 09:31:04.120', NULL, NULL)",
+    " (1588, 88231, 'Dr. Patel', 'Follow-up', 'Riverbend Main', '2026-06-26 08:00:00', 'cancelled_duplicate', '2026-06-22 09:31:04.519', NULL, 1)",
+    " (1043, 88240, 'Dr. Nguyen', 'Hearing follow-up', 'Riverbend Main', '2026-06-27 09:00:00', 'confirmed', '2026-06-22 10:05:00.000', NULL, NULL)",
 ]
+confirmed_slots_used = {88231, 88240}
 for pid_ in all_patient_ids:
     for _ in range(random.choices([0,1,2],[2,3,1])[0]):
         prov = random.choice(PROVIDERS)
-        s_id = random.randint(88200, slot_id-1)
         reason = random.choice(REASONS)
         days_fwd = random.randint(1, 30)
         sched = (datetime(2026,6,24) + timedelta(days=days_fwd, hours=random.randint(0,8))).strftime("%Y-%m-%d %H:%M:%S")
-        status = random.choice(["confirmed","confirmed","confirmed","cancelled","completed"])
         created = (datetime(2026,6,1) + timedelta(days=random.randint(0,20))).strftime("%Y-%m-%d %H:%M:%S")
-        arows.append(f" ({pid_}, {s_id}, {sql_str(prov[1])}, {sql_str(reason)}, {sql_str(prov[3])}, {sql_str(sched)}, {sql_str(status)}, {sql_str(created)})")
+        status = random.choice(["confirmed","confirmed","confirmed","cancelled","completed"])
+        if status == "confirmed":
+            available = [s for s in range(88200, slot_id) if s not in confirmed_slots_used]
+            if available:
+                s_id = random.choice(available)
+                confirmed_slots_used.add(s_id)
+            else:
+                # Demand for "confirmed" this loop can exceed the 120-slot
+                # pool (many more patients than slots) — once every slot
+                # already has a confirmed appointment, this visit couldn't
+                # actually have been confirmed either; reflect that as
+                # 'completed' (it happened) rather than silently colliding
+                # with an already-confirmed slot.
+                status = "completed"
+                s_id = random.randint(88200, slot_id - 1)
+        else:
+            s_id = random.randint(88200, slot_id-1)
+        arows.append(f" ({pid_}, {s_id}, {sql_str(prov[1])}, {sql_str(reason)}, {sql_str(prov[3])}, {sql_str(sched)}, {sql_str(status)}, {sql_str(created)}, NULL, NULL)")
 emit(",\n".join(arows) + ";")
 emit()
 

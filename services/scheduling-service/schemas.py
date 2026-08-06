@@ -46,6 +46,14 @@ class AppointmentListResponse(BaseModel):
 class BookingRequest(BaseModel):
     patient_id: int = Field(..., gt=0)
     slot_id: int = Field(..., gt=0)
+    # Stage 4 (Week 5, RIV-175): required, not optional-with-a-server-default —
+    # an idempotency key that silently defaults to "no retry protection" is
+    # exactly the kind of gap that turned out to matter in this same PR's
+    # intake-consents fix. Scoped per patient (see migration 013's
+    # (patient_id, idempotency_key) unique index) — the client generates one
+    # UUID per booking attempt and resends the SAME value on any retry of the
+    # same click, never a fresh one.
+    idempotency_key: str = Field(..., min_length=1, max_length=200)
     provider: Optional[str] = Field(None, max_length=200)
     reason: Optional[str] = Field(None, max_length=2000)
     location: Optional[str] = Field(None, max_length=200)
@@ -53,8 +61,14 @@ class BookingRequest(BaseModel):
 
 
 class BookingResponse(BaseModel):
+    # Round-22 review (2026-08-06): this used to also carry status="slot_taken"
+    # with a 201 — a losing concurrent booking looked identical to a success
+    # to any caller that only checked the HTTP status. slot_taken and an
+    # idempotency_key conflict are now both HTTPException(409) instead
+    # (see app.py::create_appointment); "confirmed" is the only status this
+    # model is ever actually returned with.
     appointment_id: Optional[int] = None
-    status: str  # confirmed | slot_taken
+    status: str  # confirmed
 
 
 class CancelResponse(BaseModel):

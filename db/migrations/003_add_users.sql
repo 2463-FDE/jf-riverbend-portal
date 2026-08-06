@@ -3,7 +3,7 @@
 -- Replaces the hard-coded demo login with a users table. One role for everyone
 -- for now (see config/roles.yaml); least-privilege deferred to "phase 2".
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,

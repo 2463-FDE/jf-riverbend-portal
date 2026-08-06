@@ -11,12 +11,20 @@ composer -> final validator sequence with no peer delegation. Nothing here is
 a model responsibility except optionally phrasing already-validated evidence
 in `composer.py`.
 
-This boundary is DEFENSE IN DEPTH for the new prototype code path only. It does
-not touch, and does not remediate, the RIV-201 IDOR in
-services/gateway/app.py or services/records-service/app.py, and the Stage 3
-supervisor adds no production HTTP route.
+This boundary is DEFENSE IN DEPTH. It does not touch, and does not remediate,
+the RIV-201 IDOR in services/gateway/app.py or services/records-service/app.py
+(`proxy_records`/`proxy_patient`/`get_patient_records`/`get_patient` remain
+exactly as exploitable as documented). A later stage does wire this
+supervisor into one new, additive production route
+(`GET /patients/{id}/view`, gateway -> records-service), gated by
+`StaffAccessGate` — a real, fail-closed but explicitly NOT patient-specific
+authorization check (see `staff_access_gate.py`) — with a real database
+repository (`services/records-service/patient_view_repository.py`) in place
+of `SeededChartRepository`. That route is additive; the legacy IDOR-exposed
+endpoints above are untouched by it.
 """
 from .authorization import AuthorizationDenied, AuthorizationPort, FakePolicyAuthorization
+from .staff_access_gate import StaffAccessGate
 from .contracts import (
     Action,
     AuthorizationRequest,
@@ -72,6 +80,7 @@ __all__ = [
     "AuthorizationPort",
     "FakePolicyAuthorization",
     "AuthorizationDenied",
+    "StaffAccessGate",
     # repository
     "ChartRepositoryPort",
     "SeededChartRepository",

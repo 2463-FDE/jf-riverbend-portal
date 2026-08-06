@@ -4,14 +4,14 @@
 -- NOTE: appointments.slot_id still has no UNIQUE constraint and no FK to slots
 -- — the booking path is check-then-insert (RIV-175 double-booking).
 
-CREATE TABLE providers (
+CREATE TABLE IF NOT EXISTS providers (
     id        SERIAL PRIMARY KEY,
     name      TEXT NOT NULL,
     specialty TEXT,
     location  TEXT
 );
 
-CREATE TABLE slots (
+CREATE TABLE IF NOT EXISTS slots (
     id          SERIAL PRIMARY KEY,
     provider_id INTEGER REFERENCES providers(id),
     location    TEXT,
@@ -20,7 +20,7 @@ CREATE TABLE slots (
     status      TEXT NOT NULL DEFAULT 'open'
 );
 
-ALTER TABLE appointments ADD COLUMN provider      TEXT;
-ALTER TABLE appointments ADD COLUMN reason        TEXT;
-ALTER TABLE appointments ADD COLUMN location      TEXT;
-ALTER TABLE appointments ADD COLUMN scheduled_for TIMESTAMPTZ;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS provider      TEXT;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reason        TEXT;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS location      TEXT;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ;

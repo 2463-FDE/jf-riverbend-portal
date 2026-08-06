@@ -11,6 +11,7 @@ Inherited shortcomings (left as-is from the handoff):
   * One role for everyone; no per-action authorization beyond "is logged in".
 """
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
@@ -28,7 +29,49 @@ from models import User
 from security import create_session, destroy_session, get_session, verify_password
 
 log = configure(settings.service_name)
-app = FastAPI(title="Riverbend gateway", version="1.4.0")
+
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # matches intake-service/records-service's own floor
+
+
+def _internal_token_is_configured() -> bool:
+    """Round-13 review (2026-08-06, PR #20): the gateway forwards
+    X-Internal-Token on every intake/records call (see proxy_intake and the
+    patient-view fan-out below) but never checked its own configured value
+    before this fix — an empty/placeholder INTERNAL_SERVICE_TOKEN meant the
+    gateway started and passed docker-compose's healthcheck while every
+    forwarded call was fail-closed 401'd downstream, a healthy-looking
+    outage of the whole intake/patient-view path. /healthz now applies the
+    same presence/length floor intake-service and records-service already
+    enforce on the receiving end."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Round-17 review (2026-08-06): the round-13 healthz check above only
+    surfaces a missing/placeholder INTERNAL_SERVICE_TOKEN once something
+    polls /healthz — a container starts, sits "unhealthy" until the
+    healthcheck's retry budget expires, and the actual cause is buried
+    behind a generic health-check failure with no message in
+    `docker compose ps`. This fails at process startup instead: uvicorn logs
+    the exact RuntimeError below and exits non-zero immediately (verified:
+    `docker compose ps`/`logs` shows "Exited", not a slow unhealthy churn),
+    so a misconfigured deploy fails as loudly and as early as possible.
+    Does not fire under this repo's TestClient(app).get(...) pattern (no
+    `with` block — Starlette only runs lifespan startup/shutdown for a
+    context-managed TestClient), so it cannot break existing tests; it only
+    ever runs for a real uvicorn-started process."""
+    if not _internal_token_is_configured():
+        raise RuntimeError(
+            f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
+            f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
+            f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
+        )
+    yield
+
+
+app = FastAPI(title="Riverbend gateway", version="1.4.0", lifespan=lifespan)
 
 SERVICES = {
     "intake": settings.intake_url,
@@ -64,6 +107,8 @@ def require_session(authorization: Optional[str] = Header(default=None)) -> dict
 
 @app.get("/healthz")
 def healthz():
+    if not _internal_token_is_configured():
+        raise HTTPException(status_code=503, detail="internal_service_token not configured")
     return {"status": "ok", "service": settings.service_name}
 
 
@@ -109,7 +154,21 @@ def me(session: dict = Depends(require_session)):
 # --------------------------------------------------------------------------- #
 @app.post("/intake")
 def proxy_intake(payload: dict, session: dict = Depends(require_session)):
-    return _post("intake", "/intake", payload)
+    # PR #20 round-8 review: forward_status=True — the old default silently
+    # flattened intake-service's 409 duplicate-patient response into a bare
+    # 200, so the frontend read it as a successful submission with no
+    # patient/coverage/consent rows actually created.
+    #
+    # Round-11 review: X-Internal-Token proves this call came through the
+    # gateway (require_session above already gated it on a real staff
+    # session) rather than a direct caller hitting intake-service's
+    # published host port, which had no way to tell the two apart and let
+    # an unauthenticated caller probe the duplicate-detection response as a
+    # patient/SSN-existence oracle. Same shared secret as proxy_patient_view.
+    return _post(
+        "intake", "/intake", payload, headers={"X-Internal-Token": settings.internal_service_token},
+        forward_status=True,
+    )
 
 
 @app.get("/eligibility")
@@ -186,6 +245,48 @@ def proxy_search(q: str, session: dict = Depends(require_session)):
 
 
 # --------------------------------------------------------------------------- #
+# Stage 3: bounded, evidence-cited patient-view agent (libs/patient_view_agent)
+#
+# `X-Actor-Id` carries the session's username to records-service, which uses
+# it as `StaffAccessGate`'s deny-by-default check: an authenticated-staff
+# access gate, NOT patient-specific authorization. It is DIFFERENT from the
+# IDOR posture of proxy_records/proxy_patient above: an unauthenticated
+# caller (no session at all) is still rejected here by require_session (401),
+# same as everywhere else on this gateway, and now the access itself is
+# recorded in a real audit_logs row (see records-service/app.py). What it
+# does NOT do is check that this specific actor may see this specific
+# patient_id — that ownership/care-team fact does not exist anywhere in this
+# schema (users has no relationship to patients — see
+# docs/analysis/RIV-201-patient-records-IDOR.md §6). This route is additive;
+# it does not fix RIV-201 and proxy_records/proxy_patient remain exactly as
+# exploitable as documented above.
+#
+# Review fix (round, 2026-08-05): `X-Actor-Id` by itself is only trustworthy
+# if the request is guaranteed to have come from this gateway — but
+# records-service's port is published to the host (docker-compose.yml), so a
+# direct caller could spoof it. `X-Internal-Token` is a shared secret
+# (INTERNAL_SERVICE_TOKEN) records-service verifies before honoring
+# X-Actor-Id at all; records-service fails closed if it's unset.
+# --------------------------------------------------------------------------- #
+@app.get("/patients/{patient_id}/view")
+def proxy_patient_view(
+    patient_id: int,
+    purpose: Optional[str] = None,
+    session: dict = Depends(require_session),
+):
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records",
+        f"/patients/{patient_id}/view",
+        params={"purpose": purpose} if purpose else None,
+        headers=headers,
+        forward_status=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # scheduling
 # --------------------------------------------------------------------------- #
 @app.get("/slots")
@@ -204,7 +305,11 @@ def proxy_list_appointments(patient_id: int, session: dict = Depends(require_ses
 
 @app.post("/appointments")
 def proxy_book(payload: dict, session: dict = Depends(require_session)):
-    return _post("scheduling", "/appointments", payload)
+    # Stage 4 (Week 5, RIV-175): forward_status=True, same round-8 fix as
+    # proxy_intake — the default silently flattened scheduling-service's
+    # real 201 into a bare 200, which also would have masked a 422 (e.g. a
+    # missing idempotency_key) as a false-looking 200 with an error body.
+    return _post("scheduling", "/appointments", payload, forward_status=True)
 
 
 @app.post("/appointments/{appointment_id}/cancel")

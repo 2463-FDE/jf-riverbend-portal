@@ -34,6 +34,13 @@ services:
     build: ./services/gateway
     env_file: .env
     environment:
+      # Round-17 review (2026-08-06): fails `docker compose config`/`up`
+      # immediately with this message if unset, rather than starting a
+      # container that then fails at its own startup (services/gateway/
+      # app.py's lifespan check) or, before round-17, sat "unhealthy" until
+      # the healthcheck's retry budget ran out. See docs/runbook.md's
+      # "Required one-time setup" section.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
       INTAKE_URL: http://intake-service:8071
       ELIGIBILITY_URL: http://eligibility-service:8072
       RECORDS_URL: http://records-service:8073
@@ -71,6 +78,8 @@ services:
       dockerfile: services/intake-service/Dockerfile
     env_file: .env
     environment:
+      # Round-17 review (2026-08-06): see gateway's identical entry above.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
       ELIGIBILITY_URL: http://eligibility-service:8072
     ports:
       - "8071:8071"
@@ -105,8 +114,17 @@ services:
       retries: 5
 
   records-service:
-    build: ./services/records-service
+    # Stage 3: build context is the repo root (not ./services/records-service)
+    # so the Dockerfile can COPY libs/ (libs.patient_view_agent,
+    # libs.safe_logging) in alongside this service's own files — see
+    # services/records-service/Dockerfile.
+    build:
+      context: .
+      dockerfile: services/records-service/Dockerfile
     env_file: .env
+    environment:
+      # Round-17 review (2026-08-06): see gateway's identical entry above.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
     ports:
       - "8073:8073"
     depends_on:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Card from "../components/Card";
 import StatusBadge from "../components/StatusBadge";
 import {
@@ -24,6 +24,23 @@ export default function AppointmentsPage() {
   const [busySlot, setBusySlot] = useState<number | null>(null);
   const [busyCancel, setBusyCancel] = useState<number | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  // Stage 4 (Week 5, RIV-175): one idempotency key per slot per booking
+  // attempt, not a fresh one on every call. If the same slot's "Book" button
+  // gets clicked again before we know the first attempt's outcome (a slow
+  // request, a client timeout, an accidental double-click), this reuses the
+  // SAME key so the backend's replay handling (book.py) returns the original
+  // confirmation instead of racing a second booking for the same slot. A
+  // fresh key is generated only the first time a given slot is booked.
+  const idempotencyKeysRef = useRef<Map<number, string>>(new Map());
+
+  function idempotencyKeyFor(slotId: number): string {
+    const existing = idempotencyKeysRef.current.get(slotId);
+    if (existing) return existing;
+    const key = crypto.randomUUID();
+    idempotencyKeysRef.current.set(slotId, key);
+    return key;
+  }
 
   const loadAppts = useCallback(async () => {
     setAppts(null);
@@ -62,11 +79,13 @@ export default function AppointmentsPage() {
         body: JSON.stringify({
           patient_id: Number(patientId) || patientId,
           slot_id: slot.id,
+          idempotency_key: idempotencyKeyFor(slot.id),
           provider: slot.provider,
           reason: reason || "Office visit",
         }),
       });
       if (!r.ok) throw new Error();
+      idempotencyKeysRef.current.delete(slot.id);
       setMsg({ kind: "ok", text: `Appointment booked with ${slot.provider}.` });
       setReason("");
       await Promise.all([loadAppts(), loadSlots()]);
