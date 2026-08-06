@@ -51,8 +51,19 @@ app = FastAPI(title="Riverbend records-service")
 _STAFF_ACCESS_GATE = StaffAccessGate()
 
 
+def _internal_token_is_configured() -> bool:
+    """Round-13 review (2026-08-06, PR #20): the same presence/length floor
+    _verify_internal_token enforces on every request, checked once here so
+    /healthz can fail before a misconfigured deploy ever serves a real
+    request — see gateway's and intake-service's identical fix."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
 @app.get("/healthz")
 def healthz():
+    if not _internal_token_is_configured():
+        raise HTTPException(status_code=503, detail="internal_service_token not configured")
     return {"status": "ok", "service": settings.service_name}
 
 

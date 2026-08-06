@@ -100,14 +100,42 @@ Inherited shortcomings (left as-is from the handoff):
         true public/unauthenticated self-service registration (this
         module's opening paragraph's "self-service portal" line) is a
         separate, undecided product question — not resolved by this fix.
-  * Consents are inserted one at a time (a commit per consent). PR #20
-    round-12 review: a failed consent insert used to be swallowed (rollback
-    + log, no raise), so /intake could return 201 with a real patient_id
-    even though a required consent (npp_ack, treatment_consent) never
-    persisted — an irreversible partial registration reported as success.
-    _record_consents now raises HTTPException(503) on any consent write
-    failure, matching _create_patient/_create_coverage's existing
-    convention — see _record_consents.
+  * Consents are inserted one at a time (a flush per consent, no commit
+    until the end — see round-13 below). PR #20 round-12 review: a failed
+    consent insert used to be swallowed (rollback + log, no raise), so
+    /intake could return 201 with a real patient_id even though a required
+    consent (npp_ack, treatment_consent) never persisted — an irreversible
+    partial registration reported as success. _record_consents now raises
+    HTTPException(503) on any consent write failure, matching
+    _create_patient/_create_coverage's existing convention — see
+    _record_consents.
+  * Round-13 review (2026-08-06): round-12's fix made the 503 honest, but
+    the patient and coverage rows were each already committed
+    independently (_create_patient/_create_coverage each did their own
+    db.commit()) before _record_consents ever ran, and every consent
+    committed separately too. A consent failure therefore still stranded a
+    real, committed patient (and coverage) row with no consent attached —
+    and a retry with the same ssn+dob now trips the round-8/round-10
+    exact-match 409, so staff could not complete the registration without
+    someone editing the database by hand. _create_patient,
+    _create_patient_with_links, _create_coverage, and _record_consents now
+    only flush (never commit) — create_intake commits the whole
+    patient+coverage+consents group exactly once, after every step
+    succeeds. Any failure at any step rolls back everything flushed so far
+    in the same transaction, so a failed intake never leaves a partial
+    patient behind for a retry to collide with.
+  * Round-13 review, second finding (2026-08-06): INTERNAL_SERVICE_TOKEN
+    (see _verify_internal_token) defaults to an empty string and was only
+    ever checked per-request — a container starts and passes
+    docker-compose's healthcheck (which just hits /healthz) even with the
+    token unset, so a misconfigured deploy looks healthy while every
+    gateway-forwarded /intake call 401s. /healthz now fails the same
+    presence/length check _verify_internal_token uses on every real
+    request, so a missing/placeholder token surfaces as a failing
+    healthcheck (and `docker compose ps` showing "unhealthy") instead of a
+    silent, healthy-looking outage. Same fix applied to gateway's and
+    records-service's /healthz for the same reason — see each service's
+    app.py.
 
 Stage 3 (RIV-088 / RIV-141 fix): eligibility used to be verified INLINE on
 this request thread with no timeout — a slow or down payer blocked /intake
@@ -195,8 +223,19 @@ def _safe_correlation_id(x_request_id: Optional[str]) -> str:
     return new_correlation_id()
 
 
+def _internal_token_is_configured() -> bool:
+    """Round-13 review (2026-08-06): the same presence/length floor
+    _verify_internal_token enforces on every request, checked once here so
+    /healthz can fail before a misconfigured deploy ever serves a real
+    request. See the module docstring's round-13 entry."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
 @app.get("/healthz")
 def healthz():
+    if not _internal_token_is_configured():
+        raise HTTPException(status_code=503, detail="internal_service_token not configured")
     return {"status": "ok", "service": settings.service_name}
 
 
@@ -277,6 +316,20 @@ def create_intake(
             coverage_id = _create_coverage(db, patient_id, req.insurance)
 
         _record_consents(db, patient_id, req.consents)
+
+        # Round-13 review (2026-08-06): patient, coverage, and every consent
+        # are only flushed above, not committed — this is the single commit
+        # that makes the whole group durable together. If any step above
+        # failed, its own except block already rolled back and raised a 503
+        # before this line, so this commit only ever runs once every write
+        # in the group has succeeded in the same transaction. This also
+        # releases the _acquire_match_key_lock advisory lock taken above.
+        try:
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+            log.error("intake: failed to finalize patient/coverage/consent commit (error_type=%s)", type(e).__name__)
+            raise HTTPException(status_code=503, detail="patient store unavailable")
 
         # Patient/coverage/consent are already committed above, independently
         # of whatever happens next — the fix for RIV-088/RIV-141 is that this
@@ -364,11 +417,13 @@ def _acquire_match_key_lock(db: Session, demo: Demographics) -> None:
     request believed it was the first).
 
     pg_advisory_xact_lock is held for the rest of the current transaction —
-    released automatically at the next commit/rollback on this connection,
-    which in create_intake's flow is the very next commit (_create_patient
-    or _create_patient_with_links), so this covers exactly the check-then-
-    insert window and nothing longer. A no-op when there's no ssn to key on,
-    same as _find_match_candidates.
+    released automatically at the next commit/rollback on this connection.
+    Round-13 review (2026-08-06): create_intake now commits the whole
+    patient+coverage+consents group in one place, so this lock is held for
+    that entire group rather than just the patient/link write — a strictly
+    longer, still-correct window (it only needs to outlast the
+    match-then-create check, and it does). A no-op when there's no ssn to
+    key on, same as _find_match_candidates.
     """
     normalized_ssn = _normalize_ssn(demo.ssn)
     if not normalized_ssn:
@@ -456,10 +511,14 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
     to prevent, reachable via this degraded path instead of the happy one.
 
     Uses flush() (not commit()) to obtain the new patient's id while still
-    inside the same transaction as its link rows, then commits once. ANY
-    failure here — the patient insert or any link insert — rolls back the
-    whole group and fails the request (503); nothing is left half-written,
-    unlike the prior behavior this replaces.
+    inside the same transaction as its link rows. Round-13 review
+    (2026-08-06): this used to commit here too, independently of the
+    coverage/consent writes that follow in create_intake — a failure in one
+    of those later steps then left this patient (and its link rows) durably
+    committed with no way to undo it. Now this only flushes; create_intake
+    commits the whole patient+coverage+consents group exactly once, so ANY
+    failure anywhere in that group rolls all of it back together and fails
+    the request (503) with nothing left half-written.
 
     Only ever called for partial matches now (round-10 review) — an exact
     match always blocks with 409 before this function is reached, so no
@@ -486,8 +545,7 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
         db.flush()  # assigns patient.id without ending the transaction
         for candidate_id in partial_ids:
             db.add(_build_partial_patient_link(patient.id, candidate_id))
-        db.commit()
-        db.refresh(patient)
+        db.flush()
         return patient.id
     except SQLAlchemyError as e:
         db.rollback()
@@ -498,6 +556,9 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
 
 
 def _create_patient(db: Session, demo: Demographics) -> int:
+    # Round-13 review (2026-08-06): flushes only — see create_intake's single
+    # commit and the module docstring's round-13 entry for why this no
+    # longer commits on its own.
     try:
         patient = Patient(
             name=demo.name,
@@ -516,8 +577,7 @@ def _create_patient(db: Session, demo: Demographics) -> int:
             created_via=demo.created_via,
         )
         db.add(patient)
-        db.commit()
-        db.refresh(patient)
+        db.flush()  # assigns patient.id without ending the transaction
         return patient.id
     except SQLAlchemyError as e:
         db.rollback()
@@ -531,6 +591,8 @@ def _create_patient(db: Session, demo: Demographics) -> int:
 
 
 def _create_coverage(db: Session, patient_id: int, ins: Insurance) -> int:
+    # Round-13 review (2026-08-06): flushes only, same reasoning as
+    # _create_patient — create_intake commits the whole group once.
     try:
         coverage = InsuranceCoverage(
             patient_id=patient_id,
@@ -540,8 +602,7 @@ def _create_coverage(db: Session, patient_id: int, ins: Insurance) -> int:
             plan_type=ins.plan_type,
         )
         db.add(coverage)
-        db.commit()
-        db.refresh(coverage)
+        db.flush()  # assigns coverage.id without ending the transaction
         return coverage.id
     except SQLAlchemyError as e:
         db.rollback()
@@ -553,8 +614,8 @@ def _create_coverage(db: Session, patient_id: int, ins: Insurance) -> int:
 
 
 def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
-    # Inefficient by design: one INSERT + COMMIT per consent (a separate
-    # transaction round-trip each) rather than a single batched insert.
+    # Inefficient by design: one INSERT + FLUSH per consent (a separate
+    # statement each) rather than a single batched insert.
     #
     # Round-12 review (2026-08-05): a consent write failure used to be
     # swallowed here (rollback + log, no raise) — create_intake still
@@ -564,10 +625,19 @@ def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
     # Now raises HTTPException(503), matching _create_patient/_create_coverage's
     # existing "store unavailable" convention, so the caller sees a failure
     # instead of a false success.
+    #
+    # Round-13 review (2026-08-06): each consent used to commit
+    # independently too, so a failure on e.g. the second consent still left
+    # the patient, coverage, and first consent durably committed — a
+    # stranded partial registration a retry could not repair (it would trip
+    # the exact-match 409 instead). Flushes only now; create_intake commits
+    # the whole group once every consent has flushed successfully, so a
+    # failure on any consent rolls back the patient/coverage/earlier
+    # consents in the same transaction, same as the other write paths above.
     for kind in kinds:
         try:
             db.add(Consent(patient_id=patient_id, kind=kind))
-            db.commit()
+            db.flush()
         except SQLAlchemyError as e:
             db.rollback()
             # kind (e.g. "npp_ack") and patient_id aren't PHI, but str(e) is

@@ -62,8 +62,27 @@ def require_session(authorization: Optional[str] = Header(default=None)) -> dict
     return sess
 
 
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # matches intake-service/records-service's own floor
+
+
+def _internal_token_is_configured() -> bool:
+    """Round-13 review (2026-08-06, PR #20): the gateway forwards
+    X-Internal-Token on every intake/records call (see proxy_intake and the
+    patient-view fan-out below) but never checked its own configured value
+    before this fix — an empty/placeholder INTERNAL_SERVICE_TOKEN meant the
+    gateway started and passed docker-compose's healthcheck while every
+    forwarded call was fail-closed 401'd downstream, a healthy-looking
+    outage of the whole intake/patient-view path. /healthz now applies the
+    same presence/length floor intake-service and records-service already
+    enforce on the receiving end."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
 @app.get("/healthz")
 def healthz():
+    if not _internal_token_is_configured():
+        raise HTTPException(status_code=503, detail="internal_service_token not configured")
     return {"status": "ok", "service": settings.service_name}
 
 

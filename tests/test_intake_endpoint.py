@@ -97,39 +97,58 @@ class _FakeSession:
 
 
 class _RaisingFakeSession(_FakeSession):
-    """A fake session whose commit() raises a SQLAlchemyError carrying a
-    PHI-shaped message — simulating what a real DBAPIError's str() embeds
-    (the failed statement's bound parameters) when the engine isn't
-    configured with hide_parameters=True. See the PR #20 round-6 fix: the
-    live reproduction against a real Postgres confirmed a genuine insert
-    failure's str(e) contains name/dob/ssn/address/... verbatim."""
+    """A fake session whose flush() or commit() raises a SQLAlchemyError
+    carrying a PHI-shaped message — simulating what a real DBAPIError's
+    str() embeds (the failed statement's bound parameters) when the engine
+    isn't configured with hide_parameters=True. See the PR #20 round-6 fix:
+    the live reproduction against a real Postgres confirmed a genuine
+    insert failure's str(e) contains name/dob/ssn/address/... verbatim.
 
-    def __init__(self, message):
+    Round-13 review: _create_patient/_create_patient_with_links/
+    _create_coverage/_record_consents now flush (never commit) — only
+    create_intake's single final commit is durable. raise_on picks which
+    call fails: "flush" (default) to test one of those helpers' own error
+    handling in isolation, "commit" to test create_intake's single
+    top-level commit that finalizes the whole patient+coverage+consent
+    group together.
+    """
+
+    def __init__(self, message, raise_on="flush"):
         super().__init__()
         self._message = message
+        self._raise_on = raise_on
+
+    def flush(self):
+        if self._raise_on == "flush":
+            raise app_mod.SQLAlchemyError(self._message)
+        super().flush()
 
     def commit(self):
-        raise app_mod.SQLAlchemyError(self._message)
+        if self._raise_on == "commit":
+            raise app_mod.SQLAlchemyError(self._message)
+        super().commit()
 
 
 class _ConsentFailingSession(_FakeSession):
-    """Round-12 review: lets patient (and coverage, if any) commit normally,
-    then raises on the Nth consent commit specifically — proving a consent
+    """Round-12 review: lets patient (and coverage, if any) flush normally,
+    then raises on the Nth consent flush specifically — proving a consent
     write failure is no longer swallowed regardless of which consent in the
-    list fails."""
+    list fails. Round-13 review: consents are flushed, not committed, until
+    create_intake's single final commit — so this now overrides flush(),
+    not commit()."""
 
     def __init__(self, fail_at_consent_index, **kwargs):
         super().__init__(**kwargs)
         self._fail_at_consent_index = fail_at_consent_index
-        self._consent_commit_count = 0
+        self._consent_flush_count = 0
 
-    def commit(self):
+    def flush(self):
         if self.added and type(self.added[-1]).__tablename__ == "consents":
-            index = self._consent_commit_count
-            self._consent_commit_count += 1
+            index = self._consent_flush_count
+            self._consent_flush_count += 1
             if index == self._fail_at_consent_index:
                 raise app_mod.SQLAlchemyError("simulated consent write failure")
-        super().commit()
+        super().flush()
 
 
 def _request(**overrides):
@@ -276,10 +295,12 @@ def test_patient_coverage_and_consent_persist_even_if_eligibility_enqueue_fails(
     assert result.patient_id == 1
     assert result.eligibility_status == "unknown"
     assert result.eligibility_job_id is None
-    # Patient, coverage, and both consents were all committed.
+    # Patient, coverage, and both consents were all persisted.
     table_names = {type(obj).__tablename__ for obj in db.added}
     assert table_names == {"patients", "insurance_coverages", "consents"}
-    assert db.commit_count >= 4  # patient + coverage + 2 consents, each its own commit
+    # Round-13 review: patient + coverage + both consents now land in one
+    # atomic commit, not four independent ones.
+    assert db.commit_count == 1
 
 
 def test_intake_without_insurance_never_calls_eligibility_service(monkeypatch):
@@ -582,6 +603,10 @@ def test_first_consent_write_failure_returns_503_not_201(monkeypatch):
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.status_code != 201
+    # Round-13 review: the patient/coverage flushed ahead of this consent
+    # are never committed either — nothing durable is left for a retry to
+    # collide with (the exact-match 409 this would otherwise trip).
+    assert db.commit_count == 0
 
 
 def test_second_consent_write_failure_also_returns_503_not_201(monkeypatch):
@@ -596,6 +621,10 @@ def test_second_consent_write_failure_also_returns_503_not_201(monkeypatch):
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.status_code != 201
+    # Round-13 review: the patient, coverage, and first consent flushed
+    # ahead of this one are rolled back together with it — none of them
+    # end up committed on their own.
+    assert db.commit_count == 0
 
 
 # --- Week 2-3 catch-up: adr/0004/RIV-160 match-key lookup -------------------
@@ -708,9 +737,12 @@ def test_partial_match_link_confirmed_by_never_comes_from_the_request_body(monke
 
 
 def test_partial_match_does_not_succeed_if_link_write_fails(monkeypatch):
-    # Same failure mode, partial-match branch (the review's second requested case).
+    # Same failure mode, partial-match branch (the review's second requested
+    # case). Round-13 review: the patient+link write only flushes now — the
+    # failure that matters is create_intake's single top-level commit, which
+    # is what finalizes (or, here, fails to finalize) the whole group.
     _mock_eligibility_post(monkeypatch)
-    db = _RaisingFakeSession("simulated patient_links write failure")
+    db = _RaisingFakeSession("simulated intake commit failure", raise_on="commit")
     db.existing_patients = [_FakePatientRow(id=42, ssn="111-22-3333", dob="1971-02-03")]
 
     with pytest.raises(app_mod.HTTPException) as exc_info:
@@ -721,6 +753,7 @@ def test_partial_match_does_not_succeed_if_link_write_fails(monkeypatch):
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.status_code != 201
+    assert db.commit_count == 0
 
     links = [obj for obj in db.added if type(obj).__tablename__ == "patient_links"]
     assert len(links) == 1
