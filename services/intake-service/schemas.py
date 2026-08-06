@@ -87,8 +87,37 @@ class Insurance(BaseModel):
     plan_type: Optional[str] = None
 
 
+# Round-15 review (2026-08-06): the two consents the intake wizard's
+# "Continue" button already refuses to proceed without — see
+# frontend/app/intake/page.tsx's consentsOk / c_treatment / c_privacy.
+_REQUIRED_CONSENT_KINDS = frozenset({"npp_ack", "treatment_consent"})
+
+# The two required kinds above, plus the two optional ones the wizard's
+# consent step actually offers (c_financial / c_comms in the same file).
+# roi_consent (models.py's Consent.kind comment) is deliberately excluded —
+# that is written by roi-service's own release-of-information flow, not
+# collected during intake.
+_VALID_CONSENT_KINDS = _REQUIRED_CONSENT_KINDS | frozenset(
+    {"financial_agreement", "communications_consent"}
+)
+
+
 class IntakeRequest(BaseModel):
     """demographics/insurance/consents are the original contract.
+
+    Round-15 review (2026-08-06): `consents` used to accept any list,
+    including an empty one — the UI already refuses to let a patient
+    continue past the consent step without checking treatment+privacy (see
+    frontend/app/intake/page.tsx's `consentsOk`), but that is browser button
+    state, not a trust boundary. A caller with a valid gateway session, a
+    stale client, or a direct internal-token caller could still submit
+    `consents: []` (or drop just one required kind) and, since round-13's
+    atomic commit, have that incomplete registration persist durably with
+    no way to flag it afterward. `_validate_consents` below now enforces the
+    same two-required-consent rule server-side, and rejects any kind outside
+    `_VALID_CONSENT_KINDS` so a typo'd or made-up consent name fails loudly
+    (a 422) instead of silently persisting as an untracked string in the
+    `consents` table.
 
     Round-10 review (2026-08-05, RIV-160): this used to also accept
     duplicate_override="create_new" + confirmed_by, letting a caller bypass
@@ -109,6 +138,16 @@ class IntakeRequest(BaseModel):
     demographics: Demographics
     insurance: Optional[Insurance] = None
     consents: list[str] = Field(default_factory=lambda: ["npp_ack", "treatment_consent"])
+
+    @model_validator(mode="after")
+    def _validate_consents(self) -> "IntakeRequest":
+        unknown = sorted(set(self.consents) - _VALID_CONSENT_KINDS)
+        if unknown:
+            raise ValueError(f"unknown consent kind(s): {', '.join(unknown)}")
+        missing = sorted(_REQUIRED_CONSENT_KINDS - set(self.consents))
+        if missing:
+            raise ValueError(f"missing required consent(s): {', '.join(missing)}")
+        return self
 
 
 class IntakeResponse(BaseModel):

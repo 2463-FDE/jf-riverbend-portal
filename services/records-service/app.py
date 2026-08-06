@@ -259,6 +259,25 @@ def get_patient_view(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid purpose '{purpose}'")
 
+    # Round-15 review (2026-08-06): SqlChartRepository's first read only
+    # loads encounters for patient_id — an unknown id returns an empty
+    # result set, not an error, so run_patient_view would previously produce
+    # a normal "no evidence" COMPLETED/escalated result for a patient that
+    # does not exist at all. A typo'd or stale patient_id then looked
+    # identical to a real patient with an empty chart, which is a clinical
+    # safety problem for a chart summary a clinician is meant to trust.
+    # Checked here, same 404 idiom get_patient already uses above, before
+    # authorization or any chart read runs. No audit_logs row is written for
+    # a nonexistent id — same reasoning as _verify_internal_token's own
+    # rejection path: this is a not-found response, not a chart access.
+    try:
+        patient_exists = db.get(Patient, patient_id) is not None
+    except SQLAlchemyError:
+        log.exception("get_patient_view: database error for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+    if not patient_exists:
+        raise HTTPException(status_code=404, detail="patient not found")
+
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,

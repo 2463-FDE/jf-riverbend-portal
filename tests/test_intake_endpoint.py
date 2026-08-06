@@ -460,14 +460,14 @@ def test_intake_log_summary_excludes_plan_type_and_consent_detail(monkeypatch, c
                 "group_number": None,
                 "plan_type": "Medicaid",
             },
-            consents=["npp_ack", "treatment_consent", "financial_consent"],
+            consents=["npp_ack", "treatment_consent", "financial_agreement"],
         ),
         db=db,
         x_request_id=None,
     )
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
-    for leaked in ("Medicaid", "State Medicaid Office", "npp_ack", "treatment_consent", "financial_consent"):
+    for leaked in ("Medicaid", "State Medicaid Office", "npp_ack", "treatment_consent", "financial_agreement"):
         assert leaked not in log_text, f"{leaked!r} leaked into the intake log line"
 
     summary = _intake_summary_dict(caplog)

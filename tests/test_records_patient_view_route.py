@@ -7,8 +7,10 @@ direct-function/fake-session style. Confirms: the internal-token check
 (review fix, round 2026-08-05) rejects a direct caller before StaffAccessGate
 ever runs, the real StaffAccessGate denies a missing actor (403) and allows a
 present one (200) once that check passes, an invalid purpose is rejected
-before authorization runs, and a real audit_logs row is written on BOTH
-StaffAccessGate outcomes but NEVER on an internal-token rejection.
+before authorization runs, a real audit_logs row is written on BOTH
+StaffAccessGate outcomes but NEVER on an internal-token rejection, and
+(round-15 review, 2026-08-06) a nonexistent patient_id is rejected with 404
+before authorization or any chart read runs, with no audit_logs row either.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -31,11 +33,12 @@ created_sessions = []
 
 
 class FakeSession:
-    def __init__(self, *, fail_commit=False):
+    def __init__(self, *, fail_commit=False, existing_patient_ids=frozenset({1042})):
         self.added = []
         self.commit_count = 0
         self.rollback_count = 0
         self._fail_commit = fail_commit
+        self._existing_patient_ids = existing_patient_ids
 
     def add(self, obj):
         self.added.append(obj)
@@ -48,6 +51,13 @@ class FakeSession:
     def rollback(self):
         self.rollback_count += 1
 
+    def get(self, _model, pk):
+        # Round-15 review: get_patient_view now checks patient existence via
+        # db.get(Patient, patient_id) before authorizing/reading. Every
+        # existing test in this file uses patient_id=1042 and expects it to
+        # exist, hence the default.
+        return object() if pk in self._existing_patient_ids else None
+
 
 def _fake_get_db():
     session = FakeSession()
@@ -57,6 +67,12 @@ def _fake_get_db():
 
 def _fake_get_db_failing_commit():
     session = FakeSession(fail_commit=True)
+    created_sessions.append(session)
+    yield session
+
+
+def _fake_get_db_missing_patient():
+    session = FakeSession(existing_patient_ids=frozenset())
     created_sessions.append(session)
     yield session
 
@@ -230,3 +246,47 @@ def test_denial_also_fails_closed_if_audit_write_fails(monkeypatch):
     # Even a denial must be durably recordable, or this now surfaces as a
     # 503 rather than silently confirming/denying with no trace.
     assert resp.status_code == 503
+
+
+# --- patient existence check: round-15 review (2026-08-06) -----------------
+#
+# SqlChartRepository's first read only loads encounters for the requested
+# id — an unknown id used to come back as an empty, evidence-free chart
+# instead of a 404, so a typo'd or stale patient_id looked identical to a
+# real patient with no records. get_patient_view now checks existence via
+# db.get(Patient, patient_id) before authorization or any chart read.
+
+
+def test_nonexistent_patient_id_returns_404_and_writes_no_audit_row(monkeypatch):
+    monkeypatch.setattr(app_mod, "SqlChartRepository", FakeChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_missing_patient
+    try:
+        resp = TestClient(app_mod.app).get(
+            "/patients/999999/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+        )
+    finally:
+        app_mod.app.dependency_overrides.clear()
+
+    assert resp.status_code == 404
+    # Not-found, not a chart access — no audit_logs row, same reasoning as
+    # the internal-token rejection path above.
+    assert created_sessions[-1].added == []
+    assert created_sessions[-1].commit_count == 0
+
+
+def test_nonexistent_patient_id_is_404_even_for_an_actor_who_would_be_denied(monkeypatch):
+    # The existence check runs before StaffAccessGate too — a request that
+    # would otherwise be denied (missing X-Actor-Id) must still surface as
+    # "patient not found," not fall through to a 403 that would confirm the
+    # patient exists.
+    monkeypatch.setattr(app_mod, "SqlChartRepository", FakeChartRepository)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_missing_patient
+    try:
+        resp = TestClient(app_mod.app).get("/patients/999999/view", headers=_internal_header())
+    finally:
+        app_mod.app.dependency_overrides.clear()
+
+    assert resp.status_code == 404
+    assert created_sessions[-1].added == []

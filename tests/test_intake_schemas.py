@@ -18,10 +18,10 @@ def test_full_intake_with_insurance():
     req = schemas.IntakeRequest(
         demographics={"name": "John Doe", "dob": "1980-01-01", "ssn": "111-22-3333"},
         insurance={"payer_name": "Aetna", "member_id": "AET123", "plan_type": "PPO"},
-        consents=["npp_ack"],
+        consents=["npp_ack", "treatment_consent"],
     )
     assert req.insurance.payer_name == "Aetna"
-    assert req.consents == ["npp_ack"]
+    assert req.consents == ["npp_ack", "treatment_consent"]
 
 
 def test_blank_name_rejected():
@@ -162,6 +162,45 @@ def test_duplicate_override_and_confirmed_by_no_longer_exist_on_the_schema():
     )
     assert not hasattr(req, "duplicate_override")
     assert not hasattr(req, "confirmed_by")
+
+
+# --- Round-15 review (2026-08-06): consents is a trust boundary, not just a
+# UI button state (frontend/app/intake/page.tsx's consentsOk gates the
+# submit button, but that's the browser, not this contract) -----------------
+
+
+def test_empty_consents_is_rejected():
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(demographics={"name": "Jane Roe"}, consents=[])
+
+
+def test_missing_one_required_consent_is_rejected():
+    # Both npp_ack and treatment_consent are required — supplying only one
+    # must fail the same way supplying neither does.
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(demographics={"name": "Jane Roe"}, consents=["npp_ack"])
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(demographics={"name": "Jane Roe"}, consents=["treatment_consent"])
+
+
+def test_unknown_consent_kind_is_rejected():
+    # A typo'd or made-up consent name must fail loudly (422) rather than
+    # silently persist as an untracked string in the consents table.
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(
+            demographics={"name": "Jane Roe"},
+            consents=["npp_ack", "treatment_consent", "not_a_real_consent"],
+        )
+
+
+def test_both_optional_consent_kinds_are_accepted_alongside_the_required_ones():
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe"},
+        consents=["npp_ack", "treatment_consent", "financial_agreement", "communications_consent"],
+    )
+    assert set(req.consents) == {
+        "npp_ack", "treatment_consent", "financial_agreement", "communications_consent",
+    }
 
 
 # NOTE (coverage gap, deliberate): nothing here asserts SSN format or that DOB

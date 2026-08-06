@@ -52,6 +52,33 @@ def test_intake_via_gateway_still_succeeds():
     assert r.json()["patient_id"]
 
 
+def test_empty_consents_is_rejected_through_gateway_and_writes_nothing():
+    # Round-15 automated review (2026-08-06, PR #20): consents used to
+    # accept any list, including []; a caller with a valid gateway session
+    # could submit a registration with no npp_ack/treatment_consent and,
+    # since round-13's atomic commit, have that incomplete registration
+    # persist durably. The 422 here comes from IntakeRequest's own field
+    # validation (services/intake-service/schemas.py::_validate_consents),
+    # which FastAPI enforces before create_intake's body runs at all — so
+    # "no patient row was written" is guaranteed by construction, not just
+    # by observation: the route function that would create one never runs.
+    headers = {"Authorization": f"Bearer {_token()}"}
+    payload = {"demographics": _unique_demographics(), "consents": []}
+
+    r = httpx.post(f"{GATEWAY}/intake", json=payload, headers=headers, timeout=10)
+
+    assert r.status_code == 422
+
+
+def test_missing_one_required_consent_is_rejected_through_gateway():
+    headers = {"Authorization": f"Bearer {_token()}"}
+    payload = {"demographics": _unique_demographics(), "consents": ["npp_ack"]}
+
+    r = httpx.post(f"{GATEWAY}/intake", json=payload, headers=headers, timeout=10)
+
+    assert r.status_code == 422
+
+
 def test_portal_shaped_payload_succeeds_through_gateway():
     # Round-14 automated review (2026-08-06, PR #20): the intake wizard
     # (frontend/app/intake/page.tsx) built its payload from UI-only shapes —
