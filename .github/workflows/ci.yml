@@ -79,11 +79,28 @@ jobs:
         # Round-17 review (2026-08-06, PR #20): docker-compose.yml requires
         # INTERNAL_SERVICE_TOKEN (gateway/intake-service/records-service all
         # fail `docker compose config`/`build` immediately without it — see
-        # docs/runbook.md § Required one-time setup). The tracked .env
-        # deliberately ships this empty (a committed real secret would be
-        # worse), so CI supplies it from a GitHub Actions secret instead of
-        # relying on .env at all — env: here overrides whatever .env/
-        # env_file would otherwise provide for this step only.
+        # docs/runbook.md § Required one-time setup).
+        #
+        # Round-18 review: passing only secrets.INTERNAL_SERVICE_TOKEN broke
+        # CI for exactly the contexts that most need build coverage — GitHub
+        # never exposes repository secrets to pull_request runs from forks,
+        # and an unconfigured secret also expands to "" either way, so any
+        # external contributor's PR (or any repo that hasn't set this
+        # secret) silently lost docker-build entirely. This build-only step
+        # never starts a container or serves a real request — it only needs
+        # *some* value that satisfies docker-compose.yml's presence/length
+        # check — so fall back to a freshly generated, throwaway value when
+        # the real secret isn't available, and only ever use the real
+        # secret when one is configured. Actual deployments still get the
+        # real secret via env_file: .env, untouched by this fallback.
+        run: |
+          if [ -n "${INTERNAL_SERVICE_TOKEN:-}" ]; then
+            echo "Using INTERNAL_SERVICE_TOKEN from repository secret."
+          else
+            echo "No INTERNAL_SERVICE_TOKEN secret available (e.g. a fork PR) — generating a throwaway build-only value."
+            INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+            export INTERNAL_SERVICE_TOKEN
+          fi
+          docker compose build
         env:
           INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
-        run: docker compose build
