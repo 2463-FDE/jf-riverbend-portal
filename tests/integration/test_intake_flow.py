@@ -79,6 +79,25 @@ def test_missing_one_required_consent_is_rejected_through_gateway():
     assert r.status_code == 422
 
 
+def test_omitted_consents_field_is_rejected_through_gateway_and_writes_nothing():
+    # Round-16 automated review (2026-08-06, PR #20): round-15 closed
+    # consents:[] but missed that omitting the field entirely still
+    # validated — IntakeRequest.consents had a default
+    # (["npp_ack", "treatment_consent"]) applied whenever the field was left
+    # out, and create_intake persisted that default as if the patient had
+    # actually signed both consents. consents is now a required field with
+    # no default, so a payload that never mentions it at all must 422 the
+    # same way consents:[] does — same "no patient row can have been
+    # written" guarantee as the two tests above (Pydantic's own request-body
+    # validation rejects this before create_intake's body ever runs).
+    headers = {"Authorization": f"Bearer {_token()}"}
+    payload = {"demographics": _unique_demographics()}  # no "consents" key at all
+
+    r = httpx.post(f"{GATEWAY}/intake", json=payload, headers=headers, timeout=10)
+
+    assert r.status_code == 422
+
+
 def test_portal_shaped_payload_succeeds_through_gateway():
     # Round-14 automated review (2026-08-06, PR #20): the intake wizard
     # (frontend/app/intake/page.tsx) built its payload from UI-only shapes —

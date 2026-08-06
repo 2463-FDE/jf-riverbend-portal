@@ -1,7 +1,7 @@
 """Pydantic v2 request/response schemas for intake-service."""
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 # created_via is documented (models.py, schema.sql) as self_service | front_desk
 # only, but the field itself is a plain string a caller controls — see
@@ -119,6 +119,14 @@ class IntakeRequest(BaseModel):
     (a 422) instead of silently persisting as an untracked string in the
     `consents` table.
 
+    Round-16 review (2026-08-06): round-15 closed `consents: []` but missed
+    that omitting the field entirely still validated — `consents` had a
+    default (`["npp_ack", "treatment_consent"]`), so a caller that dropped
+    the field altogether still passed validation, and that default got
+    persisted by `create_intake` as if the patient had actually signed
+    those consents. `consents` is now a required field with no default;
+    omitting it is exactly as invalid as sending `[]`.
+
     Round-10 review (2026-08-05, RIV-160): this used to also accept
     duplicate_override="create_new" + confirmed_by, letting a caller bypass
     an exact SSN+DOB match block and record a "confirmed" patient_links row
@@ -137,7 +145,14 @@ class IntakeRequest(BaseModel):
 
     demographics: Demographics
     insurance: Optional[Insurance] = None
-    consents: list[str] = Field(default_factory=lambda: ["npp_ack", "treatment_consent"])
+    # Round-16 review (2026-08-06): this used to default to
+    # ["npp_ack", "treatment_consent"] when the field was omitted entirely —
+    # round-15 closed consents:[] and one-missing-required, but a caller
+    # that dropped the field altogether still validated, and create_intake
+    # persisted those defaulted consents as if the patient had actually
+    # signed them. No default now: omitting consents is exactly as invalid
+    # as sending [] or a payload missing a required kind.
+    consents: list[str]
 
     @model_validator(mode="after")
     def _validate_consents(self) -> "IntakeRequest":

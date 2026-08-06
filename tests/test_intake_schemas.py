@@ -7,11 +7,22 @@ schemas = load_module("services/intake-service/schemas.py", "intake_schemas")
 
 
 def test_minimal_valid_intake():
-    req = schemas.IntakeRequest(demographics={"name": "Jane Roe"})
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe"}, consents=["npp_ack", "treatment_consent"]
+    )
     assert req.demographics.name == "Jane Roe"
     assert req.demographics.created_via == "self_service"
-    # default consents applied
     assert req.consents == ["npp_ack", "treatment_consent"]
+
+
+def test_omitted_consents_field_is_rejected_not_defaulted():
+    # Round-16 review (2026-08-06): consents used to default to
+    # ["npp_ack", "treatment_consent"] when the field was left out entirely
+    # — round-15 closed consents:[] but missed this. Omitting the field
+    # must be exactly as invalid as sending [], not silently treated as "the
+    # patient signed both."
+    with pytest.raises(ValidationError):
+        schemas.IntakeRequest(demographics={"name": "Jane Roe"})
 
 
 def test_full_intake_with_insurance():
@@ -41,7 +52,8 @@ def test_legacy_name_and_combined_address_pass_through_unchanged():
     """A caller that only ever sends the old combined fields must see identical
     stored behavior: `name`/`address` unchanged, new structured columns unset."""
     req = schemas.IntakeRequest(
-        demographics={"name": "Jane Roe", "address": "118 Maple Ave, Beverly Hills, CA 90210"}
+        demographics={"name": "Jane Roe", "address": "118 Maple Ave, Beverly Hills, CA 90210"},
+        consents=["npp_ack", "treatment_consent"],
     )
     demo = req.demographics
     assert demo.name == "Jane Roe"
@@ -54,7 +66,10 @@ def test_legacy_name_and_combined_address_pass_through_unchanged():
 
 
 def test_structured_name_derives_legacy_name():
-    req = schemas.IntakeRequest(demographics={"first_name": "Jane", "last_name": "Roe"})
+    req = schemas.IntakeRequest(
+        demographics={"first_name": "Jane", "last_name": "Roe"},
+        consents=["npp_ack", "treatment_consent"],
+    )
     demo = req.demographics
     assert demo.first_name == "Jane"
     assert demo.last_name == "Roe"
@@ -70,7 +85,8 @@ def test_structured_address_derives_legacy_combined_address():
             "city": "Beverly Hills",
             "state": "CA",
             "zip_code": "90210",
-        }
+        },
+        consents=["npp_ack", "treatment_consent"],
     )
     demo = req.demographics
     assert demo.address == "118 Maple Ave, Beverly Hills, CA 90210"
@@ -81,7 +97,8 @@ def test_structured_address_derives_legacy_combined_address():
 
 def test_zip_code_preserves_leading_zeros_and_plus_four():
     req = schemas.IntakeRequest(
-        demographics={"name": "Jane Roe", "zip_code": "02139-1234"}
+        demographics={"name": "Jane Roe", "zip_code": "02139-1234"},
+        consents=["npp_ack", "treatment_consent"],
     )
     assert req.demographics.zip_code == "02139-1234"
 
@@ -89,7 +106,10 @@ def test_zip_code_preserves_leading_zeros_and_plus_four():
 def test_structured_address_with_missing_parts_has_no_malformed_commas():
     # Only city supplied — street/state/zip blank — must not leave stray
     # ", ," or trailing/leading commas in the composed legacy address.
-    req = schemas.IntakeRequest(demographics={"name": "Jane Roe", "city": "Riverbend"})
+    req = schemas.IntakeRequest(
+        demographics={"name": "Jane Roe", "city": "Riverbend"},
+        consents=["npp_ack", "treatment_consent"],
+    )
     assert req.demographics.address == "Riverbend"
     assert ",," not in (req.demographics.address or "")
     assert not (req.demographics.address or "").startswith(",")
@@ -98,7 +118,8 @@ def test_structured_address_with_missing_parts_has_no_malformed_commas():
 
 def test_explicit_name_takes_precedence_over_structured_name_when_both_given():
     req = schemas.IntakeRequest(
-        demographics={"name": "Legacy Caller Name", "first_name": "Jane", "last_name": "Roe"}
+        demographics={"name": "Legacy Caller Name", "first_name": "Jane", "last_name": "Roe"},
+        consents=["npp_ack", "treatment_consent"],
     )
     assert req.demographics.name == "Legacy Caller Name"
     # Structured fields are still stored even though `name` wasn't derived from them.
@@ -113,7 +134,8 @@ def test_blank_structured_name_rejected():
 
 def test_whitespace_only_optional_contact_fields_are_normalized_to_none():
     req = schemas.IntakeRequest(
-        demographics={"name": "Jane Roe", "city": "   ", "state": "  ", "zip_code": " "}
+        demographics={"name": "Jane Roe", "city": "   ", "state": "  ", "zip_code": " "},
+        consents=["npp_ack", "treatment_consent"],
     )
     demo = req.demographics
     assert demo.city is None
@@ -126,7 +148,10 @@ def test_whitespace_only_optional_contact_fields_are_normalized_to_none():
 
 def test_created_via_defaults_are_trusted():
     for value in ("self_service", "front_desk"):
-        req = schemas.IntakeRequest(demographics={"name": "Jane Roe", "created_via": value})
+        req = schemas.IntakeRequest(
+            demographics={"name": "Jane Roe", "created_via": value},
+            consents=["npp_ack", "treatment_consent"],
+        )
         assert req.demographics.created_via == value
 
 
@@ -138,7 +163,8 @@ def test_created_via_outside_known_set_is_normalized_to_unknown():
     # new patient_id. Anything outside the documented self_service/front_desk
     # set must be normalized before it's trusted anywhere, logging included.
     req = schemas.IntakeRequest(
-        demographics={"name": "Jane Roe", "created_via": "patient is Jane Roe, SSN 111-22-3333"}
+        demographics={"name": "Jane Roe", "created_via": "patient is Jane Roe, SSN 111-22-3333"},
+        consents=["npp_ack", "treatment_consent"],
     )
     assert req.demographics.created_via == "unknown"
 
@@ -157,6 +183,7 @@ def test_duplicate_override_and_confirmed_by_no_longer_exist_on_the_schema():
     # the parsed model either way.
     req = schemas.IntakeRequest(
         demographics={"name": "Jane Roe"},
+        consents=["npp_ack", "treatment_consent"],
         duplicate_override="create_new",
         confirmed_by="dr.smith",
     )
