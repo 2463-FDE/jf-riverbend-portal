@@ -1048,6 +1048,20 @@ textarea:focus-visible,
   border-color: var(--rb-primary-tint-2);
   color: var(--rb-primary-darker);
 }
+.rb-alert--warn {
+  background: var(--rb-warn-bg);
+  border-color: #eeddb0;
+  color: var(--rb-warn);
+}
+.rb-eyebrow {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rb-text-muted);
+  margin-bottom: 4px;
+}
 .rb-muted {
   color: var(--rb-text-muted);
 }
