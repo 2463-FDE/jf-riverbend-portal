@@ -44,13 +44,30 @@ def test_idempotent_replay_also_returns_201_confirmed_with_the_original_id(monke
     assert resp.json() == {"appointment_id": 123, "status": "confirmed"}
 
 
-def test_slot_taken_by_a_different_booking_returns_slot_taken(monkeypatch):
+def test_slot_taken_by_a_different_booking_returns_409(monkeypatch):
+    # Round-22 review (2026-08-06): this used to be 201 with
+    # status="slot_taken" in the body — a losing concurrent booking looked
+    # like a success to any caller (the frontend included) that only
+    # checked the HTTP status.
     monkeypatch.setattr(app_mod, "book", lambda *a, **k: (None, False))
 
     resp = _client().post("/appointments", json=_payload())
 
-    assert resp.status_code == 201  # status_code is fixed on the route; body carries the outcome
-    assert resp.json() == {"appointment_id": None, "status": "slot_taken"}
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "slot_taken"
+
+
+def test_idempotency_key_conflict_returns_409(monkeypatch):
+    def _raise(*a, **k):
+        raise app_mod.IdempotencyKeyConflict(existing_appointment_id=99)
+
+    monkeypatch.setattr(app_mod, "book", _raise)
+
+    resp = _client().post("/appointments", json=_payload())
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "idempotency_key_conflict"
+    assert resp.json()["detail"]["existing_appointment_id"] == 99
 
 
 def test_book_raising_returns_503_not_a_bare_500(monkeypatch):

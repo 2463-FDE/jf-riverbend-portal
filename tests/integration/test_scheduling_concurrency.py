@@ -68,14 +68,16 @@ def test_concurrent_bookings_for_the_same_slot_confirm_exactly_once():
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(_COMPETING_PATIENT_IDS)) as pool:
         responses = list(pool.map(_attempt, _COMPETING_PATIENT_IDS))
 
-    for r in responses:
-        assert r.status_code == 201, r.text
-
-    confirmed = [r for r in responses if r.json()["status"] == "confirmed"]
-    slot_taken = [r for r in responses if r.json()["status"] == "slot_taken"]
+    # Round-22 review (2026-08-06): a losing booking is now a real 409, not
+    # a 201 with status="slot_taken" in the body — a losing booker must see
+    # a failure, not something r.ok would treat as success.
+    confirmed = [r for r in responses if r.status_code == 201]
+    slot_taken = [r for r in responses if r.status_code == 409]
 
     assert len(confirmed) == 1, f"expected exactly one confirmed booking for the same slot, got {len(confirmed)}"
+    assert confirmed[0].json()["status"] == "confirmed"
     assert len(slot_taken) == len(_COMPETING_PATIENT_IDS) - 1
+    assert all(r.json()["detail"]["error"] == "slot_taken" for r in slot_taken)
 
 
 def test_retrying_the_same_idempotency_key_returns_the_same_appointment_not_a_second_one():
@@ -97,6 +99,36 @@ def test_retrying_the_same_idempotency_key_returns_the_same_appointment_not_a_se
     assert first.json()["status"] == "confirmed"
     assert second.json()["status"] == "confirmed"
     assert first.json()["appointment_id"] == second.json()["appointment_id"]
+
+
+def test_reusing_an_idempotency_key_for_a_different_slot_is_a_conflict_not_a_replay():
+    # Round-22 review (2026-08-06): the review's explicit ask — a reused
+    # key with a genuinely different request must never be silently
+    # treated as "the same booking, here's your original confirmation."
+    headers = {"Authorization": f"Bearer {_token()}"}
+    key = str(uuid.uuid4())
+    first_slot = _fresh_slot_id()
+    second_slot = _fresh_slot_id()
+    assert first_slot != second_slot
+
+    first = httpx.post(
+        f"{GATEWAY}/appointments",
+        json={"patient_id": 1601, "slot_id": first_slot, "idempotency_key": key, "reason": "original booking"},
+        headers=headers,
+        timeout=10,
+    )
+    assert first.status_code == 201
+
+    second = httpx.post(
+        f"{GATEWAY}/appointments",
+        json={"patient_id": 1601, "slot_id": second_slot, "idempotency_key": key, "reason": "original booking"},
+        headers=headers,
+        timeout=10,
+    )
+
+    assert second.status_code == 409
+    assert second.json()["detail"]["error"] == "idempotency_key_conflict"
+    assert second.json()["detail"]["existing_appointment_id"] == first.json()["appointment_id"]
 
 
 def test_concurrent_retries_of_the_same_idempotency_key_all_agree_on_one_appointment():

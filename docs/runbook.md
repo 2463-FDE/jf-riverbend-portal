@@ -110,6 +110,29 @@ NOT NULL;` afterward — a non-null `status_legacy` means that row's status was
 changed and should be checked by a human before trusting the new
 `'unknown'` value operationally.
 
+**Before applying migration 013 — check for duplicate-confirmed
+appointments first (Stage 4, RIV-175):** migration 013 adds a UNIQUE index
+guaranteeing at most one `'confirmed'` appointment per slot (the fix for
+"charged twice"/two confirmations for one appointment). Its own preflight
+check will **refuse to run** — `apply.sh`'s `set -e` then stops the whole
+deploy — if any slot still has more than one confirmed appointment. This is
+deliberate: an earlier version of this migration auto-cancelled the losing
+row(s) based only on `created_at`/`id`, and a PR #20 review correctly
+flagged that as too consequential to do silently — cancelling a real
+confirmed appointment is a patient-facing state change that deserves human
+review, not a migration-time heuristic.
+
+If `apply.sh` stops with an `appointments_confirmed_slot_unique: N slot(s)
+still have more than one confirmed appointment` error: run
+`db/migrations/scripts/reconcile_duplicate_confirmed_appointments.sql` —
+**read its header first** and review the flagged appointments with clinical
+ops/billing before running its `UPDATE` (it reclassifies every
+non-earliest confirmed row per duplicated slot to `'cancelled_duplicate'`,
+stamped with `reconciled_duplicate_of` — nothing is deleted, but whoever
+was counting on the cancelled appointment needs to be told). Re-run
+`apply.sh` afterward; migration 013's preflight will pass once no slot has
+more than one confirmed appointment left.
+
 ## Demo accounts
 
 All seeded users share password `portal123`, role `staff`. Examples:

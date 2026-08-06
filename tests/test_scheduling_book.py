@@ -3,11 +3,13 @@ RIV-175, migration 013).
 
 Drives book() directly against a fake psycopg2 connection/cursor (no real
 Postgres) that understands exactly the statement sequence book() issues:
-an idempotency-key SELECT, a SAVEPOINT, the INSERT, then either
-RELEASE SAVEPOINT + commit (success) or ROLLBACK TO SAVEPOINT + a
-constraint-specific recovery path. Mirrors this repo's existing
-fake-session style for other services, adapted to raw psycopg2 since this
-module deliberately doesn't use the ORM (see book.py's own docstring).
+an idempotency-key SELECT (id, slot_id, provider, reason, location,
+scheduled_for — round-22 review: enough to fingerprint-check a replay, not
+just its bare id), a SAVEPOINT, the INSERT, then either RELEASE SAVEPOINT +
+commit (success) or ROLLBACK TO SAVEPOINT + a constraint-specific recovery
+path. Mirrors this repo's existing fake-session style for other services,
+adapted to raw psycopg2 since this module deliberately doesn't use the ORM
+(see book.py's own docstring).
 """
 import pytest
 import psycopg2
@@ -15,6 +17,8 @@ import psycopg2
 from conftest import load_module
 
 book_mod = load_module("services/scheduling-service/book.py", "scheduling_book")
+
+_BOOKING = dict(provider="Dr. X", reason="Follow-up", location="Riverbend Main", scheduled_for=None)
 
 
 class _FakeUniqueViolation(psycopg2.errors.UniqueViolation):
@@ -41,7 +45,7 @@ class _FakeCursor:
 
     def execute(self, sql, params=None):
         s = sql.strip()
-        if s.startswith("SELECT id FROM appointments"):
+        if s.startswith("SELECT id, slot_id, provider, reason, location, scheduled_for FROM appointments"):
             patient_id, idempotency_key = params
             self._last = self._state.select_idempotency(patient_id, idempotency_key)
         elif s == "SAVEPOINT before_insert":
@@ -77,6 +81,10 @@ class _FakeConn:
         self.closed = True
 
 
+def _row(appt_id, slot_id=88231, provider="Dr. X", reason="Follow-up", location="Riverbend Main", scheduled_for=None):
+    return (appt_id, slot_id, provider, reason, location, scheduled_for)
+
+
 class _FreshBookingState:
     """No existing row for any idempotency key; INSERT always succeeds."""
 
@@ -95,14 +103,15 @@ class _FreshBookingState:
 
 
 class _ExistingIdempotencyKeyState:
-    """A row already exists for (patient_id, idempotency_key) — the
-    pre-check must short-circuit before any INSERT is attempted."""
+    """A row already exists for (patient_id, idempotency_key) with the SAME
+    booking details — the pre-check must short-circuit before any INSERT is
+    attempted, and return that row as a valid replay."""
 
-    def __init__(self, existing_id):
-        self.existing_id = existing_id
+    def __init__(self, existing_row):
+        self.existing_row = existing_row
 
     def select_idempotency(self, patient_id, idempotency_key):
-        return (self.existing_id,)
+        return self.existing_row
 
     def insert(self, params):
         raise AssertionError("insert must not be attempted when the idempotency pre-check finds an existing row")
@@ -126,15 +135,15 @@ class _ConcurrentIdempotencyRaceState:
     and the second SELECT (after ROLLBACK TO SAVEPOINT, same transaction)
     now sees the winner's committed row."""
 
-    def __init__(self, winner_id):
-        self.winner_id = winner_id
+    def __init__(self, winner_row):
+        self.winner_row = winner_row
         self.select_calls = 0
 
     def select_idempotency(self, patient_id, idempotency_key):
         self.select_calls += 1
         if self.select_calls == 1:
             return None
-        return (self.winner_id,)
+        return self.winner_row
 
     def insert(self, params):
         raise _FakeUniqueViolation("appointments_idempotency_key_unique")
@@ -166,16 +175,40 @@ def test_fresh_booking_inserts_and_commits(monkeypatch):
     assert conn.closed is True
 
 
-def test_idempotency_replay_short_circuits_before_any_insert(monkeypatch):
-    state = _ExistingIdempotencyKeyState(existing_id=42)
+def test_idempotency_replay_with_matching_details_short_circuits_before_any_insert(monkeypatch):
+    state = _ExistingIdempotencyKeyState(_row(42, slot_id=88231, **_BOOKING))
     conn = _FakeConn(state)
     monkeypatch.setattr(book_mod, "get_conn", lambda: conn)
 
-    appointment_id, is_replay = book_mod.book(1042, 88231, "key-abc")
+    appointment_id, is_replay = book_mod.book(1042, 88231, "key-abc", **_BOOKING)
 
     assert appointment_id == 42
     assert is_replay is True
     assert conn.rollback_count == 0
+
+
+def test_idempotency_replay_with_a_different_slot_raises_conflict_not_a_false_replay(monkeypatch):
+    # Round-22 review (2026-08-06): reusing a key for a DIFFERENT slot must
+    # never silently return the original appointment as if it were the one
+    # just requested.
+    state = _ExistingIdempotencyKeyState(_row(42, slot_id=88231, **_BOOKING))
+    conn = _FakeConn(state)
+    monkeypatch.setattr(book_mod, "get_conn", lambda: conn)
+
+    with pytest.raises(book_mod.IdempotencyKeyConflict) as exc_info:
+        book_mod.book(1042, 99999, "key-abc", **_BOOKING)  # same key, different slot_id
+
+    assert exc_info.value.existing_appointment_id == 42
+
+
+def test_idempotency_replay_with_a_different_reason_also_raises_conflict(monkeypatch):
+    state = _ExistingIdempotencyKeyState(_row(42, slot_id=88231, **_BOOKING))
+    conn = _FakeConn(state)
+    monkeypatch.setattr(book_mod, "get_conn", lambda: conn)
+
+    mismatched = {**_BOOKING, "reason": "a completely different reason"}
+    with pytest.raises(book_mod.IdempotencyKeyConflict):
+        book_mod.book(1042, 88231, "key-abc", **mismatched)
 
 
 def test_slot_taken_by_a_different_booking_returns_none_not_replay(monkeypatch):
@@ -192,11 +225,11 @@ def test_slot_taken_by_a_different_booking_returns_none_not_replay(monkeypatch):
 
 
 def test_concurrent_idempotency_race_returns_winners_id_as_replay(monkeypatch):
-    state = _ConcurrentIdempotencyRaceState(winner_id=77)
+    state = _ConcurrentIdempotencyRaceState(_row(77, slot_id=88231, **_BOOKING))
     conn = _FakeConn(state)
     monkeypatch.setattr(book_mod, "get_conn", lambda: conn)
 
-    appointment_id, is_replay = book_mod.book(1042, 88231, "key-abc")
+    appointment_id, is_replay = book_mod.book(1042, 88231, "key-abc", **_BOOKING)
 
     assert appointment_id == 77
     assert is_replay is True
@@ -204,6 +237,17 @@ def test_concurrent_idempotency_race_returns_winners_id_as_replay(monkeypatch):
     # call) — commit, not rollback.
     assert conn.commit_count == 1
     assert conn.rollback_count == 0
+
+
+def test_concurrent_idempotency_race_with_mismatched_details_raises_conflict(monkeypatch):
+    state = _ConcurrentIdempotencyRaceState(_row(77, slot_id=88231, **_BOOKING))
+    conn = _FakeConn(state)
+    monkeypatch.setattr(book_mod, "get_conn", lambda: conn)
+
+    with pytest.raises(book_mod.IdempotencyKeyConflict) as exc_info:
+        book_mod.book(1042, 55555, "key-abc", **_BOOKING)  # different slot than the winner's
+
+    assert exc_info.value.existing_appointment_id == 77
 
 
 def test_unexpected_unique_violation_propagates_instead_of_reporting_slot_taken(monkeypatch):

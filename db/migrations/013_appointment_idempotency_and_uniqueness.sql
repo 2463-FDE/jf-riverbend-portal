@@ -19,55 +19,46 @@
 --      a client retry of a slow POST with the same key returns the
 --      original booking instead of racing a second insert for it.
 --
--- Reconciling existing dirty data before the slot index: this repo's own
--- seed data (db/seed/generate_seed.py) already has multiple slots with
--- more than one 'confirmed' appointment — one is the hand-authored RIV-175
--- teaching fixture (slot 88231, two confirmed rows ~400ms apart), the rest
--- are an unintended side effect of the seed generator's random slot
--- assignment never checking for a collision. A plain CREATE UNIQUE INDEX
--- would fail outright against this data — the same lesson migration 009
--- already learned for insurance_coverages.status. Never silently delete
--- the loser: for each slot_id, the earliest-created 'confirmed' row
--- (created_at, ties broken by id) stays confirmed; every other confirmed
--- row for that slot is reclassified to 'cancelled_duplicate' and stamped
--- with reconciled_duplicate_of pointing at the id of the row it lost to —
--- fully recoverable/auditable, nothing destroyed. Guarded by the same
--- pg_indexes check as the index creation itself, so this reconciliation
--- runs exactly once, not on every apply.sh re-run.
+-- Round-22 review (2026-08-06): this migration originally reconciled
+-- pre-existing duplicate-confirmed rows ITSELF — ranking by created_at/id
+-- and auto-flipping every loser to 'cancelled_duplicate' before adding the
+-- index, the same "remap and log a NOTICE" shape migration 009 already
+-- used for insurance_coverages.status. The review correctly called that
+-- out as too consequential to do silently in a migration: unlike remapping
+-- an out-of-vocabulary status value (009's case, already-anomalous data
+-- with no valid interpretation), flipping 'confirmed' to
+-- 'cancelled_duplicate' is an application-visible, patient-facing state
+-- change based only on a created_at/id heuristic, with no human review —
+-- on real production data that can silently cancel a real appointment
+-- someone is counting on.
+--
+-- This migration now FAILS LOUDLY instead and touches zero rows if any
+-- slot still has more than one confirmed appointment. Resolving those
+-- duplicates is a separate, explicit, human-reviewed step — see
+-- db/migrations/scripts/reconcile_duplicate_confirmed_appointments.sql and
+-- docs/runbook.md's "Before applying migration 013" section. Run that
+-- script (reviewed by a human, not just an engineer) first, then re-run
+-- this migration; its preflight will pass once no slot has more than one
+-- confirmed appointment left.
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reconciled_duplicate_of INTEGER REFERENCES appointments(id);
 
 DO $$
 DECLARE
-    reconciled_count integer;
+    dup_slot_count integer;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_indexes WHERE indexname = 'appointments_confirmed_slot_unique'
     ) THEN
-        WITH ranked AS (
-            SELECT id, slot_id,
-                   row_number() OVER (
-                       PARTITION BY slot_id
-                       ORDER BY created_at ASC, id ASC
-                   ) AS rn
-            FROM appointments
+        SELECT count(*) INTO dup_slot_count FROM (
+            SELECT slot_id FROM appointments
             WHERE status = 'confirmed'
-        ),
-        losers AS (
-            SELECT r.id, first_row.id AS winner_id
-            FROM ranked r
-            JOIN ranked first_row ON first_row.slot_id = r.slot_id AND first_row.rn = 1
-            WHERE r.rn > 1
-        )
-        UPDATE appointments a
-            SET status = 'cancelled_duplicate',
-                reconciled_duplicate_of = losers.winner_id
-            FROM losers
-            WHERE a.id = losers.id;
+            GROUP BY slot_id
+            HAVING count(*) > 1
+        ) dupes;
 
-        GET DIAGNOSTICS reconciled_count = ROW_COUNT;
-        IF reconciled_count > 0 THEN
-            RAISE NOTICE 'appointments_confirmed_slot_unique: reconciled % pre-existing duplicate-confirmed appointment(s) to cancelled_duplicate before adding the unique index; see reconciled_duplicate_of for the surviving appointment each was superseded by.', reconciled_count;
+        IF dup_slot_count > 0 THEN
+            RAISE EXCEPTION 'appointments_confirmed_slot_unique: % slot(s) still have more than one confirmed appointment. This migration will NOT auto-cancel a real confirmed appointment based on created_at/id alone. Run db/migrations/scripts/reconcile_duplicate_confirmed_appointments.sql (reviewed by a human first) to resolve them, then re-run this migration. See docs/runbook.md.', dup_slot_count;
         END IF;
 
         CREATE UNIQUE INDEX appointments_confirmed_slot_unique

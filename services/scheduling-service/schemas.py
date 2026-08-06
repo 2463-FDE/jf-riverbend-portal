@@ -61,8 +61,14 @@ class BookingRequest(BaseModel):
 
 
 class BookingResponse(BaseModel):
+    # Round-22 review (2026-08-06): this used to also carry status="slot_taken"
+    # with a 201 — a losing concurrent booking looked identical to a success
+    # to any caller that only checked the HTTP status. slot_taken and an
+    # idempotency_key conflict are now both HTTPException(409) instead
+    # (see app.py::create_appointment); "confirmed" is the only status this
+    # model is ever actually returned with.
     appointment_id: Optional[int] = None
-    status: str  # confirmed | slot_taken
+    status: str  # confirmed
 
 
 class CancelResponse(BaseModel):
