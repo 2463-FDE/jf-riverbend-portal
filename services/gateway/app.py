@@ -5,10 +5,20 @@ The Next.js portal talks only to this service; it fans out to the internal
 FastAPI services and owns login/sessions.
 
 Inherited shortcomings (left as-is from the handoff):
-  * Records fan-out forwards the caller's session but never binds it to the
-    {patient_id} being requested — any logged-in user can read any chart (IDOR).
   * Sessions never expire (see security.create_session / auth.yaml).
   * One role for everyone; no per-action authorization beyond "is logged in".
+
+Week 4 catch-up: the RIV-201 IDOR ("Records fan-out forwards the caller's
+session but never binds it to the {patient_id} being requested") is fixed
+for `/patients/{id}` and `/patients/{id}/records` — see proxy_patient/
+proxy_records below and services/records-service/patient_access_gate.py.
+`/records/search` is scoped to the caller's authorized patients rather than
+denying outright, since it returns a filtered list, not a single patient's
+detail — see proxy_search below. `/patients` (roster browse/name search) is
+a deliberate exception: front desk needs to find/register a patient before
+any patient-specific grant could exist for them, so it stays gated on
+"authenticated staff" only, same as before — see proxy_patients below and
+the PR's "Open decisions" section.
 """
 import uuid
 from contextlib import asynccontextmanager
@@ -224,24 +234,68 @@ def proxy_patients(
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    return _get("records", "/patients", params={"q": q, "limit": limit, "offset": offset})
+    # Week 4 catch-up decision: deliberately left as "authenticated staff
+    # only," not patient-scoped. This is a roster browse/name-search used to
+    # FIND a patient (e.g. before registering them or booking their first
+    # visit) — a patient-specific grant can't exist yet for someone front
+    # desk hasn't located. Returns demographics/summary rows only, not chart
+    # content. See the module docstring above and the PR's "Open decisions."
+    #
+    # Codex review (2026-08-07, PR #23): that design decision doesn't excuse
+    # this route from proving the call came through the gateway at all —
+    # records-service's port is published to the host, so without
+    # X-Internal-Token a direct caller could skip require_session entirely
+    # and enumerate the whole roster. forward_status=True so a 401 (missing/
+    # misconfigured token) reaches the frontend, not a silently-flattened 200.
+    headers = _correlation_headers()
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records", "/patients", params={"q": q, "limit": limit, "offset": offset},
+        headers=headers, forward_status=True,
+    )
 
 
+# Week 4 catch-up: patient/records reads now carry the same two headers as
+# proxy_patient_view below — X-Internal-Token (proves the call came via this
+# gateway, not a direct caller hitting records-service's published host
+# port) and X-Actor-Id (the session's username, which records-service's new
+# SqlPatientAccessGate checks against a real per-(actor, patient) grant
+# BEFORE any patient lookup — see docs/analysis/RIV-201-patient-records-
+# IDOR.md and services/records-service/patient_access_gate.py). This is the
+# actual RIV-201 fix, not the defense-in-depth-only /view route: a caller
+# without a grant for {patient_id} now gets 403, not the patient's data.
+# forward_status=True so that 401/403/404/503 from records-service reach the
+# frontend as-is instead of being silently flattened into a 200.
 @app.get("/patients/{patient_id}")
 def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
-    return _get("records", f"/patients/{patient_id}")
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get("records", f"/patients/{patient_id}", headers=headers, forward_status=True)
 
 
 @app.get("/patients/{patient_id}/records")
 def proxy_records(patient_id: int, session: dict = Depends(require_session)):
-    # IDOR: a valid session is required, but it is never checked against
-    # {patient_id}. {patient_id} is the sequential primary key.
-    return _get("records", f"/patients/{patient_id}/records")
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get("records", f"/patients/{patient_id}/records", headers=headers, forward_status=True)
 
 
 @app.get("/records/search")
 def proxy_search(q: str, session: dict = Depends(require_session)):
-    return _get("records", "/records/search", params={"q": q})
+    # Week 4 catch-up: unlike /patients above, this returns actual clinical
+    # note content (record bodies/snippets) across the whole patient
+    # population, keyed only by a free-text guess — an alternate IDOR path
+    # if left unscoped. records-service now filters results to the caller's
+    # authorized patients using the same grant table as /patients/{id} and
+    # /patients/{id}/records (see authorized_patient_ids in
+    # patient_access_gate.py). A denied/unauthorized match is silently
+    # dropped, never surfaced as a count or placeholder.
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get("records", "/records/search", params={"q": q}, headers=headers, forward_status=True)
 
 
 # --------------------------------------------------------------------------- #

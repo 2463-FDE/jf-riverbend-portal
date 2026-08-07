@@ -2455,6 +2455,15 @@ INSERT INTO consents (patient_id, kind, signed_at) VALUES
  (1850, 'npp_ack', now()),
  (1851, 'treatment_consent', now());
 
+INSERT INTO patient_access_grants (username, patient_id) VALUES
+ ('frontdesk', 1042),
+ ('frontdesk', 1330),
+ ('frontdesk', 1588),
+ ('frontdesk', 1601),
+ ('drpatel', 1043),
+ ('drnguyen', 1330),
+ ('drnguyen', 1601);
+
 INSERT INTO roi_requests (patient_id, requested_by, recipient, recipient_type, purpose, date_range_start, date_range_end, status, created_at) VALUES
  (1766, 'billing1', 'County Health', 'provider', 'Insurance claim', '2024-01-01', '2026-06-01', 'pending', '2026-05-24 00:00:00'),
  (1607, 'roiclerk', 'BlueCross Claims', 'payer', 'Personal copy', '2024-01-01', '2026-06-01', 'pending', '2026-05-08 00:00:00'),

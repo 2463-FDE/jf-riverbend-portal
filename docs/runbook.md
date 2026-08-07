@@ -133,6 +133,48 @@ was counting on the cancelled appointment needs to be told). Re-run
 `apply.sh` afterward; migration 013's preflight will pass once no slot has
 more than one confirmed appointment left.
 
+**Before enforcing migration 014 on any environment with real existing
+patients (Week 4 catch-up, RIV-201):** migration 014 adds
+`patient_access_grants` — the table `services/records-service/
+patient_access_gate.py`'s `SqlPatientAccessGate` checks before serving
+`GET /patients/{id}`, `GET /patients/{id}/records`, or `GET
+/patients/{id}/view`. The table ships **empty**; only the demo seed
+(`db/seed/generate_seed.py`) populates rows. Applying `apply.sh` alone
+against a real environment does **not** create any grants — every
+existing staff account would be denied every existing patient's chart the
+moment this code deploys, with no in-app way to add a grant.
+
+This is deliberate, not an oversight: there is no existing digital signal
+in this schema (no care-team table, no per-patient assignment — see
+`docs/analysis/RIV-201-patient-records-IDOR.md` §6) that could be used to
+correctly auto-infer which staff member should be granted which patient.
+Guessing (e.g. "grant every active user every existing patient" as a
+migration-time default) would silently defeat the fix this migration
+exists to deliver — the same reasoning `adr/0004-master-patient-index-
+match-key.md` used to rule out auto-merging duplicate patients rather
+than flagging them for review.
+
+**Required rollout step, before this code reaches any environment with
+real patients:** populate `patient_access_grants` for real user/patient
+relationships as an explicit, reviewed operational decision — e.g.:
+
+```sql
+-- Example only — replace with your actual staff/patient assignment
+-- decision. Granting broadly here just re-creates the pre-fix "any staff
+-- can see any patient" posture; the point of this step is to make that a
+-- reviewed choice, not a byte-for-byte revert of what this migration closed.
+INSERT INTO patient_access_grants (username, patient_id)
+SELECT u.username, p.id
+FROM users u CROSS JOIN patients p
+WHERE u.role = 'staff' AND u.is_active
+ON CONFLICT (username, patient_id) DO NOTHING;
+```
+
+If a deployment cannot complete this step immediately, do not apply
+migration 014 (or deploy this code) to that environment yet — an empty
+grant table is a hard denial, not a soft/partial one, for every route it
+protects.
+
 ## Demo accounts
 
 All seeded users share password `portal123`, role `staff`. Examples:

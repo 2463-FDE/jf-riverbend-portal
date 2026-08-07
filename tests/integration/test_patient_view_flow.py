@@ -5,9 +5,16 @@ Skipped by default in CI (`pytest -m "not integration"`).
 
 Stage 3 — end-to-end GET /patients/{id}/view (gateway -> records-service),
 against seeded demo data only (db/seed/patients.csv: 1042 Maria Gonzalez,
-1043 James O'Brien). Confirms the new route's actual behavior, and that it
-leaves the sibling IDOR endpoint's documented behavior (tested in
-test_records_flow.py) untouched.
+1043 James O'Brien). Confirms the route's actual behavior.
+
+Week 4 catch-up: /patients/{id}/view is now gated by the same
+SqlPatientAccessGate as the sibling /patients/{id}/records route (real
+per-(actor, patient) grants — db/seed/generate_seed.py seeds frontdesk for
+1042 but NOT 1043), replacing the earlier authenticated-staff-only
+StaffAccessGate this file used to document. test_gate_is_authenticated_
+staff_not_patient_specific and test_legacy_idor_endpoint_is_unchanged_by_
+this_route below were rewritten to prove the OPPOSITE of what their old
+names claimed.
 
 Also covers the review fix (round, 2026-08-05): records-service's host port
 is published (docker-compose.yml), so a caller can reach it directly,
@@ -54,12 +61,25 @@ def test_authenticated_staff_gets_a_completed_view_with_evidence():
         assert evidence_id.split(":")[0] in ("patient", "encounter", "provider", "record")
 
 
-def test_gate_is_authenticated_staff_not_patient_specific():
-    # The defining property of Stage 3's scope decision: the SAME frontdesk
-    # session that can view 1042 above can also view an unrelated patient
-    # (1043) through this route — this route makes no ownership claim, unlike
-    # the sibling /patients/{id}/records IDOR this deliberately does not fix.
+def test_gate_is_now_patient_specific_not_just_authenticated_staff():
+    # Week 4 catch-up: this replaces the old
+    # test_gate_is_authenticated_staff_not_patient_specific, which proved
+    # the OPPOSITE of what its new name says — the same frontdesk session
+    # that can view 1042 could ALSO view an unrelated patient (1043)
+    # through this route, because StaffAccessGate made no ownership claim.
+    # SqlPatientAccessGate denies it: frontdesk has no patient_access_grants
+    # row for 1043 (db/seed/generate_seed.py).
     headers = {"Authorization": f"Bearer {_token()}"}
+    r = httpx.get(f"{GATEWAY}/patients/1043/view", headers=headers, timeout=10)
+    assert r.status_code == 403
+    assert r.json()["detail"]["reason"] == "not_authorized"
+
+
+def test_a_different_user_granted_1043_can_view_it():
+    # The other half: drpatel IS granted 1043 (seeded as James O'Brien's
+    # physician) — same route, different actor, opposite outcome from
+    # frontdesk above.
+    headers = {"Authorization": f"Bearer {_token('drpatel')}"}
     r = httpx.get(f"{GATEWAY}/patients/1043/view", headers=headers, timeout=10)
     assert r.status_code == 200
     assert r.json()["patient_id"] == 1043
@@ -74,11 +94,14 @@ def test_direct_call_with_spoofed_actor_is_rejected():
     assert r.status_code == 401
 
 
-def test_legacy_idor_endpoint_is_unchanged_by_this_route():
-    # docs/analysis/RIV-201-patient-records-IDOR.md: this route must not be
-    # described as fixing RIV-201. Confirm the legacy endpoint still returns
-    # 200 for a cross-patient request with no ownership check — same
-    # behavior test_records_flow.py's xfail already documents.
+def test_legacy_idor_endpoint_is_now_patient_scoped_too():
+    # Week 4 catch-up: this replaces the old
+    # test_legacy_idor_endpoint_is_unchanged_by_this_route, which documented
+    # docs/analysis/RIV-201-patient-records-IDOR.md's finding as still true
+    # — a cross-patient request used to return 200 with no ownership check
+    # at all. It's fixed now; see tests/integration/test_records_flow.py::
+    # test_user_cannot_read_other_patients_chart for the equivalent
+    # regression test living alongside the rest of that endpoint's coverage.
     headers = {"Authorization": f"Bearer {_token()}"}
     r = httpx.get(f"{GATEWAY}/patients/1043/records", headers=headers, timeout=10)
-    assert r.status_code == 200
+    assert r.status_code == 403

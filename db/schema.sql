@@ -68,6 +68,23 @@ CREATE TABLE IF NOT EXISTS patient_links (
 CREATE INDEX IF NOT EXISTS patient_links_patient_id_idx ON patient_links (patient_id);
 CREATE INDEX IF NOT EXISTS patient_links_linked_patient_id_idx ON patient_links (linked_patient_id);
 
+-- Week 4 catch-up (migration 014): the patient-ownership/care-team-membership
+-- fact RIV-201 identified as missing — see docs/analysis/RIV-201-patient-
+-- records-IDOR.md §6. `username` mirrors AuthorizationRequest.actor_id (the
+-- gateway's X-Actor-Id, i.e. session.get("username")) exactly. Action/purpose
+-- stay enforced in code (see libs/patient_view_agent), not as columns here.
+CREATE TABLE IF NOT EXISTS patient_access_grants (
+    id          SERIAL PRIMARY KEY,
+    username    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    granted_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at  TIMESTAMPTZ,             -- NULL = active; set = explicitly revoked
+    expires_at  TIMESTAMPTZ,             -- NULL = never expires
+    UNIQUE (username, patient_id)
+);
+CREATE INDEX IF NOT EXISTS patient_access_grants_username_idx ON patient_access_grants (username);
+CREATE INDEX IF NOT EXISTS patient_access_grants_patient_id_idx ON patient_access_grants (patient_id);
+
 CREATE TABLE IF NOT EXISTS insurance_coverages (
     id            SERIAL PRIMARY KEY,
     patient_id    INTEGER NOT NULL REFERENCES patients(id),
