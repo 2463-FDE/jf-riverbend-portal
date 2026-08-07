@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Card from "../components/Card";
 import StatusBadge, { statusVariant } from "../components/StatusBadge";
 import { IconRecords, IconLab, IconSearch, IconStethoscope } from "../components/icons";
@@ -24,6 +24,13 @@ export default function RecordsPage() {
   // (IDOR — intentional teaching point; see docs/handover/portal.har). We pass
   // whatever id is entered straight through to /api/records.
   const [patientId, setPatientId] = useState("1042");
+  // Mirrors patientId for reads inside already-in-flight async callbacks —
+  // state captured by a closure at call time can't see a later change, and
+  // an in-flight fetch has to know if the id moved on before it applies its
+  // response (see handlePatientIdChange below).
+  const patientIdRef = useRef(patientId);
+  patientIdRef.current = patientId;
+
   const [data, setData] = useState<EncounterBlock[] | null>(null);
   const [selected, setSelected] = useState<EncounterBlock | null>(null);
   const [status, setStatus] = useState("");
@@ -45,13 +52,34 @@ export default function RecordsPage() {
   const [reconciliationStatus, setReconciliationStatus] = useState("");
   const [reconciliationBusy, setReconciliationBusy] = useState(false);
 
+  // None of the three reads on this page bind their result to a specific
+  // caller/patient relationship server-side (see RIV-201 and the comments
+  // on each load* function below) — so the ONLY thing standing between a
+  // clinician and reading a different patient's data under the wrong
+  // heading is this client clearing stale panels the moment the id changes.
+  // Every keystroke drops all three results immediately; the load* functions
+  // additionally guard against a slow response for the OLD id landing after
+  // the id has already moved on (see patientIdRef checks below).
+  function handlePatientIdChange(value: string) {
+    setPatientId(value);
+    setData(null);
+    setSelected(null);
+    setStatus("");
+    setAiView(null);
+    setAiStatus("");
+    setReconciliation(null);
+    setReconciliationStatus("");
+  }
+
   async function loadReconciliation() {
+    const requestedId = patientId;
     setReconciliationBusy(true);
     setReconciliationStatus("");
     setReconciliation(null);
     try {
-      const res = await apiFetch(`/api/patients/${encodeURIComponent(patientId)}/reconciliation`);
+      const res = await apiFetch(`/api/patients/${encodeURIComponent(requestedId)}/reconciliation`);
       const json = await res.json();
+      if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
       if (!res.ok) {
         const detail = json?.detail;
         const reason = typeof detail === "string" ? detail : detail?.reason;
@@ -62,19 +90,23 @@ export default function RecordsPage() {
       }
       setReconciliation(json as ReconciliationResult);
     } catch (e) {
-      setReconciliationStatus(e instanceof Error ? e.message : "Could not check for related records.");
+      if (patientIdRef.current === requestedId) {
+        setReconciliationStatus(e instanceof Error ? e.message : "Could not check for related records.");
+      }
     } finally {
       setReconciliationBusy(false);
     }
   }
 
   async function loadAiView() {
+    const requestedId = patientId;
     setAiBusy(true);
     setAiStatus("");
     setAiView(null);
     try {
-      const res = await apiFetch(`/api/patients/${encodeURIComponent(patientId)}/view`);
+      const res = await apiFetch(`/api/patients/${encodeURIComponent(requestedId)}/view`);
       const json = await res.json();
+      if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
       if (!res.ok) {
         const detail = json?.detail;
         const reason = typeof detail === "string" ? detail : detail?.reason;
@@ -83,26 +115,32 @@ export default function RecordsPage() {
       }
       setAiView(json as PatientViewResult);
     } catch (e) {
-      setAiStatus(e instanceof Error ? e.message : "Could not load AI chart view.");
+      if (patientIdRef.current === requestedId) {
+        setAiStatus(e instanceof Error ? e.message : "Could not load AI chart view.");
+      }
     } finally {
       setAiBusy(false);
     }
   }
 
   async function load() {
+    const requestedId = patientId;
     setBusy(true);
     setStatus("");
     setSelected(null);
     try {
-      const res = await apiFetch(`/api/records?patient_id=${encodeURIComponent(patientId)}`);
+      const res = await apiFetch(`/api/records?patient_id=${encodeURIComponent(requestedId)}`);
       const json = await res.json();
+      if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
       const encounters: EncounterBlock[] = json.encounters ?? [];
       setData(encounters);
       setSelected(encounters[0] ?? null);
       if (encounters.length === 0) setStatus("No records found for this patient.");
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Could not load records.");
-      setData([]);
+      if (patientIdRef.current === requestedId) {
+        setStatus(e instanceof Error ? e.message : "Could not load records.");
+        setData([]);
+      }
     } finally {
       setBusy(false);
     }
@@ -125,7 +163,7 @@ export default function RecordsPage() {
               id="rec-patient"
               className="rb-input"
               value={patientId}
-              onChange={(e) => setPatientId(e.target.value)}
+              onChange={(e) => handlePatientIdChange(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && load()}
               inputMode="numeric"
             />
