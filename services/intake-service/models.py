@@ -1,5 +1,14 @@
 """ORM models intake-service touches. (Copy-paste per service — no shared lib yet.)"""
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.sql import func
 
 from db import Base
@@ -71,3 +80,24 @@ class PatientLink(Base):
     confirmed_by = Column(Text)                       # staff identifier; NULL until confirmed
     confirmed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PatientAccessGrant(Base):
+    """Week 4 catch-up (migration 014, PR #23) — the per-(user, patient) access
+    grant that records-service's SqlPatientAccessGate authorizes against.
+    intake-service writes a row here when a *front-desk* staff member registers
+    a patient (an authenticated actor is present), so the registrar can
+    immediately open the chart they just created without a separate grant step.
+    Self-service intake has no staff actor and creates no grant — those
+    patients need an explicit grant before any staff can view them (see
+    docs/runbook.md). Keyed on users.id, never username."""
+
+    __tablename__ = "patient_access_grants"
+    __table_args__ = (UniqueConstraint("user_id", "patient_id"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True))
+    expires_at = Column(DateTime(timezone=True))

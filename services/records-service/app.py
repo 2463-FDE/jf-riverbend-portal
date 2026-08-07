@@ -40,7 +40,12 @@ from libs.patient_view_agent import (
 )
 from logging_config import configure
 from models import AuditLog, Encounter, Patient, Record
-from patient_access_gate import SqlPatientAccessGate, authorized_patient_ids
+from patient_access_gate import (
+    SqlPatientAccessGate,
+    active_patient_ids_query,
+    authorized_patient_ids,
+    parse_user_id,
+)
 from patient_view_repository import SqlChartRepository
 from schemas import (
     EncounterOut,
@@ -103,27 +108,38 @@ def list_patients(
     q: str | None = Query(default=None, description="ILIKE filter on patient name"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
 ):
-    """Paginated patient list. `q` does a case-insensitive name match.
+    """Paginated patient roster / name search, scoped to the caller's grants.
 
-    Codex review (2026-08-07, PR #23): this route is deliberately staff-broad,
-    not patient-scoped — it's how front desk finds/registers a patient in
-    the first place, before any patient-specific grant could exist for them
-    (see the gateway's proxy_patients comment for the full rationale). But
-    that design decision does NOT excuse it from the same internal-token
-    boundary every other route in this file now has: records-service's port
-    is published to the host (docker-compose.yml), so without this check a
-    direct caller could skip the gateway's own require_session check
-    entirely and enumerate every patient's id/name/DOB/MRN. This does not
-    check X-Actor-Id — there is no per-actor decision to make on a route
-    that isn't patient-scoped by design.
+    PR #23 review round 2 (2026-08-07, finding 2): this route previously
+    returned every patient's id/name/DOB/gender/MRN to any authenticated staff
+    account — an enumeration/IDOR path the internal-token check alone did not
+    close (it only proves the gateway called, not that THIS user may see these
+    patients). It is now patient-scoped like every other read: results are
+    filtered in SQL to the caller's active grants (active_patient_ids_query),
+    so a user only ever sees rows they hold a grant for. Front-desk lookup keeps
+    working because trusted intake grants the registrar their new patient (see
+    intake-service). The returned set is audited; a DB/policy error is a 503,
+    never a silently empty 200.
     """
     _verify_internal_token(x_internal_token)
+    actor = x_actor_name or x_actor_id or "unknown"
+    user_id = parse_user_id(x_actor_id)
+    if user_id is None:
+        _write_audit(db, actor=actor, message="list_patients denied: no valid actor")
+        return PatientPage(items=[], total=0, limit=limit, offset=offset)
+
     try:
-        base = select(Patient)
-        count_q = select(func.count()).select_from(Patient)
+        base = select(Patient).where(Patient.id.in_(active_patient_ids_query(user_id)))
+        count_q = (
+            select(func.count())
+            .select_from(Patient)
+            .where(Patient.id.in_(active_patient_ids_query(user_id)))
+        )
         if q:
             pattern = f"%{q}%"
             base = base.where(Patient.name.ilike(pattern))
@@ -131,9 +147,7 @@ def list_patients(
 
         total = db.execute(count_q).scalar_one()
         rows = (
-            db.execute(
-                base.order_by(Patient.id).limit(limit).offset(offset)
-            )
+            db.execute(base.order_by(Patient.id).limit(limit).offset(offset))
             .scalars()
             .all()
         )
@@ -141,6 +155,11 @@ def list_patients(
         log.exception("list_patients: database error")
         raise HTTPException(status_code=503, detail="database unavailable")
 
+    _write_audit(
+        db,
+        actor=actor,
+        message=f"list_patients returned {len(rows)} patient(s): {sorted(p.id for p in rows)}",
+    )
     return PatientPage(
         items=[PatientSummary.model_validate(p) for p in rows],
         total=total,
@@ -149,10 +168,18 @@ def list_patients(
     )
 
 
+def _actor_label(x_actor_name: Optional[str], x_actor_id: Optional[str]) -> str:
+    """Human-legible audit actor: username (X-Actor-Name) when the gateway
+    forwarded it, else the stable users.id (X-Actor-Id), else 'unknown'.
+    Authorization always uses the id; this is display/audit only."""
+    return x_actor_name or x_actor_id or "unknown"
+
+
 def _authorize_or_deny(
     db: Session,
     *,
     x_actor_id: Optional[str],
+    x_actor_name: Optional[str] = None,
     x_request_id: Optional[str],
     patient_id: int,
     action: Action = Action.VIEW_PATIENT_CHART,
@@ -173,13 +200,14 @@ def _authorize_or_deny(
     try:
         SqlPatientAccessGate(db).authorize(request)
     except AuthorizationDenied as denial:
-        _deny_patient_access(db, x_actor_id, patient_id, denial)
+        _deny_patient_access(db, x_actor_id, patient_id, denial, x_actor_name=x_actor_name)
 
 
 @app.get("/patients/{patient_id}", response_model=PatientDetail)
 def get_patient(
     patient_id: int,
     x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
@@ -195,7 +223,7 @@ def get_patient(
     patient_access_gate.py.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_or_deny(db, x_actor_id=x_actor_id, x_request_id=x_request_id, patient_id=patient_id)
+    _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id)
 
     try:
         patient = db.get(Patient, patient_id)
@@ -208,7 +236,7 @@ def get_patient(
 
     _write_audit(
         db,
-        actor=x_actor_id or "unknown",
+        actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
     return PatientDetail.model_validate(patient)
@@ -218,6 +246,7 @@ def get_patient(
 def get_patient_records(
     patient_id: int,
     x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
@@ -231,7 +260,7 @@ def get_patient_records(
     below); this fix is scoped to authorization only.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_or_deny(db, x_actor_id=x_actor_id, x_request_id=x_request_id, patient_id=patient_id)
+    _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id)
 
     try:
         encounters = (
@@ -270,7 +299,7 @@ def get_patient_records(
 
     _write_audit(
         db,
-        actor=x_actor_id or "unknown",
+        actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient_records outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
     return PatientChart(patient_id=patient_id, encounters=chart)
@@ -298,7 +327,12 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
 
 
 def _deny_patient_access(
-    db: Session, x_actor_id: Optional[str], patient_id: int, denial: "AuthorizationDenied"
+    db: Session,
+    x_actor_id: Optional[str],
+    patient_id: int,
+    denial: "AuthorizationDenied",
+    *,
+    x_actor_name: Optional[str] = None,
 ) -> None:
     """Week 4 catch-up: renamed from _deny_patient_view — shared by every
     route that calls SqlPatientAccessGate.authorize() (get_patient,
@@ -308,7 +342,7 @@ def _deny_patient_access(
     raises; never returns."""
     _write_audit(
         db,
-        actor=x_actor_id or "unknown",
+        actor=_actor_label(x_actor_name, x_actor_id),
         message=(
             f"patient_access outcome=denied patient_id={patient_id} "
             f"reason={denial.denial.reason.value} correlation_id={denial.denial.correlation_id}"
@@ -363,6 +397,7 @@ def get_patient_view(
     patient_id: int,
     purpose: str = Query(default="treatment"),
     x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
@@ -410,7 +445,7 @@ def get_patient_view(
     try:
         access_gate.authorize(request)
     except AuthorizationDenied as denial:
-        _deny_patient_access(db, x_actor_id, patient_id, denial)
+        _deny_patient_access(db, x_actor_id, patient_id, denial, x_actor_name=x_actor_name)
 
     # Round-15 review (2026-08-06): SqlChartRepository's first read only
     # loads encounters for patient_id — an unknown id returns an empty
@@ -446,11 +481,11 @@ def get_patient_view(
             repository=SqlChartRepository(db),
         )
     except AuthorizationDenied as denial:
-        _deny_patient_access(db, x_actor_id, patient_id, denial)
+        _deny_patient_access(db, x_actor_id, patient_id, denial, x_actor_name=x_actor_name)
 
     _write_audit(
         db,
-        actor=x_actor_id or "unknown",
+        actor=_actor_label(x_actor_name, x_actor_id),
         message=(
             f"patient_view outcome={result.outcome.value} patient_id={patient_id} "
             f"evidence_count={len(result.evidence_ids)} correlation_id={result.correlation_id} "
@@ -474,35 +509,50 @@ def get_patient_view(
     return result
 
 
+_SEARCH_RESULT_LIMIT = 50  # bound results (PR #23 review round 2, finding 4)
+
+
 @app.get("/records/search", response_model=list[RecordSearchHit])
 def search_records(
     q: str = Query(..., min_length=1, description="free-text query"),
     x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
 ):
     """
-    Free-text search across records, filtered to the caller's authorized patients.
+    Free-text search across records, scoped in SQL to the caller's grants.
 
-    DEBT D8: full-table ILIKE scan on records.body with NO supporting index and
-    NO result limit. On a real chart corpus this scans every row every call —
-    untouched, deliberate debt (this fix is scoped to authorization).
+    PR #23 review round 2 (2026-08-07, finding 4): this route previously loaded
+    every matching record BODY first, then filtered by grant in Python — and a
+    grant-lookup failure returned a silently empty 200, hiding the error, with
+    no audit. Now the active-grant set is joined INTO the query
+    (active_patient_ids_query), so bodies for unauthorized patients are never
+    read; a DB/policy error surfaces as 503 (not empty success); results are
+    bounded; and the patients actually returned are audited. A hit for a patient
+    the caller has no grant for is simply never selected.
 
-    Week 4 catch-up: unlike a single-patient detail route, this returns a
-    filtered LIST, so the fix is filtering, not deny-the-whole-request — a
-    hit belonging to a patient the caller has no grant for is silently
-    dropped, never surfaced as a count or placeholder (see
-    authorized_patient_ids in patient_access_gate.py). An unauthenticated
-    caller (no/invalid internal token) still gets a hard 401, same as every
-    other route here.
+    DEBT D8: still a full-table ILIKE scan on records.body with no supporting
+    index — untouched, deliberate debt (this fix is scoped to authorization),
+    now at least bounded by _SEARCH_RESULT_LIMIT.
     """
     _verify_internal_token(x_internal_token)
+    actor = x_actor_name or x_actor_id or "unknown"
+    user_id = parse_user_id(x_actor_id)
+    if user_id is None:
+        _write_audit(db, actor=actor, message="records_search denied: no valid actor")
+        return []
 
     try:
-        # full-table scan on body — no index, no limit (deliberate debt)
         rows = (
             db.execute(
-                select(Record).where(Record.body.ilike(f"%{q}%"))
+                select(Record)
+                .where(
+                    Record.patient_id.in_(active_patient_ids_query(user_id)),
+                    Record.body.ilike(f"%{q}%"),
+                )
+                .order_by(Record.id)
+                .limit(_SEARCH_RESULT_LIMIT)
             )
             .scalars()
             .all()
@@ -511,5 +561,9 @@ def search_records(
         log.exception("search_records: database error")
         raise HTTPException(status_code=503, detail="database unavailable")
 
-    allowed = authorized_patient_ids(db, x_actor_id or "", {r.patient_id for r in rows})
-    return [RecordSearchHit.model_validate(r) for r in rows if r.patient_id in allowed]
+    _write_audit(
+        db,
+        actor=actor,
+        message=f"records_search returned {len(rows)} hit(s) across patients {sorted({r.patient_id for r in rows})}",
+    )
+    return [RecordSearchHit.model_validate(r) for r in rows]

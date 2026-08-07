@@ -154,26 +154,48 @@ exists to deliver — the same reasoning `adr/0004-master-patient-index-
 match-key.md` used to rule out auto-merging duplicate patients rather
 than flagging them for review.
 
-**Required rollout step, before this code reaches any environment with
-real patients:** populate `patient_access_grants` for real user/patient
-relationships as an explicit, reviewed operational decision — e.g.:
+**Required rollout step (two-phase), before this code serves real chart
+access:**
+
+*Phase 1 — deploy closed.* Apply migration 014 and this code with the grant
+table empty. Every chart route is deny-by-default; no one can read a patient
+they hold no explicit grant for. This phase is safe to deploy on its own — it
+removes the IDOR — but staff cannot open existing charts until Phase 2.
+
+*Phase 2 — populate grants from a reviewed source.* Insert only the specific
+user/patient relationships that are actually justified, keyed on `users.id`
+(never username), as an explicit, reviewed decision. From here on, front-desk
+registration grants the registrar their new patient automatically
+(`intake-service`), so Phase 2 is a one-time backfill for patients that
+already existed before this deploy.
+
+Do **not** grant broadly. A `CROSS JOIN users × patients` — or any "every
+active staff member gets every patient" backfill — re-creates the exact
+"any staff can see any chart" posture this migration exists to close. It is
+not an acceptable shortcut. Derive grants from a real, reviewed assignment
+signal and confirm the result before enforcing, for example:
 
 ```sql
--- Example only — replace with your actual staff/patient assignment
--- decision. Granting broadly here just re-creates the pre-fix "any staff
--- can see any patient" posture; the point of this step is to make that a
--- reviewed choice, not a byte-for-byte revert of what this migration closed.
-INSERT INTO patient_access_grants (username, patient_id)
-SELECT u.username, p.id
-FROM users u CROSS JOIN patients p
-WHERE u.role = 'staff' AND u.is_active
-ON CONFLICT (username, patient_id) DO NOTHING;
+-- Minimum-necessary starting point: grant each provider the patients they
+-- have actually treated (encounters.provider ~ the provider's name), keyed on
+-- users.id. This is an ILLUSTRATION of a reviewed, per-relationship backfill —
+-- NOT every staff member every patient. Replace the join with your clinic's
+-- real assignment source and review the rows before running.
+INSERT INTO patient_access_grants (user_id, patient_id)
+SELECT DISTINCT u.id, e.patient_id
+FROM users u
+JOIN encounters e ON e.provider = u.full_name
+WHERE u.is_active
+ON CONFLICT (user_id, patient_id) DO NOTHING;
 ```
 
-If a deployment cannot complete this step immediately, do not apply
-migration 014 (or deploy this code) to that environment yet — an empty
-grant table is a hard denial, not a soft/partial one, for every route it
-protects.
+Anything not covered by such a reviewed signal stays denied until an explicit
+grant is added — that residual is the point, not a gap. A deployment that
+cannot complete a reviewed Phase 2 can still run Phase 1 safely: an empty grant
+table is a hard, correct denial for every protected route. Grants are revoked
+by setting `revoked_at`, and can carry an `expires_at`; disabling a user
+(`users.is_active = false`) immediately blocks all their grants (the gateway
+re-checks `is_active` per request and `SqlPatientAccessGate` joins it).
 
 ## Demo accounts
 

@@ -15,7 +15,7 @@ from conftest import load_module
 app_mod = load_module("services/gateway/app.py", "gateway_app")
 
 VALID_TOKEN = "valid-token-abc"
-_VALID_SESSION = {"username": "frontdesk", "role": "staff"}
+_VALID_SESSION = {"user_id": "2", "username": "frontdesk", "role": "staff"}
 
 
 @pytest.fixture

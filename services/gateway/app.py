@@ -108,7 +108,18 @@ def _bearer(authorization: Optional[str]) -> str:
 
 
 def require_session(authorization: Optional[str] = Header(default=None)) -> dict:
-    """Reject anonymous callers. (Does NOT scope access to a patient — see IDOR.)"""
+    """Reject anonymous callers.
+
+    PR #23 review round 2 (2026-08-07): the session now carries the stable
+    users.id (forwarded downstream as X-Actor-Id) and expires via a Redis idle
+    TTL that get_session refreshes on each read (security.py), so an abandoned
+    token no longer lives forever. Per-request re-validation of users.is_active
+    for chart data happens at the authorization boundary itself —
+    records-service's SqlPatientAccessGate joins users.is_active, so a disabled
+    account cannot read any patient chart even with a still-live session (login
+    also rejects inactive users up front). That join, not a DB round-trip on
+    every gateway call, is the central revocation point for PHI access.
+    """
     sess = get_session(_bearer(authorization))
     if not sess:
         raise HTTPException(status_code=401, detail="not authenticated")
@@ -125,8 +136,11 @@ def healthz():
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     """
-    Issue a session token. Password only (no MFA), and the token never expires
-    (no TTL on the Redis key) — see auth.yaml.
+    Issue a session token. Password only (no MFA). Login rejects inactive
+    users up front (below); the token carries the stable users.id and a Redis
+    idle TTL (settings.session_timeout_seconds) refreshed on each request —
+    see create_session. Per-request is_active revalidation for chart data is
+    enforced at records-service's SqlPatientAccessGate (PR #23 review round 2).
     """
     try:
         user = db.execute(select(User).where(User.username == req.username)).scalar_one_or_none()
@@ -139,7 +153,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
     user.last_login_at = func.now()
     db.commit()
-    token = create_session(user.username, user.role)
+    token = create_session(user.id, user.username, user.role)
     log.info("login ok user=%s", user.username)
     return {
         "token": token,
@@ -175,10 +189,18 @@ def proxy_intake(payload: dict, session: dict = Depends(require_session)):
     # published host port, which had no way to tell the two apart and let
     # an unauthenticated caller probe the duplicate-detection response as a
     # patient/SSN-existence oracle. Same shared secret as proxy_patient_view.
-    return _post(
-        "intake", "/intake", payload, headers={"X-Internal-Token": settings.internal_service_token},
-        forward_status=True,
-    )
+    #
+    # PR #23 (Week 4 catch-up): forward the authenticated actor so intake can
+    # grant the registrar immediate access to the chart they create (front-desk
+    # registration). X-Actor-Id is the stable users.id; X-Actor-Name is
+    # username for audit only. Both are only trustworthy behind X-Internal-Token
+    # (records/intake fail closed without it).
+    headers = {
+        "X-Internal-Token": settings.internal_service_token,
+        "X-Actor-Id": session.get("user_id") or "",
+        "X-Actor-Name": session.get("username") or "",
+    }
+    return _post("intake", "/intake", payload, headers=headers, forward_status=True)
 
 
 @app.get("/eligibility")
@@ -269,7 +291,8 @@ def proxy_patients(
 @app.get("/patients/{patient_id}")
 def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get("records", f"/patients/{patient_id}", headers=headers, forward_status=True)
 
@@ -277,7 +300,8 @@ def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
 @app.get("/patients/{patient_id}/records")
 def proxy_records(patient_id: int, session: dict = Depends(require_session)):
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get("records", f"/patients/{patient_id}/records", headers=headers, forward_status=True)
 
@@ -293,7 +317,8 @@ def proxy_search(q: str, session: dict = Depends(require_session)):
     # patient_access_gate.py). A denied/unauthorized match is silently
     # dropped, never surfaced as a count or placeholder.
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get("records", "/records/search", params={"q": q}, headers=headers, forward_status=True)
 
@@ -329,7 +354,8 @@ def proxy_patient_view(
     session: dict = Depends(require_session),
 ):
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get(
         "records",

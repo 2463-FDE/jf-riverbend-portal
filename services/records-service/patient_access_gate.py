@@ -57,7 +57,7 @@ from libs.patient_view_agent.contracts import (
 )
 from libs.safe_logging import get_safe_logger
 
-from models import PatientAccessGrant
+from models import PatientAccessGrant, User
 
 log = get_safe_logger(__name__)
 
@@ -65,35 +65,70 @@ _DEFAULT_ACTIONS = frozenset({Action.VIEW_PATIENT_CHART})
 _DEFAULT_PURPOSES = frozenset({Purpose.TREATMENT, Purpose.PAYMENT, Purpose.OPERATIONS})
 
 
-def _active_grant_filter(username: str, patient_id: int):
+def parse_user_id(actor_id: str | None) -> int | None:
+    """The actor identity is the stable users.id, forwarded by the gateway as
+    the X-Actor-Id string (PR #23 review round 2 — never username). Anything
+    non-numeric is not a valid principal and authorizes nothing."""
+    try:
+        return int(actor_id) if actor_id not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _active_grant_filter(user_id: int, patient_id: int):
     return (
-        PatientAccessGrant.username == username,
+        PatientAccessGrant.user_id == user_id,
         PatientAccessGrant.patient_id == patient_id,
         PatientAccessGrant.revoked_at.is_(None),
         (PatientAccessGrant.expires_at.is_(None)) | (PatientAccessGrant.expires_at > func.now()),
     )
 
 
-def authorized_patient_ids(db: Session, username: str, patient_ids: Iterable[int]) -> set[int]:
+def active_patient_ids_query(user_id: int):
+    """A SELECT of the patient_ids this user currently has an active,
+    non-expired grant for, joined to a still-active user. Embed it in a
+    list/search query (`Patient.id.in_(...)` / `Record.patient_id.in_(...)`) so
+    unauthorized rows are never loaded — authorization happens IN the SQL, not
+    after the record bodies come back (PR #23 review round 2, finding 4). A
+    database error on the combined query then surfaces as the caller's 503,
+    not a silently empty 200."""
+    return (
+        select(PatientAccessGrant.patient_id)
+        .join(User, User.id == PatientAccessGrant.user_id)
+        .where(
+            PatientAccessGrant.user_id == user_id,
+            PatientAccessGrant.revoked_at.is_(None),
+            (PatientAccessGrant.expires_at.is_(None)) | (PatientAccessGrant.expires_at > func.now()),
+            User.is_active.is_(True),
+        )
+    )
+
+
+def authorized_patient_ids(db: Session, actor_id: str, patient_ids: Iterable[int]) -> set[int]:
     """Batch active-grant check for routes that authorize more than one
-    candidate patient per request (e.g. records reconciliation checking
-    several SSN-matched charts) — one query instead of one per candidate,
-    using the same active-grant definition as SqlPatientAccessGate.authorize
-    below. Callers MUST silently drop ids not in the returned set and never
-    render any placeholder for them — see this module's docstring on why no
-    patient-existence oracle is created here."""
+    candidate patient per request (e.g. records reconciliation checking several
+    SSN-matched charts). Callers MUST silently drop ids not in the returned set
+    and never render any placeholder for them — see this module's docstring on
+    why no patient-existence oracle is created here. Fails closed (empty set) on
+    a lookup error; list_patients/search_records instead embed
+    active_patient_ids_query so a DB error surfaces as 503, not a silent empty
+    result."""
     ids = {int(p) for p in patient_ids}
-    if not username or not ids:
+    user_id = parse_user_id(actor_id)
+    if user_id is None or not ids:
         return set()
     try:
         rows = (
             db.execute(
-                select(PatientAccessGrant.patient_id).where(
-                    PatientAccessGrant.username == username,
+                select(PatientAccessGrant.patient_id)
+                .join(User, User.id == PatientAccessGrant.user_id)
+                .where(
+                    PatientAccessGrant.user_id == user_id,
                     PatientAccessGrant.patient_id.in_(ids),
                     PatientAccessGrant.revoked_at.is_(None),
                     (PatientAccessGrant.expires_at.is_(None))
                     | (PatientAccessGrant.expires_at > func.now()),
+                    User.is_active.is_(True),
                 )
             )
             .scalars()
@@ -125,7 +160,8 @@ class SqlPatientAccessGate(AuthorizationPort):
     def authorize(self, request: AuthorizationRequest) -> AuthorizedScope:
         cid = request.correlation_id or self._id_factory()
 
-        if not request.actor_id:
+        user_id = parse_user_id(request.actor_id)
+        if user_id is None:
             self._deny(DenialReason.UNKNOWN_ACTOR, cid)
         if request.action not in self._allowed_actions:
             self._deny(DenialReason.ACTION_NOT_PERMITTED, cid)
@@ -134,8 +170,11 @@ class SqlPatientAccessGate(AuthorizationPort):
 
         try:
             granted = self._db.execute(
-                select(PatientAccessGrant.id).where(
-                    *_active_grant_filter(request.actor_id, request.patient_id)
+                select(PatientAccessGrant.id)
+                .join(User, User.id == PatientAccessGrant.user_id)
+                .where(
+                    *_active_grant_filter(user_id, request.patient_id),
+                    User.is_active.is_(True),
                 )
             ).first()
         except SQLAlchemyError:

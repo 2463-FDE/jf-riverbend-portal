@@ -30,6 +30,12 @@ class Settings:
     # (denies everyone) until a real value is set in .env on both services.
     internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
+    # PR #23 review round 2 (2026-08-07): sessions previously never expired
+    # (auth.yaml SESSION_TIMEOUT: never). Sessions now carry a Redis TTL,
+    # refreshed on each authenticated request (idle timeout). Default 8h;
+    # override with SESSION_TIMEOUT_SECONDS.
+    session_timeout_seconds = int(os.getenv("SESSION_TIMEOUT_SECONDS", "28800"))
+
     @property
     def db_url(self) -> str:
         return (

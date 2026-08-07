@@ -169,7 +169,7 @@ ROUTES = ["/patients/1042", "/patients/1042/records"]
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_authorized_actor_can_read_the_patient_they_have_a_grant_for(client, route):
-    resp = client.get(route, headers={**_internal_header(), "X-Actor-Id": "frontdesk"})
+    resp = client.get(route, headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"})
 
     assert resp.status_code == 200
     audit = created_sessions[0].added[0]
@@ -186,7 +186,7 @@ def test_unrelated_actor_is_denied(monkeypatch, route):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_no_grant
     try:
-        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "billing-clerk"})
+        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "2", "X-Actor-Name": "billing-clerk"})
     finally:
         app_mod.app.dependency_overrides.clear()
 
@@ -214,7 +214,7 @@ def test_direct_caller_cannot_spoof_actor_without_a_valid_internal_token(client,
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_wrong_internal_token_is_rejected_even_with_a_known_actor(client, route):
-    resp = client.get(route, headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": "not-the-real-token"})
+    resp = client.get(route, headers={"X-Actor-Id": "1", "X-Actor-Name": "frontdesk", "X-Internal-Token": "not-the-real-token"})
 
     assert resp.status_code == 401
     assert created_sessions[0].added == []
@@ -241,7 +241,7 @@ def test_denied_actor_gets_403_not_404_for_a_nonexistent_patient(monkeypatch, ro
 
     app_mod.app.dependency_overrides[app_mod.get_db] = _get_db
     try:
-        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "billing-clerk"})
+        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "2", "X-Actor-Name": "billing-clerk"})
     finally:
         app_mod.app.dependency_overrides.clear()
 
@@ -265,7 +265,7 @@ def test_denied_actor_gets_the_identical_403_for_an_existing_patient_too(monkeyp
 
     app_mod.app.dependency_overrides[app_mod.get_db] = _get_db
     try:
-        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "billing-clerk"})
+        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "2", "X-Actor-Name": "billing-clerk"})
     finally:
         app_mod.app.dependency_overrides.clear()
 
@@ -281,7 +281,7 @@ def test_grant_lookup_failure_denies_closed(monkeypatch, route):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_execute_failing
     try:
-        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "frontdesk"})
+        resp = TestClient(app_mod.app).get(route, headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"})
     finally:
         app_mod.app.dependency_overrides.clear()
 

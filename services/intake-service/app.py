@@ -169,7 +169,7 @@ from config import settings
 from db import get_db
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
-from models import Consent, InsuranceCoverage, Patient, PatientLink
+from models import Consent, InsuranceCoverage, Patient, PatientAccessGrant, PatientLink
 from schemas import Demographics, Insurance, IntakeRequest, IntakeResponse
 
 log = configure(settings.service_name)
@@ -286,6 +286,7 @@ def create_intake(
     req: IntakeRequest,
     db: Session = Depends(get_db),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
 ):
     _verify_internal_token(x_internal_token)
@@ -356,6 +357,15 @@ def create_intake(
             coverage_id = _create_coverage(db, patient_id, req.insurance)
 
         _record_consents(db, patient_id, req.consents)
+
+        # PR #23 (Week 4 catch-up): grant the registering staff member access to
+        # the chart they just created, in the SAME atomic group as the patient
+        # write — so front-desk registration doesn't depend on the now
+        # patient-scoped /patients roster (records-service list_patients). Only
+        # when an authenticated actor is present (front-desk flow); self-service
+        # intake carries no X-Actor-Id and creates no grant, so those patients
+        # need an explicit grant before any staff can view them (docs/runbook.md).
+        _grant_registrar_access(db, x_actor_id, patient_id)
 
         # Round-13 review (2026-08-06): patient, coverage, and every consent
         # are only flushed above, not committed — this is the single commit
@@ -592,6 +602,27 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
         # Same reasoning as _create_patient: never log str(e) — it can embed
         # the failed statement's bound parameters (name/dob/ssn/address/...).
         log.error("intake: failed to create patient with link audit rows (error_type=%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="patient store unavailable")
+
+
+def _grant_registrar_access(db: Session, x_actor_id: Optional[str], patient_id: int) -> None:
+    """Insert a patient_access_grant for the registering staff member (users.id
+    forwarded as X-Actor-Id) so they can immediately open the chart they just
+    created. Flush-only; create_intake's single commit makes it durable with
+    the patient row. No actor (self-service intake) → no grant. A write failure
+    fails the whole registration closed (503), matching this file's convention."""
+    try:
+        user_id = int(x_actor_id) if x_actor_id not in (None, "") else None
+    except (ValueError, TypeError):
+        user_id = None
+    if user_id is None:
+        return
+    try:
+        db.add(PatientAccessGrant(user_id=user_id, patient_id=patient_id))
+        db.flush()
+    except SQLAlchemyError as e:
+        db.rollback()
+        log.error("intake: failed to grant registrar access (error_type=%s)", type(e).__name__)
         raise HTTPException(status_code=503, detail="patient store unavailable")
 
 
