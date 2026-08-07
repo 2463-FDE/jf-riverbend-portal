@@ -106,6 +106,7 @@ class FakeSession:
         patient_lookup_ids=None,
         granted=None,
         fail_grant_lookup=False,
+        fail_batch_grant_lookup=False,
     ):
         self.added = []
         self.commit_count = 0
@@ -122,6 +123,7 @@ class FakeSession:
         # that behavior for tests that aren't specifically about exclusion.
         self._granted = granted if granted is not None else {"frontdesk": {p.id for p in patients}}
         self._fail_grant_lookup = fail_grant_lookup
+        self._fail_batch_grant_lookup = fail_batch_grant_lookup
 
     def add(self, obj):
         self.added.append(obj)
@@ -147,19 +149,24 @@ class FakeSession:
             patient_id = stmt.whereclause.right.value
             return _FakeQueryResult([e for e in self.encounters if e.patient_id == patient_id])
         if entity is PatientAccessGrant:
-            if self._fail_grant_lookup:
-                raise SQLAlchemyError("simulated grant lookup failure")
             # Bound-parameter extraction (not WHERE-clause structure
             # inspection) so this doesn't care whether the caller is
-            # SqlPatientAccessGate's single .first() lookup or
-            # authorized_patient_ids' batch .scalars().all() one — both
-            # compile to a `username_1` + `patient_id_1` (scalar or list)
-            # bind regardless of the extra revoked_at/expires_at clauses.
+            # SqlPatientAccessGate's single .first() lookup (the requested
+            # patient) or authorized_patient_ids' batch .scalars().all() one
+            # (SSN-matched candidates) — both compile to a `username_1` +
+            # `patient_id_1` (scalar or list) bind regardless of the extra
+            # revoked_at/expires_at clauses; `isinstance(..., list)` is what
+            # tells the two apart, which lets fail_batch_grant_lookup fail
+            # only the candidate check without also failing the initial
+            # requested-patient authorization that runs before it.
             params = stmt.compile().params
             username = params.get("username_1", "")
             requested_ids = params.get("patient_id_1")
+            is_batch = isinstance(requested_ids, (list, set, tuple))
+            if self._fail_grant_lookup or (is_batch and self._fail_batch_grant_lookup):
+                raise SQLAlchemyError("simulated grant lookup failure")
             allowed = self._granted.get(username, set())
-            if isinstance(requested_ids, (list, set, tuple)):
+            if is_batch:
                 matched_ids = [pid for pid in requested_ids if pid in allowed]
             else:
                 matched_ids = [requested_ids] if requested_ids in allowed else []
@@ -265,6 +272,27 @@ def test_grant_lookup_failure_denies_closed():
     )
     assert resp.status_code == 403
     assert resp.json()["detail"]["reason"] == "policy_error"
+
+
+def test_candidate_grant_lookup_failure_returns_503_not_a_clean_no_match_result():
+    # Codex review (2026-08-07, PR #22 — medium): authorized_patient_ids used
+    # to swallow a DB failure into an empty set, so this exact scenario —
+    # candidate discovery succeeds (1330 genuinely shares 1042's SSN), but
+    # the batch grant lookup on those candidates fails — used to come back
+    # as a normal 200 with escalation=False, indistinguishable from a
+    # genuine no-match case. It must now be a 503, not a silent "no matches."
+    resp = _with_session(
+        {
+            "patients": [_MARIA_1042, _MARIA_1330],
+            "granted": {"frontdesk": {1042, 1330}},
+            "fail_batch_grant_lookup": True,
+        },
+        lambda c: c.get(
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+        ),
+    )
+    assert resp.status_code == 503
+    assert "source_records" not in resp.json()
 
 
 # --- patient existence, after authorization ---------------------------------

@@ -81,7 +81,19 @@ def authorized_patient_ids(db: Session, username: str, patient_ids: Iterable[int
     using the same active-grant definition as SqlPatientAccessGate.authorize
     below. Callers MUST silently drop ids not in the returned set and never
     render any placeholder for them — see this module's docstring on why no
-    patient-existence oracle is created here."""
+    patient-existence oracle is created here.
+
+    Codex review (2026-08-07, PR #22 — medium): a DB failure here used to be
+    swallowed into an empty set, so a real grant-store outage looked
+    identical to "genuinely zero matches" — fail-closed for disclosure (no
+    unauthorized data leaked) but fail-OPEN for correctness and
+    observability (a clinician or monitor sees a normal "no candidates"
+    result during a broken authorization dependency, not an error). Now
+    propagates SQLAlchemyError instead of catching it, matching every other
+    data read failure in this file and reconciliation.py — every existing
+    caller (search_records, build_reconciliation_result) already wraps its
+    call to this function in the same try/except SQLAlchemyError -> 503
+    convention used everywhere else, so this requires no new exception type."""
     ids = {int(p) for p in patient_ids}
     if not username or not ids:
         return set()
@@ -101,7 +113,7 @@ def authorized_patient_ids(db: Session, username: str, patient_ids: Iterable[int
         )
     except SQLAlchemyError:
         log.exception("patient_access_gate: batch grant lookup failed")
-        return set()  # fail closed: treat a lookup failure as "no candidate authorized"
+        raise
     return set(rows)
 
 

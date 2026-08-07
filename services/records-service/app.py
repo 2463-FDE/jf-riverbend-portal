@@ -595,9 +595,17 @@ def search_records(
             .scalars()
             .all()
         )
+        # Codex review (2026-08-07, PR #22 — medium): this call used to sit
+        # outside any error handling, AND authorized_patient_ids itself used
+        # to swallow a DB failure into an empty set — together, a grant-store
+        # outage looked exactly like "no matches," not an error. Now inside
+        # the same try/except as the record scan above: authorized_patient_ids
+        # propagates a SQLAlchemyError instead of hiding it, so this returns
+        # the same 503 "database unavailable" a failure in the scan itself
+        # would, rather than a clean empty list.
+        allowed = authorized_patient_ids(db, x_actor_id or "", {r.patient_id for r in rows})
     except SQLAlchemyError:
         log.exception("search_records: database error")
         raise HTTPException(status_code=503, detail="database unavailable")
 
-    allowed = authorized_patient_ids(db, x_actor_id or "", {r.patient_id for r in rows})
     return [RecordSearchHit.model_validate(r) for r in rows if r.patient_id in allowed]

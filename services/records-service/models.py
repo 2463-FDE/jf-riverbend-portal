@@ -70,7 +70,20 @@ class PatientAccessGrant(Base):
     __table_args__ = (UniqueConstraint("username", "patient_id"),)
 
     id = Column(Integer, primary_key=True)
-    username = Column(Text, ForeignKey("users.username", ondelete="CASCADE"), nullable=False)
+    # Live-verification fix (intake-service hit this first): `username` is
+    # deliberately a plain column, NOT `ForeignKey("users.username")` —
+    # records-service's own Base.metadata has no `users` table (it doesn't
+    # own that table, per ADR 0001's per-service-metadata split), so
+    # SQLAlchemy's unit-of-work cannot resolve a same-metadata FK target for
+    # it and raises NoReferencedTableError the moment anything inserts this
+    # model through the ORM (this service currently only ever SELECTs it,
+    # which doesn't trigger the same resolution — kept plain anyway so an
+    # ORM-level write here doesn't quietly reintroduce the same bug later).
+    # The real Postgres table (migration 014) already enforces this FK, plus
+    # ON DELETE CASCADE, at the database level regardless of what this
+    # service's local model declares — patient_id below keeps its FK since
+    # `patients` IS defined in this same file/metadata and resolves fine.
+    username = Column(Text, nullable=False)
     patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
     granted_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     revoked_at = Column(TIMESTAMP(timezone=True))  # NULL = active; set = explicitly revoked

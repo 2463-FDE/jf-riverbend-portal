@@ -256,7 +256,13 @@ def test_authorized_patient_ids_is_empty_for_an_unknown_actor():
     assert authorized_patient_ids(db, "nobody", [1042]) == set()
 
 
-def test_authorized_patient_ids_fails_closed_on_db_error(monkeypatch):
+def test_authorized_patient_ids_raises_on_db_error_instead_of_hiding_it(monkeypatch):
+    # Codex review (2026-08-07, PR #22 — medium): this used to swallow the
+    # error into an empty set, which is fail-closed for disclosure but
+    # fail-OPEN for correctness/observability — a real outage looked
+    # identical to "genuinely zero candidates." Now propagates the error so
+    # every caller's existing except SQLAlchemyError -> 503 convention
+    # applies, instead of silently returning "no matches."
     db = _fresh_session()
     _grant(db, username="frontdesk", patient_id=1042)
 
@@ -265,4 +271,5 @@ def test_authorized_patient_ids_fails_closed_on_db_error(monkeypatch):
 
     monkeypatch.setattr(db, "execute", _boom)
 
-    assert authorized_patient_ids(db, "frontdesk", [1042]) == set()
+    with pytest.raises(SQLAlchemyError):
+        authorized_patient_ids(db, "frontdesk", [1042])
