@@ -77,17 +77,37 @@ def _normalize_ssn(ssn: Optional[str]) -> Optional[str]:
     return digits
 
 
-def find_ssn_matches(db: Session, patient_id: int, ssn: Optional[str]) -> list[Patient]:
-    """Every OTHER patient whose normalized ssn exactly matches. Full-table
+def find_ssn_match_ids(db: Session, patient_id: int, ssn: Optional[str]) -> list[int]:
+    """Every OTHER patient id whose normalized ssn exactly matches. Full-table
     scan + Python-side compare, same acceptable-at-seed-scale, non-indexed
     approach as intake-service's _find_match_candidates — flagged there as
     not scaling to real production volume without a normalized, indexed
-    column; same caveat applies here."""
+    column; same caveat applies here.
+
+    Codex review (2026-08-07, PR #22 round 4 — medium): matching necessarily
+    has to read every patient's ssn to compare, but that's exactly where it
+    stops now — this selects only `id`/`ssn` (never name, dob, or any
+    clinical field), so an unauthorized candidate's demographic/clinical PHI
+    is never loaded into application memory at all, not just excluded from
+    the response. build_reconciliation_result below authorizes these ids
+    BEFORE fetching full Patient detail for any of them — see
+    _fetch_patients_by_id."""
     normalized = _normalize_ssn(ssn)
     if not normalized:
         return []
-    rows = db.execute(select(Patient).where(Patient.ssn.isnot(None))).scalars().all()
-    return [row for row in rows if row.id != patient_id and _normalize_ssn(row.ssn) == normalized]
+    rows = db.execute(select(Patient.id, Patient.ssn).where(Patient.ssn.isnot(None))).all()
+    return [row.id for row in rows if row.id != patient_id and _normalize_ssn(row.ssn) == normalized]
+
+
+def _fetch_patients_by_id(db: Session, patient_ids: set[int]) -> list[Patient]:
+    """Full Patient detail (name, dob, ...) for an already-known, already-
+    authorized set of ids only — called with the AUTHORIZED subset of
+    find_ssn_match_ids' candidates, never the raw candidate set, so an
+    unauthorized candidate's name/dob is never fetched, let alone returned."""
+    if not patient_ids:
+        return []
+    rows = db.execute(select(Patient).where(Patient.id.in_(patient_ids))).scalars().all()
+    return sorted(rows, key=lambda p: p.id)
 
 
 _NO_KNOWN_VALUE_PHRASES = {
@@ -152,13 +172,16 @@ def build_reconciliation_result(
     discrepancies, or escalation. The response is indistinguishable from
     that candidate never having existed: no id, name, DOB, allergy,
     medication, evidence id, count, or placeholder attributable to it.
+
+    Round 4 review: authorization now runs on bare candidate ids
+    (find_ssn_match_ids), and full Patient detail (name, dob) is only
+    fetched afterward for the authorized subset (_fetch_patients_by_id) —
+    an unauthorized candidate's demographic PHI is never loaded into
+    application memory at all, not just excluded from the response.
     """
-    candidates = find_ssn_matches(db, patient_id, requested.ssn)
-    if candidates:
-        authorized_ids = authorized_patient_ids(db, actor_id, {p.id for p in candidates})
-        matches = [p for p in candidates if p.id in authorized_ids]
-    else:
-        matches = []
+    candidate_ids = find_ssn_match_ids(db, patient_id, requested.ssn)
+    authorized_ids = authorized_patient_ids(db, actor_id, candidate_ids) if candidate_ids else set()
+    matches = _fetch_patients_by_id(db, authorized_ids)
     all_patients = [requested, *matches]
     fields_by_patient = {p.id: _collect_patient_fields(db, p.id) for p in all_patients}
 

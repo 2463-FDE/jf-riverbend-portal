@@ -107,20 +107,20 @@ def test_valid_boundary_areas_are_still_accepted():
     assert _normalize_ssn("899-23-4567") == "899234567"
 
 
-# --- find_ssn_matches: an invalid-shaped SSN produces zero candidates,
+# --- find_ssn_match_ids: an invalid-shaped SSN produces zero candidates,
 # from either the requested patient's own SSN or a candidate row's ---------
 
 
-def test_find_ssn_matches_returns_nothing_for_a_placeholder_requested_ssn():
+def test_find_ssn_match_ids_returns_nothing_for_a_placeholder_requested_ssn():
     db = _FakeDb([_FakePatient(2, "000-00-0000")])
-    assert reconciliation.find_ssn_matches(db, patient_id=1, ssn="000-00-0000") == []
+    assert reconciliation.find_ssn_match_ids(db, patient_id=1, ssn="000-00-0000") == []
 
 
-def test_find_ssn_matches_excludes_a_candidate_whose_stored_ssn_is_invalid():
+def test_find_ssn_match_ids_excludes_a_candidate_whose_stored_ssn_is_invalid():
     # Requested patient has a genuinely valid SSN; a candidate row happens
     # to have an invalid one on file. That candidate must never match
     # anything (it can't even match itself), regardless of what raw string
     # is on either side.
     db = _FakeDb([_FakePatient(2, "000-00-0000"), _FakePatient(3, "412-55-9981")])
-    matches = reconciliation.find_ssn_matches(db, patient_id=1, ssn="412-55-9981")
-    assert [p.id for p in matches] == [3]
+    matches = reconciliation.find_ssn_match_ids(db, patient_id=1, ssn="412-55-9981")
+    assert matches == [3]

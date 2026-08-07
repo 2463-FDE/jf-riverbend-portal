@@ -144,6 +144,19 @@ class FakeSession:
     def execute(self, stmt, _params=None):
         entity = stmt.column_descriptions[0]["entity"]
         if entity is app_mod.Patient:
+            # Round 4 review: find_ssn_match_ids does a lean, unfiltered
+            # id+ssn scan (no bound params — every patient given, matching
+            # find_ssn_matches' old behavior); _fetch_patients_by_id does a
+            # SEPARATE select(Patient).where(Patient.id.in_(authorized_ids))
+            # for full detail on an already-known, already-authorized id
+            # set only — that one compiles a bound `id_1` list. Distinguish
+            # by bound params, same technique as the PatientAccessGrant
+            # branch below, so an authorized-subset detail fetch doesn't
+            # accidentally return every patient regardless of the filter.
+            id_filter = stmt.compile().params.get("id_1")
+            if id_filter is not None:
+                wanted = set(id_filter) if isinstance(id_filter, (list, set, tuple)) else {id_filter}
+                return _FakeQueryResult([p for p in self.patients if p.id in wanted])
             return _FakeQueryResult(self.patients)
         if entity is app_mod.Encounter:
             patient_id = stmt.whereclause.right.value

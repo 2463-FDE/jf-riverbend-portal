@@ -47,14 +47,17 @@ Patient = models_mod.Patient
 PatientAccessGrant = models_mod.PatientAccessGrant
 Base = db_mod.Base
 
-_USERS_STUB_REGISTERED = False
-
-
 def _fresh_session():
-    global _USERS_STUB_REGISTERED
-    if not _USERS_STUB_REGISTERED:
+    # `db.Base` is shared across every records-service test file in this
+    # pytest session (conftest.load_module's plain-import side effect), so
+    # `Base.metadata` may already have a "users" stub registered by a
+    # DIFFERENT test file's own copy of this same pattern (e.g.
+    # test_records_search_authorization.py) by the time this runs. Check
+    # the metadata directly rather than a per-file flag, which only knows
+    # about ITS OWN registration and would double-register (and raise)
+    # depending on test execution order.
+    if "users" not in Base.metadata.tables:
         Table("users", Base.metadata, Column("username", Text, primary_key=True))
-        _USERS_STUB_REGISTERED = True
 
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

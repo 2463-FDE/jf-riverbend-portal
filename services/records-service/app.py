@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -39,8 +39,8 @@ from libs.patient_view_agent import (
     run_patient_view,
 )
 from logging_config import configure
-from models import AuditLog, Encounter, Patient, Record
-from patient_access_gate import SqlPatientAccessGate, authorized_patient_ids
+from models import AuditLog, Encounter, Patient, PatientAccessGrant, Record
+from patient_access_gate import SqlPatientAccessGate
 from patient_view_repository import SqlChartRepository
 from reconciliation import build_reconciliation_result
 from schemas import (
@@ -579,33 +579,38 @@ def search_records(
     Week 4 catch-up: unlike a single-patient detail route, this returns a
     filtered LIST, so the fix is filtering, not deny-the-whole-request — a
     hit belonging to a patient the caller has no grant for is silently
-    dropped, never surfaced as a count or placeholder (see
-    authorized_patient_ids in patient_access_gate.py). An unauthenticated
+    dropped, never surfaced as a count or placeholder. An unauthenticated
     caller (no/invalid internal token) still gets a hard 401, same as every
     other route here.
+
+    Round 4 review: the grant check now runs as an EXISTS subquery in the
+    SAME statement as the body scan (rather than fetch-then-filter in
+    Python via authorized_patient_ids), so a record belonging to a patient
+    the caller has no grant for is never loaded into application memory at
+    all — not just excluded from the response.
     """
     _verify_internal_token(x_internal_token)
 
+    active_grant = exists().where(
+        PatientAccessGrant.patient_id == Record.patient_id,
+        PatientAccessGrant.username == (x_actor_id or ""),
+        PatientAccessGrant.revoked_at.is_(None),
+        (PatientAccessGrant.expires_at.is_(None)) | (PatientAccessGrant.expires_at > func.now()),
+    )
     try:
-        # full-table scan on body — no index, no limit (deliberate debt)
+        # full-table scan on body — no index, no limit (deliberate debt).
+        # active_grant is a second predicate on the SAME query, not a
+        # separate round trip — Postgres only materializes rows that
+        # satisfy both.
         rows = (
             db.execute(
-                select(Record).where(Record.body.ilike(f"%{q}%"))
+                select(Record).where(Record.body.ilike(f"%{q}%"), active_grant)
             )
             .scalars()
             .all()
         )
-        # Codex review (2026-08-07, PR #22 — medium): this call used to sit
-        # outside any error handling, AND authorized_patient_ids itself used
-        # to swallow a DB failure into an empty set — together, a grant-store
-        # outage looked exactly like "no matches," not an error. Now inside
-        # the same try/except as the record scan above: authorized_patient_ids
-        # propagates a SQLAlchemyError instead of hiding it, so this returns
-        # the same 503 "database unavailable" a failure in the scan itself
-        # would, rather than a clean empty list.
-        allowed = authorized_patient_ids(db, x_actor_id or "", {r.patient_id for r in rows})
     except SQLAlchemyError:
         log.exception("search_records: database error")
         raise HTTPException(status_code=503, detail="database unavailable")
 
-    return [RecordSearchHit.model_validate(r) for r in rows if r.patient_id in allowed]
+    return [RecordSearchHit.model_validate(r) for r in rows]
