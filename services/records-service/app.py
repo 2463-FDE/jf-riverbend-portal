@@ -103,9 +103,24 @@ def list_patients(
     q: str | None = Query(default=None, description="ILIKE filter on patient name"),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
 ):
-    """Paginated patient list. `q` does a case-insensitive name match."""
+    """Paginated patient list. `q` does a case-insensitive name match.
+
+    Codex review (2026-08-07, PR #23): this route is deliberately staff-broad,
+    not patient-scoped — it's how front desk finds/registers a patient in
+    the first place, before any patient-specific grant could exist for them
+    (see the gateway's proxy_patients comment for the full rationale). But
+    that design decision does NOT excuse it from the same internal-token
+    boundary every other route in this file now has: records-service's port
+    is published to the host (docker-compose.yml), so without this check a
+    direct caller could skip the gateway's own require_session check
+    entirely and enumerate every patient's id/name/DOB/MRN. This does not
+    check X-Actor-Id — there is no per-actor decision to make on a route
+    that isn't patient-scoped by design.
+    """
+    _verify_internal_token(x_internal_token)
     try:
         base = select(Patient)
         count_q = select(func.count()).select_from(Patient)

@@ -27,6 +27,14 @@
 -- starts empty in a real deployment; only the deterministic seed generator
 -- (db/seed/generate_seed.py) populates rows, and only for its own synthetic
 -- demo users/patients.
+--
+-- Codex review (2026-08-07, PR #23): an empty grant table means every
+-- existing staff account is denied every existing patient the moment this
+-- code deploys, with no in-app way to add a grant. This is a required,
+-- explicit rollout step, not an automatic one — see docs/runbook.md
+-- "Before enforcing migration 014 on any environment with real existing
+-- patients" for why this can't be safely auto-backfilled and what an
+-- operator needs to do before this code reaches a real environment.
 
 CREATE TABLE IF NOT EXISTS patient_access_grants (
     id          SERIAL PRIMARY KEY,

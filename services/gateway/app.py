@@ -240,7 +240,19 @@ def proxy_patients(
     # visit) — a patient-specific grant can't exist yet for someone front
     # desk hasn't located. Returns demographics/summary rows only, not chart
     # content. See the module docstring above and the PR's "Open decisions."
-    return _get("records", "/patients", params={"q": q, "limit": limit, "offset": offset})
+    #
+    # Codex review (2026-08-07, PR #23): that design decision doesn't excuse
+    # this route from proving the call came through the gateway at all —
+    # records-service's port is published to the host, so without
+    # X-Internal-Token a direct caller could skip require_session entirely
+    # and enumerate the whole roster. forward_status=True so a 401 (missing/
+    # misconfigured token) reaches the frontend, not a silently-flattened 200.
+    headers = _correlation_headers()
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records", "/patients", params={"q": q, "limit": limit, "offset": offset},
+        headers=headers, forward_status=True,
+    )
 
 
 # Week 4 catch-up: patient/records reads now carry the same two headers as
