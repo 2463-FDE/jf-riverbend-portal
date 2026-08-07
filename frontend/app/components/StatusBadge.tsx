@@ -19,6 +19,7 @@ const MAP: Record<string, Variant> = {
   in_progress: "warn",
   waitlist: "warn",
   held: "warn",
+  escalated: "warn",
   cancelled: "bad",
   canceled: "bad",
   denied: "bad",
@@ -27,6 +28,7 @@ const MAP: Record<string, Variant> = {
   low: "bad",
   critical: "bad",
   expired: "bad",
+  refused: "bad",
   booking: "info",
 };
 
