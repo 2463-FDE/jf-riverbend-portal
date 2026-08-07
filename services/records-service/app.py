@@ -159,12 +159,17 @@ def _authorize_or_deny(
     patient_id: int,
     action: Action = Action.VIEW_PATIENT_CHART,
     purpose: Purpose = Purpose.TREATMENT,
+    audit_action: str = "patient_access",
 ) -> None:
-    """Shared by get_patient/get_patient_records/get_patient_view — runs
-    SqlPatientAccessGate.authorize() BEFORE any patient lookup (see that
-    file's module docstring: this check never queries `patients`, so it
-    creates no existence oracle) and turns a denial into an audited 403.
-    Always raises on deny; returns normally on allow."""
+    """Shared by get_patient/get_patient_records/get_patient_view/
+    get_patient_reconciliation — runs SqlPatientAccessGate.authorize()
+    BEFORE any patient lookup (see that file's module docstring: this check
+    never queries `patients`, so it creates no existence oracle) and turns
+    a denial into an audited 403. `audit_action` labels the denial's audit
+    message with the route that denied (distinct from the `Action` enum
+    param above, which is the authorization request's own action type —
+    default "patient_access" keeps every existing call site/test
+    unchanged). Always raises on deny; returns normally on allow."""
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -175,7 +180,7 @@ def _authorize_or_deny(
     try:
         SqlPatientAccessGate(db).authorize(request)
     except AuthorizationDenied as denial:
-        _deny_patient_access(db, x_actor_id, patient_id, denial)
+        _deny_patient_access(db, x_actor_id, patient_id, denial, action=audit_action)
 
 
 @app.get("/patients/{patient_id}", response_model=PatientDetail)
@@ -493,36 +498,40 @@ def get_patient_reconciliation(
 ):
     """
     Stage 2 (Week 6) — read-only "possible duplicate patient" reconciliation
-    view (see reconciliation.py). Same two-layer trust as get_patient_view
-    above: (1) _verify_internal_token proves this call came from the gateway;
-    (2) StaffAccessGate is authenticated-staff access, NOT patient-specific
-    authorization — this route does not fix RIV-201 either. Reuses
-    Action.VIEW_PATIENT_CHART (no dedicated Action exists for this, and
-    adding one would mean editing libs/patient_view_agent's shared contract,
-    out of scope here) and always requests Purpose.TREATMENT — there is no
-    legitimate non-treatment purpose for this view in this slice, so unlike
-    get_patient_view it takes no `purpose` query param.
+    view (see reconciliation.py).
+
+    Week 4 catch-up (Codex review, 2026-08-07, PR #22 — high, no-ship): this
+    route now shares the exact same authorization boundary as get_patient/
+    get_patient_records/get_patient_view — SqlPatientAccessGate, not the
+    earlier authenticated-staff-only StaffAccessGate. Two authorization
+    steps, not one: (1) the REQUESTED patient_id is authorized before
+    anything runs, same as every other route in this file; (2)
+    build_reconciliation_result independently authorizes EVERY SSN-matched
+    candidate patient_id before loading or returning any of its details
+    (see authorized_patient_ids in patient_access_gate.py) — an unauthorized
+    candidate is discarded completely: no id, name, DOB, allergies,
+    medications, evidence, or count attributable to it ever reaches the
+    response. This closes the cross-patient disclosure the review flagged
+    (matched charts were previously returned on the strength of the
+    requested patient's own authorization alone).
+
+    Reuses Action.VIEW_PATIENT_CHART (no dedicated Action exists for this,
+    and adding one would mean editing libs/patient_view_agent's shared
+    contract, out of scope here) and always requests Purpose.TREATMENT —
+    there is no legitimate non-treatment purpose for this view in this
+    slice, so unlike get_patient_view it takes no `purpose` query param.
 
     Never returns a raw ssn; matches are exact-SSN-only (reconciliation.py);
     every read is audited, success or denial, same as get_patient_view.
     """
     _verify_internal_token(x_internal_token)
-
-    request = AuthorizationRequest(
-        actor_id=x_actor_id or "",
+    _authorize_or_deny(
+        db,
+        x_actor_id=x_actor_id,
+        x_request_id=x_request_id,
         patient_id=patient_id,
-        action=Action.VIEW_PATIENT_CHART,
-        purpose=Purpose.TREATMENT,
-        correlation_id=x_request_id,
+        audit_action="reconciliation",
     )
-
-    # Same anti-oracle ordering as get_patient_view (round-19): authorization
-    # before any patient lookup, so a denied actor gets an identical 403
-    # regardless of whether patient_id exists.
-    try:
-        scope = _STAFF_ACCESS_GATE.authorize(request)
-    except AuthorizationDenied as denial:
-        _deny_patient_view(db, x_actor_id, patient_id, denial, action="reconciliation")
 
     try:
         patient = db.get(Patient, patient_id)
@@ -533,7 +542,9 @@ def get_patient_reconciliation(
         raise HTTPException(status_code=404, detail="patient not found")
 
     try:
-        result = build_reconciliation_result(db, patient_id, patient, scope.correlation_id)
+        result = build_reconciliation_result(
+            db, patient_id, patient, x_request_id or "", actor_id=x_actor_id or ""
+        )
     except SQLAlchemyError:
         log.exception("get_patient_reconciliation: database error for patient_id=%s", patient_id)
         raise HTTPException(status_code=503, detail="database unavailable")
