@@ -1,5 +1,5 @@
 """ORM models records-service touches. (Copy-paste per service — no shared lib yet, ADR 0001.)"""
-from sqlalchemy import Column, Integer, Text
+from sqlalchemy import Column, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.sql import func
 
@@ -56,6 +56,25 @@ class Record(Base):
     status = Column(Text)
     reference_range = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class PatientAccessGrant(Base):
+    """Week 4 catch-up (migration 014) — the patient-ownership/care-team-
+    membership fact RIV-201 identified as missing (docs/analysis/
+    RIV-201-patient-records-IDOR.md §6). `username` mirrors
+    AuthorizationRequest.actor_id exactly (see services/records-service/
+    patient_access_gate.py). Action/purpose are enforced in code, not stored
+    per-row here — see that file's module docstring for why."""
+
+    __tablename__ = "patient_access_grants"
+    __table_args__ = (UniqueConstraint("username", "patient_id"),)
+
+    id = Column(Integer, primary_key=True)
+    username = Column(Text, ForeignKey("users.username", ondelete="CASCADE"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    revoked_at = Column(TIMESTAMP(timezone=True))  # NULL = active; set = explicitly revoked
+    expires_at = Column(TIMESTAMP(timezone=True))  # NULL = never expires
 
 
 class AuditLog(Base):
