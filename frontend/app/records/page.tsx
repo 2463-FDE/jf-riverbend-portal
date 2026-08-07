@@ -12,11 +12,17 @@ function isResult(r: RecordItem): boolean {
   return Boolean(r.test || r.value !== undefined || r.reference_range);
 }
 
-function aiOutcomeBadgeClass(outcome: PatientViewResult["outcome"]): string {
-  if (outcome === "completed") return "rb-badge--ok";
-  if (outcome === "escalated") return "rb-badge--warn";
-  return "rb-badge--bad";
-}
+const AI_HEADING: Record<PatientViewResult["outcome"], string> = {
+  completed: "Chart summary",
+  escalated: "Chart summary — clinician review needed",
+  refused: "Request refused",
+};
+
+const AI_CALLOUT: Record<"escalated" | "refused", string> = {
+  escalated:
+    "Treat this summary as a starting point, not a final read of the chart — verify details against the source record before relying on it.",
+  refused: "No chart content is shown here. Check the source record directly.",
+};
 
 export default function RecordsPage() {
   // The records view loads by a patient id taken straight off the input/URL.
@@ -199,27 +205,43 @@ export default function RecordsPage() {
 
         {aiView && (
           <div style={{ marginTop: 14 }}>
-            <span className={`rb-badge ${aiOutcomeBadgeClass(aiView.outcome)}`}>{aiView.outcome}</span>
+            <span className="rb-eyebrow">Chart review</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <h3 style={{ margin: 0 }}>{AI_HEADING[aiView.outcome]}</h3>
+              <StatusBadge status={aiView.outcome} />
+            </div>
             <p style={{ marginTop: 10 }}>{aiView.summary}</p>
+
             {aiView.evidence_ids.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                {aiView.evidence_ids.map((id) => (
-                  <span key={id} className="rb-badge rb-badge--neutral">
-                    {id}
-                  </span>
-                ))}
+              <div style={{ marginBottom: 10 }}>
+                <div className="rb-eyebrow">Evidence</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {aiView.evidence_ids.map((id) => (
+                    <span key={id} className="rb-badge rb-badge--neutral">
+                      {id}
+                    </span>
+                  ))}
+                </div>
               </div>
             )}
+
             {aiView.limitations.length > 0 && (
-              <ul className="rb-muted" style={{ marginTop: 0 }}>
-                {aiView.limitations.map((l) => (
-                  <li key={l}>{l}</li>
-                ))}
-              </ul>
+              <div style={{ marginBottom: 10 }}>
+                <div className="rb-eyebrow">Limitations</div>
+                <ul className="rb-muted" style={{ marginTop: 0 }}>
+                  {aiView.limitations.map((l) => (
+                    <li key={l}>{l}</li>
+                  ))}
+                </ul>
+              </div>
             )}
-            {aiView.escalation && (
-              <div className="rb-alert rb-alert--info" role="status">
-                This view requires human review before use.
+
+            {(aiView.outcome === "escalated" || aiView.outcome === "refused") && (
+              <div
+                className={`rb-alert rb-alert--${aiView.outcome === "refused" ? "err" : "warn"}`}
+                role="alert"
+              >
+                <strong>Clinician review required.</strong> {AI_CALLOUT[aiView.outcome]}
               </div>
             )}
           </div>
