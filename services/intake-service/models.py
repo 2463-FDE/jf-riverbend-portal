@@ -1,5 +1,5 @@
 """ORM models intake-service touches. (Copy-paste per service — no shared lib yet.)"""
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.sql import func
 
 from db import Base
@@ -71,3 +71,39 @@ class PatientLink(Base):
     confirmed_by = Column(Text)                       # staff identifier; NULL until confirmed
     confirmed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PatientAccessGrant(Base):
+    """Codex review (2026-08-07, PR #22 — high, no-ship): migration 014
+    (records-service) ships this table empty in every real deployment, and
+    records-service's SqlPatientAccessGate now requires an active row here
+    before serving ANY read of a patient's chart — including the chart the
+    staff member requesting THIS intake is about to create. Without this,
+    a newly registered patient's own chart would be immediately
+    inaccessible to the person who just registered them.
+    services/records-service/patient_access_gate.py owns reading/enforcing
+    this table; this copy (ADR 0001: no shared lib) exists here only to
+    INSERT the one grant intake is positioned to create correctly — the
+    acting staff member, for the patient they just created — never to
+    read or authorize anything itself."""
+
+    __tablename__ = "patient_access_grants"
+    __table_args__ = (UniqueConstraint("username", "patient_id"),)
+
+    id = Column(Integer, primary_key=True)
+    # Round-1 live-verification fix: `username` is deliberately a plain
+    # column, NOT `ForeignKey("users.username")` — intake-service's own
+    # Base.metadata has no `users` table (it doesn't own that table, per
+    # ADR 0001's per-service-metadata split), so SQLAlchemy's unit-of-work
+    # cannot resolve a same-metadata FK target for it and raises
+    # NoReferencedTableError the first time this model is actually inserted
+    # through the ORM. The real Postgres table (migration 014,
+    # records-service) already enforces this FK, plus ON DELETE CASCADE, at
+    # the database level regardless of what this service's local model
+    # declares — patient_id below keeps its FK since `patients` IS defined
+    # in this same file/metadata and resolves without issue.
+    username = Column(Text, nullable=False)
+    patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True))
+    expires_at = Column(DateTime(timezone=True))

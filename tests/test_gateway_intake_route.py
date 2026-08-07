@@ -72,6 +72,10 @@ def test_intake_success_is_forwarded_as_201(client, monkeypatch):
     # Round-11 review: proves this call to intake-service carries the gateway's
     # shared secret, not just a bare forwarded payload.
     assert captured["headers"]["X-Internal-Token"] == TEST_INTERNAL_TOKEN
+    # Codex review (2026-08-07, PR #22 — high, no-ship): proves the session's
+    # actor is forwarded too, so intake-service can grant the registering
+    # staff member access to the patient they just created.
+    assert captured["headers"]["X-Actor-Id"] == "frontdesk"
 
 
 def test_intake_duplicate_conflict_is_forwarded_as_409_not_flattened_to_200(client, monkeypatch):

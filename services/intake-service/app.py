@@ -169,7 +169,7 @@ from config import settings
 from db import get_db
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
-from models import Consent, InsuranceCoverage, Patient, PatientLink
+from models import Consent, InsuranceCoverage, Patient, PatientAccessGrant, PatientLink
 from schemas import Demographics, Insurance, IntakeRequest, IntakeResponse
 
 log = configure(settings.service_name)
@@ -287,6 +287,7 @@ def create_intake(
     db: Session = Depends(get_db),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
 ):
     _verify_internal_token(x_internal_token)
 
@@ -356,6 +357,7 @@ def create_intake(
             coverage_id = _create_coverage(db, patient_id, req.insurance)
 
         _record_consents(db, patient_id, req.consents)
+        _grant_creator_access(db, x_actor_id, patient_id)
 
         # Round-13 review (2026-08-06): patient, coverage, and every consent
         # are only flushed above, not committed — this is the single commit
@@ -687,6 +689,40 @@ def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
                 kind, patient_id, type(e).__name__,
             )
             raise HTTPException(status_code=503, detail="consent store unavailable")
+
+
+def _grant_creator_access(db: Session, x_actor_id: Optional[str], patient_id: int) -> None:
+    """Codex review (2026-08-07, PR #22 — high, no-ship): records-service's
+    SqlPatientAccessGate (Week 4 catch-up) now requires an active
+    patient_access_grants row before serving ANY read of a patient's chart
+    — including immediately after this endpoint creates one. Without this,
+    the staff member who just registered a patient could not open the
+    chart they just created; every new registration would go dark on
+    arrival, on top of migration 014's already-documented empty-table gap
+    for pre-existing patients (docs/runbook.md).
+
+    Deliberately narrow: this creates exactly one grant — the acting
+    staff member, for the patient they just created — never a broader or
+    inferred grant. `x_actor_id` absent (e.g. a self-service intake with
+    no staff session forwarding an actor) means there is no one to grant
+    access to yet; that is a legitimate case, not an error, so this is a
+    no-op rather than a failure. Flushes only, as part of the SAME
+    transaction as the patient/coverage/consent rows above — create_intake
+    still performs the single commit; a failure here rolls back the whole
+    intake, matching every other write in this function.
+    """
+    if not x_actor_id:
+        return
+    try:
+        db.add(PatientAccessGrant(username=x_actor_id, patient_id=patient_id))
+        db.flush()
+    except SQLAlchemyError as e:
+        db.rollback()
+        log.error(
+            "intake: failed to grant creator access for patient %s (error_type=%s)",
+            patient_id, type(e).__name__,
+        )
+        raise HTTPException(status_code=503, detail="access grant store unavailable")
 
 
 def _start_eligibility_check(

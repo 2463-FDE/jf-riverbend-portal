@@ -175,10 +175,18 @@ def proxy_intake(payload: dict, session: dict = Depends(require_session)):
     # published host port, which had no way to tell the two apart and let
     # an unauthenticated caller probe the duplicate-detection response as a
     # patient/SSN-existence oracle. Same shared secret as proxy_patient_view.
-    return _post(
-        "intake", "/intake", payload, headers={"X-Internal-Token": settings.internal_service_token},
-        forward_status=True,
-    )
+    #
+    # Codex review (2026-08-07, PR #22 — high, no-ship): also forward
+    # X-Actor-Id now, same as every patient-data route below. Week 4
+    # catch-up's SqlPatientAccessGate requires an active grant before
+    # serving any chart read, including the chart intake-service is about
+    # to create — without the actor, intake had no way to grant the
+    # registering staff member access to the patient they just registered.
+    headers = {
+        "X-Internal-Token": settings.internal_service_token,
+        "X-Actor-Id": session.get("username") or "",
+    }
+    return _post("intake", "/intake", payload, headers=headers, forward_status=True)
 
 
 @app.get("/eligibility")
