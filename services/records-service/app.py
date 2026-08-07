@@ -4,12 +4,18 @@ records-service — patient + records read façade (FHIR-ish).
 Serves patient demographics and a patient's encounters/records to the portal.
 
 Stage 3 addition: `GET /patients/{id}/view`, a new, additive route that wires
-the Week 4/5 `libs.patient_view_agent` supervisor to real data — a bounded,
-evidence-cited chart summary gated by `StaffAccessGate` (an authenticated-
-staff access gate, NOT patient-specific authorization) instead of that
-library's fixture `FakePolicyAuthorization`/`SeededChartRepository`. This
-does not touch or remediate `get_patient_records`/`get_patient` below
-(DEBT D11 / RIV-201) — see docs/analysis/RIV-201-patient-records-IDOR.md.
+the Week 4/5 `libs.patient_view_agent` supervisor to real data, backed by
+`SqlChartRepository` instead of that library's fixture `SeededChartRepository`.
+
+Week 4 catch-up: `get_patient`, `get_patient_records`, and `get_patient_view`
+are now all gated by `SqlPatientAccessGate` (patient_access_gate.py) — a
+real, database-backed per-(actor, patient) authorization check against
+`patient_access_grants` (migration 014), replacing the earlier
+authenticated-staff-only `StaffAccessGate` that this route used to use
+(`StaffAccessGate` itself is untouched in `libs.patient_view_agent` for
+tests/rollback — it is simply no longer wired into any production route).
+This closes DEBT D11 / RIV-201 — see docs/analysis/RIV-201-patient-records-IDOR.md
+for the gap this replaces and patient_access_gate.py for the new check.
 """
 import hmac
 from contextlib import asynccontextmanager
@@ -29,12 +35,12 @@ from libs.patient_view_agent import (
     PatientViewOutcome,
     PatientViewResult,
     Purpose,
-    StaffAccessGate,
     ViewReason,
     run_patient_view,
 )
 from logging_config import configure
 from models import AuditLog, Encounter, Patient, Record
+from patient_access_gate import SqlPatientAccessGate, authorized_patient_ids
 from patient_view_repository import SqlChartRepository
 from schemas import (
     EncounterOut,
@@ -84,8 +90,6 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Riverbend records-service", lifespan=lifespan)
 
-_STAFF_ACCESS_GATE = StaffAccessGate()
-
 
 @app.get("/healthz")
 def healthz():
@@ -130,9 +134,54 @@ def list_patients(
     )
 
 
+def _authorize_or_deny(
+    db: Session,
+    *,
+    x_actor_id: Optional[str],
+    x_request_id: Optional[str],
+    patient_id: int,
+    action: Action = Action.VIEW_PATIENT_CHART,
+    purpose: Purpose = Purpose.TREATMENT,
+) -> None:
+    """Shared by get_patient/get_patient_records/get_patient_view — runs
+    SqlPatientAccessGate.authorize() BEFORE any patient lookup (see that
+    file's module docstring: this check never queries `patients`, so it
+    creates no existence oracle) and turns a denial into an audited 403.
+    Always raises on deny; returns normally on allow."""
+    request = AuthorizationRequest(
+        actor_id=x_actor_id or "",
+        patient_id=patient_id,
+        action=action,
+        purpose=purpose,
+        correlation_id=x_request_id,
+    )
+    try:
+        SqlPatientAccessGate(db).authorize(request)
+    except AuthorizationDenied as denial:
+        _deny_patient_access(db, x_actor_id, patient_id, denial)
+
+
 @app.get("/patients/{patient_id}", response_model=PatientDetail)
-def get_patient(patient_id: int, db: Session = Depends(get_db)):
-    """Patient demographics, or 404."""
+def get_patient(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Patient demographics, or 404.
+
+    Week 4 catch-up: this was the original RIV-201 IDOR (DEBT D11) — any
+    valid session could read any patient_id's demographics, including SSN
+    and DOB. Now gated the same way /patients/{id}/view already was:
+    _verify_internal_token proves the call came via the gateway, then a real
+    per-(actor, patient) grant is checked before any patient row is read —
+    see docs/analysis/RIV-201-patient-records-IDOR.md and
+    patient_access_gate.py.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(db, x_actor_id=x_actor_id, x_request_id=x_request_id, patient_id=patient_id)
+
     try:
         patient = db.get(Patient, patient_id)
     except SQLAlchemyError:
@@ -141,22 +190,34 @@ def get_patient(patient_id: int, db: Session = Depends(get_db)):
 
     if patient is None:
         raise HTTPException(status_code=404, detail="patient not found")
+
+    _write_audit(
+        db,
+        actor=x_actor_id or "unknown",
+        message=f"get_patient outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
+    )
     return PatientDetail.model_validate(patient)
 
 
 @app.get("/patients/{patient_id}/records", response_model=PatientChart)
-def get_patient_records(patient_id: int, db: Session = Depends(get_db)):
+def get_patient_records(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
     """
     Assemble a patient's full chart: their encounters and, per encounter, its records.
 
-    DEBT D11 (IDOR): patient_id is the sequential integer PK and is served to any
-    caller with no verification that the caller owns / is authorized for it. A
-    logged-in user can walk 1042, 1043, 1044... and pull anyone's chart.
-
-    DEBT D8 (N+1): encounters are fetched first, then we loop and run ONE query per
-    encounter to load that encounter's records (no JOIN, no selectinload).
+    Week 4 catch-up: DEBT D11 (IDOR) is fixed the same way get_patient above
+    is — real per-(actor, patient) authorization runs before any encounter/
+    record query. DEBT D8 (N+1) is untouched and deliberate (see comment
+    below); this fix is scoped to authorization only.
     """
-    # no ownership / authorization check
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(db, x_actor_id=x_actor_id, x_request_id=x_request_id, patient_id=patient_id)
+
     try:
         encounters = (
             db.execute(
@@ -192,6 +253,11 @@ def get_patient_records(patient_id: int, db: Session = Depends(get_db)):
         )
         raise HTTPException(status_code=503, detail="database unavailable")
 
+    _write_audit(
+        db,
+        actor=x_actor_id or "unknown",
+        message=f"get_patient_records outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
+    )
     return PatientChart(patient_id=patient_id, encounters=chart)
 
 
@@ -216,19 +282,20 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
         raise HTTPException(status_code=503, detail="database unavailable")
 
 
-def _deny_patient_view(
+def _deny_patient_access(
     db: Session, x_actor_id: Optional[str], patient_id: int, denial: "AuthorizationDenied"
 ) -> None:
-    """Shared by both places get_patient_view calls into StaffAccessGate
-    (round-19 review, 2026-08-06) — the standalone pre-check and
-    run_patient_view's own internal one — so a denial is audited and
-    rejected identically regardless of which call raised it. Always raises;
-    never returns."""
+    """Week 4 catch-up: renamed from _deny_patient_view — shared by every
+    route that calls SqlPatientAccessGate.authorize() (get_patient,
+    get_patient_records, get_patient_view, and get_patient_view's own
+    internal run_patient_view re-check) so a denial is audited and rejected
+    identically regardless of which route or call site raised it. Always
+    raises; never returns."""
     _write_audit(
         db,
         actor=x_actor_id or "unknown",
         message=(
-            f"patient_view outcome=denied patient_id={patient_id} "
+            f"patient_access outcome=denied patient_id={patient_id} "
             f"reason={denial.denial.reason.value} correlation_id={denial.denial.correlation_id}"
         ),
     )
@@ -251,8 +318,9 @@ def _verify_internal_token(x_internal_token: Optional[str]) -> None:
     header, not proof the request came from the gateway. records-service's
     port is published to the host (docker-compose.yml), so without this check
     anyone could hit this route directly with `X-Actor-Id: anything` and
-    StaffAccessGate would allow it — unauthenticated chart access, plus an
-    audit_logs row attributed to a spoofed actor.
+    a grant-table lookup keyed on that spoofed value would run — unauthenticated
+    chart access for any patient_id that happened to have a grant on file,
+    plus an audit_logs row attributed to a spoofed actor.
 
     Fails closed multiple ways: an unconfigured `INTERNAL_SERVICE_TOKEN`
     (empty on both sides) must never be treated as "no check needed" — that
@@ -287,19 +355,17 @@ def get_patient_view(
     """
     Stage 3 — bounded, evidence-cited patient-chart view via
     `libs.patient_view_agent.run_patient_view`, backed by real data
-    (`SqlChartRepository`) and gated by `StaffAccessGate`.
+    (`SqlChartRepository`) and gated by `SqlPatientAccessGate`.
 
     Two layers of trust, in order: (1) `_verify_internal_token` proves this
     call actually came from the gateway (not a direct caller hitting this
     service's published host port with a spoofed `X-Actor-Id`); (2)
-    `StaffAccessGate` is an authenticated-staff access gate, NOT
-    patient-specific authorization — once (1) passes, it ALLOWs any request
-    carrying a non-empty `X-Actor-Id` and DENIES an unknown/missing one. It
-    does not, and cannot, verify that `x_actor_id` is entitled to
-    `patient_id` specifically — `users` has no relationship to `patients` in
-    this schema (see docs/analysis/RIV-201-patient-records-IDOR.md §6). This
-    route does not fix RIV-201; `get_patient_records`/`get_patient` below
-    remain exactly as IDOR-exploitable as documented.
+    `SqlPatientAccessGate` (Week 4 catch-up — replaces the earlier
+    authenticated-staff-only `StaffAccessGate`) checks a real per-(actor,
+    patient) grant in `patient_access_grants` before any patient lookup —
+    see docs/analysis/RIV-201-patient-records-IDOR.md and
+    patient_access_gate.py. This route, `get_patient`, and
+    `get_patient_records` now share the exact same authorization boundary.
     """
     _verify_internal_token(x_internal_token)
 
@@ -315,20 +381,21 @@ def get_patient_view(
         purpose=purpose_enum,
         correlation_id=x_request_id,
     )
+    access_gate = SqlPatientAccessGate(db)
 
-    # Round-19 review (2026-08-06): authorization now runs before any patient
+    # Round-19 review (2026-08-06): authorization runs before any patient
     # lookup. Round-15's fix put the existence check first, which let a
     # caller holding the internal token but no valid actor get 404 for a
     # nonexistent patient_id and 403 for an existing one — a patient-ID
-    # existence oracle for exactly the callers StaffAccessGate exists to
-    # keep at zero reads. Calling authorize() directly here (the same
-    # AuthorizationPort run_patient_view uses internally) denies before any
-    # db.get(Patient, ...) runs, so a denied actor now gets an identical 403
-    # regardless of whether patient_id exists.
+    # existence oracle for exactly the callers this gate exists to keep at
+    # zero reads. Calling authorize() directly here (the same
+    # AuthorizationPort run_patient_view uses internally, below) denies
+    # before any db.get(Patient, ...) runs, so a denied actor now gets an
+    # identical 403 regardless of whether patient_id exists.
     try:
-        _STAFF_ACCESS_GATE.authorize(request)
+        access_gate.authorize(request)
     except AuthorizationDenied as denial:
-        _deny_patient_view(db, x_actor_id, patient_id, denial)
+        _deny_patient_access(db, x_actor_id, patient_id, denial)
 
     # Round-15 review (2026-08-06): SqlChartRepository's first read only
     # loads encounters for patient_id — an unknown id returns an empty
@@ -352,18 +419,19 @@ def get_patient_view(
 
     # run_patient_view re-authorizes internally — its own contract runs
     # authorize() exactly once before either read specialist, regardless of
-    # the pre-check above. Given the identical `request`, StaffAccessGate is
-    # a deterministic function of its inputs, so this can only ever ALLOW
-    # here; kept fenced against AuthorizationDenied anyway rather than
-    # assuming that invariant can never change.
+    # the pre-check above. Given the identical `request` and the same
+    # access_gate instance, SqlPatientAccessGate is a deterministic function
+    # of its inputs, so this can only ever ALLOW here; kept fenced against
+    # AuthorizationDenied anyway rather than assuming that invariant can
+    # never change.
     try:
         result = run_patient_view(
             request,
-            authorizer=_STAFF_ACCESS_GATE,
+            authorizer=access_gate,
             repository=SqlChartRepository(db),
         )
     except AuthorizationDenied as denial:
-        _deny_patient_view(db, x_actor_id, patient_id, denial)
+        _deny_patient_access(db, x_actor_id, patient_id, denial)
 
     _write_audit(
         db,
@@ -394,14 +462,27 @@ def get_patient_view(
 @app.get("/records/search", response_model=list[RecordSearchHit])
 def search_records(
     q: str = Query(..., min_length=1, description="free-text query"),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
 ):
     """
-    Free-text search across records.
+    Free-text search across records, filtered to the caller's authorized patients.
 
     DEBT D8: full-table ILIKE scan on records.body with NO supporting index and
-    NO result limit. On a real chart corpus this scans every row every call.
+    NO result limit. On a real chart corpus this scans every row every call —
+    untouched, deliberate debt (this fix is scoped to authorization).
+
+    Week 4 catch-up: unlike a single-patient detail route, this returns a
+    filtered LIST, so the fix is filtering, not deny-the-whole-request — a
+    hit belonging to a patient the caller has no grant for is silently
+    dropped, never surfaced as a count or placeholder (see
+    authorized_patient_ids in patient_access_gate.py). An unauthenticated
+    caller (no/invalid internal token) still gets a hard 401, same as every
+    other route here.
     """
+    _verify_internal_token(x_internal_token)
+
     try:
         # full-table scan on body — no index, no limit (deliberate debt)
         rows = (
@@ -415,4 +496,5 @@ def search_records(
         log.exception("search_records: database error")
         raise HTTPException(status_code=503, detail="database unavailable")
 
-    return [RecordSearchHit.model_validate(r) for r in rows]
+    allowed = authorized_patient_ids(db, x_actor_id or "", {r.patient_id for r in rows})
+    return [RecordSearchHit.model_validate(r) for r in rows if r.patient_id in allowed]
