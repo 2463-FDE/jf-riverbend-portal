@@ -68,6 +68,18 @@ def get_session(token: str) -> dict | None:
     data = _redis().hgetall(key)
     if not data:
         return None
+    # PR #23 review round 3 (2026-08-08): a session issued before the user_id
+    # principal (origin/main sessions carried only username/role, and never
+    # expired) cannot authorize anything — routes would forward an empty
+    # X-Actor-Id and the caller would silently get empty rosters / 403s, and
+    # intake would create patients with no registrar grant. Treat such a
+    # session as invalid: delete it and return None so require_session issues a
+    # clean 401 and the user simply logs in again (minting a user_id session).
+    # Validate BEFORE refreshing, so a malformed session's life is never
+    # extended (the review's second point).
+    if not data.get("user_id"):
+        _redis().delete(key)
+        return None
     # Sliding expiration: each authenticated request refreshes the idle TTL, so
     # an active user is never logged out mid-session but an abandoned token
     # lapses after settings.session_timeout_seconds of inactivity.

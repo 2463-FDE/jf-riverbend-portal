@@ -93,3 +93,15 @@ def test_get_session_is_none_for_missing_token_and_does_not_refresh(monkeypatch)
     assert security.get_session("") is None
     assert security.get_session("nope") is None
     assert fake.expire_calls == []  # nothing to refresh for a nonexistent session
+
+
+def test_get_session_rejects_and_deletes_a_legacy_session_without_user_id(monkeypatch):
+    # PR #23 review round 3: pre-user_id sessions (only username/role, never
+    # expiring) can't authorize anything — must be cleared, not accepted.
+    key = "session:legacy"
+    fake = _FakeRedis(store={key: {"username": "frontdesk", "role": "staff"}})
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+
+    assert security.get_session("legacy") is None
+    assert key in fake.deleted        # cleared, forcing a clean re-login
+    assert fake.expire_calls == []    # a malformed session's TTL is never extended

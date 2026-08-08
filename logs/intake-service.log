@@ -62,3 +62,53 @@
 2026-08-08 09:25:15,726 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
 2026-08-08 09:25:15,726 INFO [intake-service] POST /intake summary={"correlation_id": "5e2be3e2638c45aa93210fe0cfd2d646", "created_via": "self_service"}
 2026-08-08 09:25:15,726 ERROR [intake-service] intake: failed to check for duplicate patients (error_type=SQLAlchemyError)
+2026-08-08 09:34:00,216 ERROR [intake-service] intake: eligibility job enqueue failed (error_type=ConnectError)
+2026-08-08 09:34:00,216 ERROR [intake-service] intake: eligibility job enqueue failed (error_type=ConnectError)
+2026-08-08 09:34:00,216 ERROR [intake-service] intake: eligibility job enqueue failed (error_type=ConnectError)
+2026-08-08 09:34:00,217 ERROR [intake-service] intake: eligibility job enqueue failed (error_type=HTTPStatusError)
+2026-08-08 09:34:00,217 ERROR [intake-service] intake: eligibility job enqueue failed (error_type=TimeoutException)
+2026-08-08 09:34:00,217 INFO [intake-service] POST /intake summary={"correlation_id": "1443ad1890654fb487c052751d36cf7a", "created_via": "self_service"}
+2026-08-08 09:34:00,218 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=None
+2026-08-08 09:34:00,218 INFO [intake-service] POST /intake summary={"correlation_id": "16ac9f1d90f447ca914c7135b45a47bd", "created_via": "self_service"}
+2026-08-08 09:34:00,219 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=None
+2026-08-08 09:34:00,220 INFO [intake-service] POST /intake summary={"correlation_id": "64ed8fac76024af3a8373a0eb283c1c4", "created_via": "self_service"}
+2026-08-08 09:34:00,220 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,220 INFO [intake-service] POST /intake summary={"correlation_id": "2101e7e9130648679b64851703a98701", "created_via": "self_service"}
+2026-08-08 09:34:00,275 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.05s eligibility_status=pending
+2026-08-08 09:34:00,275 INFO [intake-service] POST /intake summary={"correlation_id": "d0ed29a6238843a8b6c86734ec1a1d76", "created_via": "self_service"}
+2026-08-08 09:34:00,276 ERROR [intake-service] intake: eligibility job enqueue failed (error_type=ConnectionError)
+2026-08-08 09:34:00,276 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=unknown
+2026-08-08 09:34:00,276 INFO [intake-service] POST /intake summary={"correlation_id": "a8ad304230094540aedf19cde9bbe105", "created_via": "self_service"}
+2026-08-08 09:34:00,276 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=None
+2026-08-08 09:34:00,276 INFO [intake-service] POST /intake summary={"correlation_id": "dca87c7fdf8441858684fea40ca0adfb", "created_via": "self_service"}
+2026-08-08 09:34:00,277 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,277 INFO [intake-service] POST /intake summary={"correlation_id": "b38f3a3060cb420cb4828b1f479f6893", "created_via": "self_service"}
+2026-08-08 09:34:00,277 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,278 INFO [intake-service] POST /intake summary={"correlation_id": "53454e95384443aba4257064839f986f", "created_via": "self_service"}
+2026-08-08 09:34:00,278 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,278 INFO [intake-service] POST /intake summary={"correlation_id": "85ea0f702fa94aa5a62cd3b44df8eccb", "created_via": "unknown"}
+2026-08-08 09:34:00,278 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,279 INFO [intake-service] POST /intake summary={"correlation_id": "1dd381ed3def425e87e26bbc241d4744", "created_via": "self_service"}
+2026-08-08 09:34:00,279 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,279 INFO [intake-service] POST /intake summary={"correlation_id": "5f0f4b7e-2c3a-4d5e-8f9a-1b2c3d4e5f6a", "created_via": "self_service"}
+2026-08-08 09:34:00,279 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,280 ERROR [intake-service] intake: failed to create patient (error_type=SQLAlchemyError)
+2026-08-08 09:34:00,280 ERROR [intake-service] intake: failed to record coverage for patient 1 (error_type=SQLAlchemyError)
+2026-08-08 09:34:00,280 INFO [intake-service] POST /intake summary={"correlation_id": "e78c44f176a3402aac7d400f99b17a5d", "created_via": "self_service"}
+2026-08-08 09:34:00,280 ERROR [intake-service] intake: failed to record consent npp_ack for patient 1 (error_type=SQLAlchemyError)
+2026-08-08 09:34:00,281 INFO [intake-service] POST /intake summary={"correlation_id": "b1ec6953c0384e309a9875943d3c3e50", "created_via": "self_service"}
+2026-08-08 09:34:00,281 ERROR [intake-service] intake: failed to record consent treatment_consent for patient 1 (error_type=SQLAlchemyError)
+2026-08-08 09:34:00,281 INFO [intake-service] POST /intake summary={"correlation_id": "fee4c8c57f3a4ab08064b278b6af7305", "created_via": "self_service"}
+2026-08-08 09:34:00,281 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,281 INFO [intake-service] POST /intake summary={"correlation_id": "e3e883130ca5443f9edcff4439dbb202", "created_via": "self_service"}
+2026-08-08 09:34:00,282 INFO [intake-service] POST /intake summary={"correlation_id": "7a9090dbc96b4f4fb8de3ab6bcfe1ae6", "created_via": "self_service"}
+2026-08-08 09:34:00,282 INFO [intake-service] POST /intake summary={"correlation_id": "30709767bb5c4b7d9dd0048b846e33ff", "created_via": "self_service"}
+2026-08-08 09:34:00,282 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,283 INFO [intake-service] POST /intake summary={"correlation_id": "3d65580dbe42415d9f8814d5d88285b2", "created_via": "self_service"}
+2026-08-08 09:34:00,283 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,283 INFO [intake-service] POST /intake summary={"correlation_id": "903dca9ad30e42cdb86053c7e0284d1e", "created_via": "self_service"}
+2026-08-08 09:34:00,283 ERROR [intake-service] intake: failed to finalize patient/coverage/consent commit (error_type=SQLAlchemyError)
+2026-08-08 09:34:00,284 INFO [intake-service] POST /intake summary={"correlation_id": "962a7f90d8c9448eaba971ee3774d42d", "created_via": "self_service"}
+2026-08-08 09:34:00,284 INFO [intake-service] POST /intake 201 patient_id=1 elapsed=0.00s eligibility_status=pending
+2026-08-08 09:34:00,284 INFO [intake-service] POST /intake summary={"correlation_id": "dadfc67656004e2faa8aa1288f3fc823", "created_via": "self_service"}
+2026-08-08 09:34:00,284 ERROR [intake-service] intake: failed to check for duplicate patients (error_type=SQLAlchemyError)
