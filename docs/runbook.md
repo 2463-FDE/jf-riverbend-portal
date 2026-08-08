@@ -162,15 +162,25 @@ table empty. Every chart route is deny-by-default; no one can read a patient
 they hold no explicit grant for. This phase is safe to deploy on its own — it
 removes the IDOR — but staff cannot open existing charts until Phase 2.
 
-`db/migrations/apply.sh` now **enforces** this as a preflight guard: it counts
-patients that have no **active** grant to an active user — using the exact same
-predicate as records-service's gate (`revoked_at IS NULL`, not expired, user
-`is_active`), so revoked/expired/partial rows don't count as coverage — and
-fails loudly (non-zero exit, reporting the count) rather than let a routine
-migrate-and-restart silently lock those charts out. To perform Phase 1
-intentionally, or any deliberately partial rollout (grants backfilled later in
-Phase 2), run it with `RIVERBEND_ALLOW_PARTIAL_GRANTS=1 db/migrations/apply.sh`
-to acknowledge the remaining lockout explicitly.
+`db/migrations/apply.sh` only applies schema — it never blocks on data state,
+so it succeeds the same way for a routine deploy, an intentional Phase-1
+rollout, and a freshly seeded/demo database (PR #22 review round 4: an earlier
+version ran this check unconditionally post-migration, which broke `make seed`
++ apply.sh in dev and could report a deploy as "failed" after the schema was
+already mutated).
+
+Before **promoting past Phase 1** — i.e. before relying on grant enforcement
+against real existing patients — run the separate, explicit, opt-in check:
+
+```bash
+db/migrations/scripts/check_grant_coverage.sh
+```
+
+It counts patients with no **active** grant to an active user, using the exact
+same predicate as records-service's gate (`revoked_at IS NULL`, not expired,
+user `is_active`), so revoked/expired/partial rows don't count as coverage.
+Exit 0 means every patient is reachable; a non-zero exit reports how many are
+not, so you can distinguish "backfill incomplete" from "safe to enforce."
 
 *Phase 2 — populate grants from a reviewed source.* Insert only the specific
 user/patient relationships that are actually justified, keyed on `users.id`
