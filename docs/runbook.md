@@ -162,12 +162,15 @@ table empty. Every chart route is deny-by-default; no one can read a patient
 they hold no explicit grant for. This phase is safe to deploy on its own — it
 removes the IDOR — but staff cannot open existing charts until Phase 2.
 
-`db/migrations/apply.sh` now **enforces** this as a preflight guard: if
-patients exist but `patient_access_grants` is empty, it fails loudly (non-zero
-exit) rather than let a routine migrate-and-restart silently lock everyone out.
-To perform Phase 1 intentionally (grants backfilled later in Phase 2), run it
-with `RIVERBEND_ALLOW_EMPTY_GRANTS=1 db/migrations/apply.sh` to acknowledge the
-closed state explicitly.
+`db/migrations/apply.sh` now **enforces** this as a preflight guard: it counts
+patients that have no **active** grant to an active user — using the exact same
+predicate as records-service's gate (`revoked_at IS NULL`, not expired, user
+`is_active`), so revoked/expired/partial rows don't count as coverage — and
+fails loudly (non-zero exit, reporting the count) rather than let a routine
+migrate-and-restart silently lock those charts out. To perform Phase 1
+intentionally, or any deliberately partial rollout (grants backfilled later in
+Phase 2), run it with `RIVERBEND_ALLOW_PARTIAL_GRANTS=1 db/migrations/apply.sh`
+to acknowledge the remaining lockout explicitly.
 
 *Phase 2 — populate grants from a reviewed source.* Insert only the specific
 user/patient relationships that are actually justified, keyed on `users.id`
