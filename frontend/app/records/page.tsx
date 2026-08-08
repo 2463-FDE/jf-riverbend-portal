@@ -136,8 +136,26 @@ export default function RecordsPage() {
     setSelected(null);
     try {
       const res = await apiFetch(`/api/records?patient_id=${encodeURIComponent(requestedId)}`);
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
       if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
+      // PR #22 review: records-service now returns 401/403/503 (auth/grant/DB).
+      // These must NEVER render as an empty chart — a denied or failed read
+      // shown as "No records found" could make staff believe a chart is
+      // clinically empty. Surface it as an error instead, like the AI/
+      // reconciliation loaders below.
+      if (!res.ok) {
+        const reason = json?.detail?.reason || json?.error;
+        setStatus(
+          res.status === 403
+            ? "You are not authorized to view this patient's records."
+            : reason
+              ? `Could not load records: ${reason}.`
+              : "Could not load records. Please try again.",
+        );
+        setData([]);
+        setSelected(null);
+        return;
+      }
       const encounters: EncounterBlock[] = json.encounters ?? [];
       setData(encounters);
       setSelected(encounters[0] ?? null);
