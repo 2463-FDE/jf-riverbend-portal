@@ -23,6 +23,8 @@ regression coverage for the cross-patient disclosure fix; everything above
 them is the pre-existing matching/discrepancy/audit coverage, updated only
 where the new authorization boundary changes what a test needs to set up.
 """
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -60,6 +62,10 @@ class _FakePatient:
         self.name = name
         self.dob = dob
         self.ssn = ssn
+        # Mirrors migration 015's generated column (services/records-service/
+        # reconciliation.py::find_ssn_match_ids now selects/filters on this,
+        # not raw .ssn).
+        self.ssn_digits = re.sub(r"\D", "", ssn) if ssn else None
 
 
 class _FakeEncounter:
@@ -144,16 +150,24 @@ class FakeSession:
     def execute(self, stmt, _params=None):
         entity = stmt.column_descriptions[0]["entity"]
         if entity is app_mod.Patient:
-            # Round 4 review: find_ssn_match_ids does a lean, unfiltered
-            # id+ssn scan (no bound params — every patient given, matching
-            # find_ssn_matches' old behavior); _fetch_patients_by_id does a
-            # SEPARATE select(Patient).where(Patient.id.in_(authorized_ids))
-            # for full detail on an already-known, already-authorized id
-            # set only — that one compiles a bound `id_1` list. Distinguish
-            # by bound params, same technique as the PatientAccessGrant
-            # branch below, so an authorized-subset detail fetch doesn't
-            # accidentally return every patient regardless of the filter.
-            id_filter = stmt.compile().params.get("id_1")
+            # Round 5 review: find_ssn_match_ids now filters on ssn_digits in
+            # SQL (migration 015), not an unfiltered scan — its query compiles
+            # a scalar `ssn_digits_1` (the equality) and a scalar `id_1` (the
+            # `!= patient_id` exclusion). _fetch_patients_by_id's SEPARATE
+            # select(Patient).where(Patient.id.in_(authorized_ids)) for full
+            # detail on an already-known, already-authorized id set compiles
+            # `id_1` too, but as a LIST — so `ssn_digits_1`'s presence, not
+            # `id_1`'s type, is what distinguishes the two calls. Same
+            # bound-parameter-extraction technique as the PatientAccessGrant
+            # branch below.
+            params = stmt.compile().params
+            ssn_digits_filter = params.get("ssn_digits_1")
+            if ssn_digits_filter is not None:
+                excluded_id = params.get("id_1")
+                return _FakeQueryResult(
+                    [p for p in self.patients if p.ssn_digits == ssn_digits_filter and p.id != excluded_id]
+                )
+            id_filter = params.get("id_1")
             if id_filter is not None:
                 wanted = set(id_filter) if isinstance(id_filter, (list, set, tuple)) else {id_filter}
                 return _FakeQueryResult([p for p in self.patients if p.id in wanted])

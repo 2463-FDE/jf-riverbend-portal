@@ -9,6 +9,8 @@ this is pure function behavior — services/records-service/app.py::
 get_patient_reconciliation and tests/test_records_reconciliation_route.py
 exercise the end-to-end route/authorization path.
 """
+import re
+
 from conftest import load_module
 
 reconciliation = load_module("services/records-service/reconciliation.py", "reconciliation_ssn_validation")
@@ -20,6 +22,10 @@ class _FakePatient:
     def __init__(self, id, ssn):
         self.id = id
         self.ssn = ssn
+        # Mirrors migration 015's generated column: pure digit extraction, no
+        # SSA-invalid-pattern validation (that stays in _normalize_ssn, applied
+        # to the query key — see find_ssn_match_ids).
+        self.ssn_digits = re.sub(r"\D", "", ssn) if ssn else None
 
 
 class _FakeExecResult:

@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS patients (
     last_name   TEXT,                          -- structured (migration 011); NULL for legacy-only callers
     dob         TEXT,                          -- stored as ISO string, not DATE
     ssn         TEXT,                          -- plain text
+    ssn_digits  TEXT GENERATED ALWAYS AS (regexp_replace(ssn, '\D', '', 'g')) STORED,
+                                               -- migration 015: indexed digit-only match key for reconciliation
     gender      TEXT,
     address     TEXT,                          -- legacy/composed full address; derived from address+city+state+zip_code when structured input is used
     city        TEXT,                          -- structured (migration 011); NULL for legacy-only callers
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS patients (
     created_via TEXT,                          -- self_service | front_desk
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS patients_ssn_digits_idx ON patients (ssn_digits);
 -- NOTE: still no UNIQUE constraint on (name, dob, ssn) — self-service intake
 -- can still fork one person into several rows. Week 2-3 catch-up
 -- (adr/0004, RIV-160) added a deterministic (dob, ssn) match-key lookup at

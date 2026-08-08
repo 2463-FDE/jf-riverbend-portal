@@ -182,6 +182,17 @@ user `is_active`), so revoked/expired/partial rows don't count as coverage.
 Exit 0 means every patient is reachable; a non-zero exit reports how many are
 not, so you can distinguish "backfill incomplete" from "safe to enforce."
 
+You don't have to remember to run it, though: records-service also runs the
+identical check as a non-blocking **startup warning** (`app.py::
+_warn_if_patients_lack_active_grant`, PR #22 review round 5) — it logs a count
+if any patient is unreachable, on every real process start, but never fails
+startup and never disables enforcement. That's a deliberate choice: this
+codebase's own authorization safety rules explicitly rule out an all-staff or
+administrator bypass, so there is no "enforcement off" flag to flip — grant
+enforcement is always deny-by-default. The warning is visibility so a partial
+rollout can't be silently missed; running the coverage script above (or
+backfilling grants) is still how you act on it.
+
 *Phase 2 — populate grants from a reviewed source.* Insert only the specific
 user/patient relationships that are actually justified, keyed on `users.id`
 (never username), as an explicit, reviewed decision. From here on, front-desk

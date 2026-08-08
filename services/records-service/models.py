@@ -16,6 +16,7 @@ class Patient(Base):
     last_name = Column(Text)             # structured (migration 011); NULL for legacy-only patients
     dob = Column(Text)               # stored as ISO string, not DATE (legacy)
     ssn = Column(Text)               # plain text (legacy)
+    ssn_digits = Column(Text)        # DB-computed generated column (migration 015); read-only
     gender = Column(Text)
     address = Column(Text)           # legacy/composed; see intake-service/schemas.py Demographics
     city = Column(Text)                  # structured (migration 011); NULL for legacy-only patients

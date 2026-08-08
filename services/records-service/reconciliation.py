@@ -78,25 +78,42 @@ def _normalize_ssn(ssn: Optional[str]) -> Optional[str]:
 
 
 def find_ssn_match_ids(db: Session, patient_id: int, ssn: Optional[str]) -> list[int]:
-    """Every OTHER patient id whose normalized ssn exactly matches. Full-table
-    scan + Python-side compare, same acceptable-at-seed-scale, non-indexed
-    approach as intake-service's _find_match_candidates — flagged there as
-    not scaling to real production volume without a normalized, indexed
-    column; same caveat applies here.
+    """Every OTHER patient id whose stored ssn_digits exactly matches the
+    requested patient's normalized ssn.
 
-    Codex review (2026-08-07, PR #22 round 4 — medium): matching necessarily
-    has to read every patient's ssn to compare, but that's exactly where it
-    stops now — this selects only `id`/`ssn` (never name, dob, or any
-    clinical field), so an unauthorized candidate's demographic/clinical PHI
-    is never loaded into application memory at all, not just excluded from
-    the response. build_reconciliation_result below authorizes these ids
-    BEFORE fetching full Patient detail for any of them — see
-    _fetch_patients_by_id."""
+    Codex review (2026-08-08, PR #22 round 5 — medium): this used to read
+    EVERY patient's ssn into Python and normalize+compare row by row on every
+    reconciliation request — an unbounded scan of unauthorized patients' PHI
+    (their SSNs), and a timeout risk at real volume. Migration 015 adds
+    `patients.ssn_digits`, a database-computed, indexed, digit-only column;
+    the query now filters on it directly, so only rows whose stored digits
+    already equal the exact 9-digit key are ever read — at most a handful,
+    never a full-table scan.
+
+    ssn_digits itself is unvalidated (pure digit extraction — a placeholder
+    like "000-00-0000" stores ssn_digits="000000000"), but that's safe:
+    `_normalize_ssn` rejects invalid-shaped SSNs for the QUERY key before this
+    runs (returns None, short-circuiting to `[]` below), so an invalid stored
+    value can never equal a validated key — see that function's docstring.
+    The `row.ssn_digits == normalized` recheck below is defense-in-depth
+    (never trust a query result to have actually honored its own WHERE
+    clause), not a second scan — `rows` is already the narrow, indexed match
+    set, not every patient.
+
+    Still selects only `id`/`ssn_digits` (never name, dob, or any clinical
+    field) — an unauthorized candidate's demographic/clinical PHI is never
+    loaded into application memory. build_reconciliation_result below
+    authorizes these ids BEFORE fetching full Patient detail for any of them
+    — see _fetch_patients_by_id."""
     normalized = _normalize_ssn(ssn)
     if not normalized:
         return []
-    rows = db.execute(select(Patient.id, Patient.ssn).where(Patient.ssn.isnot(None))).all()
-    return [row.id for row in rows if row.id != patient_id and _normalize_ssn(row.ssn) == normalized]
+    rows = db.execute(
+        select(Patient.id, Patient.ssn_digits).where(
+            Patient.ssn_digits == normalized, Patient.id != patient_id
+        )
+    ).all()
+    return [row.id for row in rows if row.id != patient_id and row.ssn_digits == normalized]
 
 
 def _fetch_patients_by_id(db: Session, patient_ids: set[int]) -> list[Patient]:

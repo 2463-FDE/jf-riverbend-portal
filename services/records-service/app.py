@@ -22,12 +22,12 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config import settings
-from db import get_db
+from db import get_db, get_sessionmaker
 from libs.patient_view_agent import (
     Action,
     AuthorizationDenied,
@@ -71,6 +71,52 @@ def _internal_token_is_configured() -> bool:
     return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
 
 
+def _warn_if_patients_lack_active_grant() -> None:
+    """PR #22 review round 5 (2026-08-08 — high): three prior rounds tried
+    different mechanisms for surfacing the grant-rollout-lockout risk (an
+    inline apply.sh preflight that blocked migrations and rejected the seeded
+    demo db; then a separate opt-in script, check_grant_coverage.sh). The
+    review's remaining complaint was that an opt-in script can be forgotten.
+    This closes that gap WITHOUT re-opening RIV-201 or breaking the seeded
+    demo: it runs on every real process start (can't be skipped the way a
+    standalone script can), but only WARNS — same query as
+    check_grant_coverage.sh — never blocks startup. Enforcement itself stays
+    deny-by-default with no bypass; this is operator visibility, not a
+    feature flag that would make enforcement optional (this codebase's own
+    safety rules for this authorization work explicitly rule out an all-staff
+    or administrator bypass). A DB error here is swallowed (logged, not
+    raised) — a coverage warning must never become a new reason the service
+    fails to start."""
+    try:
+        db = get_sessionmaker()()
+        try:
+            unreachable = db.execute(
+                text(
+                    """
+                    SELECT count(*) FROM patients p WHERE NOT EXISTS (
+                        SELECT 1 FROM patient_access_grants g JOIN users u ON u.id = g.user_id
+                        WHERE g.patient_id = p.id
+                          AND g.revoked_at IS NULL
+                          AND (g.expires_at IS NULL OR g.expires_at > now())
+                          AND u.is_active
+                    )
+                    """
+                )
+            ).scalar_one()
+        finally:
+            db.close()
+    except SQLAlchemyError:
+        log.exception("startup grant-coverage check failed (database unavailable) — continuing")
+        return
+    if unreachable:
+        log.warning(
+            "startup: %s patient(s) have no active grant to an active user — those "
+            "charts will be denied until grants are backfilled (docs/runbook.md "
+            "'Phase 2', or run db/migrations/scripts/check_grant_coverage.sh)",
+            unreachable,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Round-17 review (2026-08-06): failing only at /healthz (round-13)
@@ -84,13 +130,17 @@ async def lifespan(_app: FastAPI):
     lifespan startup/shutdown for a context-managed TestClient), so it
     cannot break any existing test; it only ever runs for a real
     uvicorn-started process. See gateway's and intake-service's identical
-    fix."""
+    fix.
+
+    Also runs the (non-blocking) grant-coverage warning above — same
+    "real process only, never fires in this repo's unit tests" property."""
     if not _internal_token_is_configured():
         raise RuntimeError(
             f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
+    _warn_if_patients_lack_active_grant()
     yield
 
 
