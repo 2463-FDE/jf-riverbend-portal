@@ -94,10 +94,21 @@ def _check_patient_grant_coverage() -> None:
     Still no enforcement bypass: this only ever WARNS or RAISES, never
     disables SqlPatientAccessGate — this codebase's own safety rules for this
     authorization work explicitly rule out an all-staff or administrator
-    bypass, so there is no flag that makes enforcement itself optional. A DB
-    error here is swallowed (logged, not raised) in every environment — a
-    coverage check must never become an unrelated new reason the service
-    fails to start."""
+    bypass, so there is no flag that makes enforcement itself optional.
+
+    Round 6 review (2026-08-08 — high, no-ship): the query itself can fail —
+    migration 014 not applied yet (patient_access_grants/users missing), or
+    the database simply unreachable at startup. A prior version swallowed
+    that unconditionally, which meant the exact failure modes this guard
+    exists to catch (schema drift, DB outage) let production boot HEALTHY
+    with coverage never verified — chart routes would then fail at request
+    time (503/403) instead of the deploy stopping up front. In production,
+    "the check itself couldn't run" is now treated the same as "the check
+    ran and found a gap": both refuse to start. Outside production it still
+    only logs and continues — a query failure during ordinary compose
+    startup ordering (DB not ready yet) must not turn `make up` into a crash
+    loop. Never includes str(exc) in the raised message (only the exception
+    type) — a DB-driver error string can embed the connection URL/password."""
     try:
         db = get_sessionmaker()()
         try:
@@ -116,8 +127,15 @@ def _check_patient_grant_coverage() -> None:
             ).scalar_one()
         finally:
             db.close()
-    except SQLAlchemyError:
-        log.exception("startup grant-coverage check failed (database unavailable) — continuing")
+    except SQLAlchemyError as e:
+        log.exception("startup grant-coverage check failed")
+        if settings.environment == "production":
+            raise RuntimeError(
+                "refusing to start: could not verify patient grant coverage "
+                f"(coverage query failed: {type(e).__name__} — migration 014 may "
+                "not be applied, or the database is unreachable)"
+            ) from e
+        log.warning("startup grant-coverage check failed outside production — continuing")
         return
     if not unreachable:
         return

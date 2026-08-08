@@ -7,7 +7,11 @@ already has patients could boot straight into a clinic-wide chart-access
 outage. Round 5's version only logged a warning — nothing mechanically
 stopped the bad deploy. This function now raises (refuses to start) when
 ENVIRONMENT=production, and only warns otherwise (so make up/make seed against
-the committed seed — 255 patients, 7 grants — keeps booting, per round 4).
+the committed seed — 255 patients, 7 grants — keeps booting, per round 4). A
+coverage-query FAILURE (missing table from an unapplied migration, DB
+unreachable) is treated the same way as a coverage GAP: fatal in production,
+a warning elsewhere (round 6 — a prior version swallowed this unconditionally,
+letting production boot healthy exactly when coverage couldn't be verified).
 
 Unit-level regression for that branching logic (fake DB session, no real
 Postgres) — proves the mechanism the deploy-safety decision relies on. A
@@ -84,12 +88,33 @@ def test_non_production_only_warns_never_raises(monkeypatch, caplog):
     assert any("5 patient" in r.message for r in caplog.records)
 
 
-def test_db_error_is_swallowed_in_every_environment(monkeypatch):
-    for env in ("production", "development"):
-        monkeypatch.setattr(app_mod.settings, "environment", env)
-        session = _FakeSession(fail=True)
-        _patch_sessionmaker(monkeypatch, session)
-        # A coverage-check failure (e.g. DB unavailable) must never itself
-        # become a reason the service won't start, in ANY environment.
+def test_db_error_is_swallowed_outside_production(monkeypatch, caplog):
+    # A coverage-check failure during ordinary dev/compose startup ordering
+    # (DB not ready yet) must not turn `make up` into a crash loop.
+    monkeypatch.setattr(app_mod.settings, "environment", "development")
+    session = _FakeSession(fail=True)
+    _patch_sessionmaker(monkeypatch, session)
+
+    with caplog.at_level("WARNING"):
+        app_mod._check_patient_grant_coverage()  # must not raise
+    assert session.closed
+    assert any("failed outside production" in r.message for r in caplog.records)
+
+
+def test_db_error_is_fatal_in_production(monkeypatch):
+    # Round 6 review: a prior version swallowed this unconditionally, so the
+    # exact failure modes this guard exists to catch (migration 014 not
+    # applied, DB unreachable) let production boot HEALTHY with coverage
+    # never verified. Now treated the same as "the check ran and found a
+    # gap": refuse to start.
+    monkeypatch.setattr(app_mod.settings, "environment", "production")
+    session = _FakeSession(fail=True)
+    _patch_sessionmaker(monkeypatch, session)
+
+    with pytest.raises(RuntimeError, match="coverage query failed") as exc_info:
         app_mod._check_patient_grant_coverage()
-        assert session.closed
+    assert session.closed
+    # Never leak the raw exception text (a DB-driver error string can embed
+    # the connection URL/password) — only the exception TYPE name.
+    assert "SQLAlchemyError" in str(exc_info.value)
+    assert "simulated connection drop" not in str(exc_info.value)
