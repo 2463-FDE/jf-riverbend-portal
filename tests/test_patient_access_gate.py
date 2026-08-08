@@ -226,6 +226,33 @@ def test_grant_lookup_db_failure_denies_closed(monkeypatch):
     assert exc.value.denial.reason.value == "policy_error"
 
 
+def test_grant_lookup_db_failure_rolls_back_so_the_audit_write_still_lands(monkeypatch):
+    # Round 8 review (2026-08-08 — medium): a real DBAPI failure leaves the
+    # session's transaction ABORTED unless rolled back — any further
+    # statement on it (e.g. app.py::_write_audit's insert for THIS denial)
+    # would then also fail, silently losing the one durable record of a
+    # policy-error chart-access attempt. Proves usability, not just that
+    # rollback() was called: after the denial, perform a real write on the
+    # SAME session (standing in for _write_audit) and confirm it succeeds.
+    db = _fresh_session()
+    _grant(db, user_id=FRONTDESK, patient_id=1042)
+    real_execute = db.execute
+
+    def _boom(*_a, **_kw):
+        raise SQLAlchemyError("simulated connection drop")
+
+    monkeypatch.setattr(db, "execute", _boom)
+    with pytest.raises(AuthorizationDenied):
+        SqlPatientAccessGate(db).authorize(_request(str(FRONTDESK), 1042))
+
+    monkeypatch.setattr(db, "execute", real_execute)  # restore before reusing the session
+    db.add(models_mod.AuditLog(actor="frontdesk", message="patient_access outcome=denied reason=policy_error"))
+    db.commit()  # must not raise — the transaction was cleanly rolled back, not left aborted
+
+    row = db.query(models_mod.AuditLog).filter_by(actor="frontdesk").first()
+    assert row is not None and row.message.startswith("patient_access outcome=denied")
+
+
 # --- batch check: reconciliation-shaped multi-candidate exclusion -----------
 
 
@@ -289,3 +316,25 @@ def test_authorized_patient_ids_raises_on_db_error_instead_of_hiding_it(monkeypa
     # (the reconciliation caller turns it into a 503), never a silent empty set.
     with pytest.raises(SQLAlchemyError):
         authorized_patient_ids(db, str(FRONTDESK), [1042])
+
+
+def test_authorized_patient_ids_rolls_back_before_propagating_so_the_session_stays_usable(monkeypatch):
+    # Round 8 review: same reasoning as the authorize() test above, applied to
+    # this function's own propagate-don't-swallow path — the caller that
+    # catches the propagated SQLAlchemyError must get back a session it can
+    # still use (e.g. for its own 503 handling or an audit write), not one
+    # left in an aborted transaction.
+    db = _fresh_session()
+    _grant(db, user_id=FRONTDESK, patient_id=1042)
+    real_execute = db.execute
+
+    def _boom(*_a, **_kw):
+        raise SQLAlchemyError("simulated connection drop")
+
+    monkeypatch.setattr(db, "execute", _boom)
+    with pytest.raises(SQLAlchemyError):
+        authorized_patient_ids(db, str(FRONTDESK), [1042])
+
+    monkeypatch.setattr(db, "execute", real_execute)
+    db.add(models_mod.AuditLog(actor="frontdesk", message="reconciliation outcome=error"))
+    db.commit()  # must not raise

@@ -142,6 +142,15 @@ def authorized_patient_ids(db: Session, actor_id: str, patient_ids: Iterable[int
         )
     except SQLAlchemyError:
         log.exception("patient_access_gate: batch grant lookup failed")
+        # Round 8 review: same reasoning as SqlPatientAccessGate.authorize()
+        # above — roll back before propagating, so the session this error
+        # travels back on (get_patient_reconciliation reuses `db` for its own
+        # audit write after catching this) isn't left in an aborted
+        # transaction state. No current caller writes anything on `db` AFTER
+        # catching this specific error without first hitting its own
+        # SQLAlchemyError handler, but this keeps that invariant true by
+        # construction rather than by accident of call-site ordering.
+        db.rollback()
         raise
     return set(rows)
 
@@ -185,6 +194,21 @@ class SqlPatientAccessGate(AuthorizationPort):
             ).first()
         except SQLAlchemyError:
             log.exception("patient_access_gate: grant lookup failed (correlation_id=%s)", cid)
+            # Round 8 review (2026-08-08 — medium): without this rollback, a real
+            # DBAPI failure here (missing table, aborted transaction) leaves the
+            # session's transaction ABORTED — Postgres refuses any further
+            # statement on it until rolled back. The route below catches
+            # AuthorizationDenied and reuses this SAME session to write the
+            # denial's audit row (app.py::_write_audit); on a real failure that
+            # write would ALSO fail, silently losing the one durable record of
+            # a denied/policy-error chart access — the thing most needed during
+            # an outage. Rolling back here first means the audit write runs in
+            # a fresh transaction and can actually succeed. Deliberately still
+            # converts to AuthorizationDenied(POLICY_ERROR), not a propagated
+            # 503: this authorization work's own safety rules require failing
+            # closed (deny) on unavailable policy data, not failing open by
+            # surfacing a generic server error instead of a denial.
+            self._db.rollback()
             self._deny(DenialReason.POLICY_ERROR, cid)
             return  # unreachable — _deny always raises; keeps type-checkers honest
 
