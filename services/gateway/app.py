@@ -256,20 +256,19 @@ def proxy_patients(
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    # Week 4 catch-up decision: deliberately left as "authenticated staff
-    # only," not patient-scoped. This is a roster browse/name-search used to
-    # FIND a patient (e.g. before registering them or booking their first
-    # visit) — a patient-specific grant can't exist yet for someone front
-    # desk hasn't located. Returns demographics/summary rows only, not chart
-    # content. See the module docstring above and the PR's "Open decisions."
-    #
-    # Codex review (2026-08-07, PR #23): that design decision doesn't excuse
-    # this route from proving the call came through the gateway at all —
-    # records-service's port is published to the host, so without
-    # X-Internal-Token a direct caller could skip require_session entirely
-    # and enumerate the whole roster. forward_status=True so a 401 (missing/
-    # misconfigured token) reaches the frontend, not a silently-flattened 200.
+    # PR #23 review round 2 (2026-08-07): GET /patients is now patient-scoped —
+    # records-service filters the roster/name-search to the caller's active
+    # grants (finding 2). This proxy MUST forward the actor, or records-service
+    # sees no actor and returns an empty PatientPage, so every real user gets
+    # total=0 even with active grants (the review's high finding: the failure is
+    # silent — an empty page looks like success). X-Actor-Id is the stable
+    # users.id used for the grant filter; X-Actor-Name is username for audit
+    # only; X-Internal-Token proves the call came via the gateway (records-
+    # service's port is published to the host). forward_status=True so a 401
+    # (missing/misconfigured token) reaches the frontend, not a flattened 200.
     headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get(
         "records", "/patients", params={"q": q, "limit": limit, "offset": offset},
