@@ -121,7 +121,7 @@ class FakeSession:
         # — every pre-authorization-boundary test in this file used
         # "frontdesk" and expected it to see everything, so this preserves
         # that behavior for tests that aren't specifically about exclusion.
-        self._granted = granted if granted is not None else {"frontdesk": {p.id for p in patients}}
+        self._granted = granted if granted is not None else {2: {p.id for p in patients}}
         self._fail_grant_lookup = fail_grant_lookup
         self._fail_batch_grant_lookup = fail_batch_grant_lookup
 
@@ -173,12 +173,12 @@ class FakeSession:
             # only the candidate check without also failing the initial
             # requested-patient authorization that runs before it.
             params = stmt.compile().params
-            username = params.get("username_1", "")
+            user_id = params.get("user_id_1")
             requested_ids = params.get("patient_id_1")
             is_batch = isinstance(requested_ids, (list, set, tuple))
             if self._fail_grant_lookup or (is_batch and self._fail_batch_grant_lookup):
                 raise SQLAlchemyError("simulated grant lookup failure")
-            allowed = self._granted.get(username, set())
+            allowed = self._granted.get(user_id, set())
             if is_batch:
                 matched_ids = [pid for pid in requested_ids if pid in allowed]
             else:
@@ -216,7 +216,7 @@ def _with_session(session_kwargs, call):
 def test_missing_internal_token_is_rejected():
     resp = _with_session(
         {"patients": [_MARIA_1042]},
-        lambda c: c.get("/patients/1042/reconciliation", headers={"X-Actor-Id": "frontdesk"}),
+        lambda c: c.get("/patients/1042/reconciliation", headers={"X-Actor-Id": "2"}),
     )
     assert resp.status_code == 401
     assert created_sessions[0].added == []
@@ -254,9 +254,9 @@ def test_authorized_actor_can_view_the_requested_patient():
     # Week 4 catch-up: an actor who IS granted the requested patient still
     # gets a normal 200 — the new boundary doesn't regress the allowed path.
     resp = _with_session(
-        {"patients": [_UNRELATED], "granted": {"frontdesk": {2001}}},
+        {"patients": [_UNRELATED], "granted": {2: {2001}}},
         lambda c: c.get(
-            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -267,9 +267,9 @@ def test_actor_without_a_grant_for_the_requested_patient_is_denied():
     # Week 4 catch-up: unlike the old StaffAccessGate, being a real known
     # actor is not enough — a grant for THIS patient is required.
     resp = _with_session(
-        {"patients": [_UNRELATED], "granted": {"frontdesk": set()}},
+        {"patients": [_UNRELATED], "granted": {2: set()}},
         lambda c: c.get(
-            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 403
@@ -280,7 +280,7 @@ def test_grant_lookup_failure_denies_closed():
     resp = _with_session(
         {"patients": [_UNRELATED], "fail_grant_lookup": True},
         lambda c: c.get(
-            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 403
@@ -297,11 +297,11 @@ def test_candidate_grant_lookup_failure_returns_503_not_a_clean_no_match_result(
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330],
-            "granted": {"frontdesk": {1042, 1330}},
+            "granted": {2: {1042, 1330}},
             "fail_batch_grant_lookup": True,
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 503
@@ -317,9 +317,9 @@ def test_nonexistent_patient_id_returns_404_and_writes_no_audit_row():
     # which the default `granted` (derived from the empty `patients` list)
     # would otherwise conflate.
     resp = _with_session(
-        {"patients": [], "patient_lookup_ids": set(), "granted": {"frontdesk": {999999}}},
+        {"patients": [], "patient_lookup_ids": set(), "granted": {2: {999999}}},
         lambda c: c.get(
-            "/patients/999999/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/999999/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 404
@@ -334,7 +334,7 @@ def test_patient_with_no_ssn_match_returns_only_itself_and_no_escalation():
     resp = _with_session(
         {"patients": [_UNRELATED]},
         lambda c: c.get(
-            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/2001/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -360,7 +360,7 @@ def test_exact_ssn_matches_are_returned_with_masked_identity_signal():
     resp = _with_session(
         {"patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588]},
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -385,7 +385,7 @@ def test_penicillin_allergy_discrepancy_is_flagged_with_evidence():
     resp = _with_session(
         {"patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588]},
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     body = resp.json()
@@ -409,7 +409,7 @@ def test_no_known_allergy_phrase_is_not_treated_as_a_candidate_value():
     resp = _with_session(
         {"patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588]},
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     body = resp.json()
@@ -423,7 +423,7 @@ def test_limitations_flag_free_text_and_unconfirmed_identity():
     resp = _with_session(
         {"patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588]},
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     limitations = " ".join(resp.json()["limitations"]).lower()
@@ -443,10 +443,10 @@ def test_authorized_matched_candidate_appears_with_full_detail():
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330],
-            "granted": {"frontdesk": {1042, 1330}},
+            "granted": {2: {1042, 1330}},
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -464,10 +464,10 @@ def test_unauthorized_matched_candidate_is_completely_absent():
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330],
-            "granted": {"frontdesk": {1042}},
+            "granted": {2: {1042}},
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -493,10 +493,10 @@ def test_mixed_authorized_and_unauthorized_candidates_returns_only_authorized():
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588],
-            "granted": {"frontdesk": {1042, 1330}},
+            "granted": {2: {1042, 1330}},
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -520,10 +520,10 @@ def test_unauthorized_candidate_contributes_no_discrepancy_evidence():
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588],
-            "granted": {"frontdesk": {1042, 1588}},
+            "granted": {2: {1042, 1588}},
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -543,10 +543,10 @@ def test_no_authorized_candidates_looks_identical_to_no_match_at_all():
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588],
-            "granted": {"frontdesk": {1042}},
+            "granted": {2: {1042}},
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 200
@@ -579,10 +579,10 @@ def test_a_different_actor_with_broader_grants_sees_the_full_match_set():
     resp = _with_session(
         {
             "patients": [_MARIA_1042, _MARIA_1330, _MARIA_1588],
-            "granted": {"drnguyen": {1042, 1330, 1588}},
+            "granted": {6: {1042, 1330, 1588}},
         },
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "drnguyen"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "6"}
         ),
     )
     assert resp.status_code == 200
@@ -598,7 +598,7 @@ def test_does_not_return_data_if_audit_write_fails():
     resp = _with_session(
         {"patients": [_MARIA_1042, _MARIA_1330], "fail_commit": True},
         lambda c: c.get(
-            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/reconciliation", headers={**_internal_header(), "X-Actor-Id": "2"}
         ),
     )
     assert resp.status_code == 503

@@ -365,11 +365,14 @@ emit()
 # test_patient_view_flow.py rely on exactly this to prove cross-patient
 # denial with real seeded accounts, not just unit-test fixtures.
 # ---------------------------------------------------------------------------
-emit("INSERT INTO patient_access_grants (username, patient_id) VALUES")
+# PR #23 review round 2 (2026-08-07): grants are keyed on users.id (the stable
+# principal the gateway forwards as X-Actor-Id), never username. Ids from the
+# users INSERT above: frontdesk=2, drpatel=5, drnguyen=6.
+emit("INSERT INTO patient_access_grants (user_id, patient_id) VALUES")
 gwrows = [
-    " ('frontdesk', 1042)", " ('frontdesk', 1330)", " ('frontdesk', 1588)", " ('frontdesk', 1601)",
-    " ('drpatel', 1043)",
-    " ('drnguyen', 1330)", " ('drnguyen', 1601)",
+    " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
+    " (5, 1043)",                                             # drpatel
+    " (6, 1330)", " (6, 1601)",                               # drnguyen
 ]
 emit(",\n".join(gwrows) + ";")
 emit()

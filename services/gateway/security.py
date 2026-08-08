@@ -2,10 +2,12 @@
 Password hashing/verification (PBKDF2-SHA256, django-style string) and Redis
 session handling.
 
-Two deliberate weaknesses live here, by design (this is an inherited build):
-  * Sessions are stored in Redis with NO TTL — once issued, a token is valid
-    forever (no automatic logoff). See auth.yaml SESSION_TIMEOUT: never.
-  * There is no second factor; password only.
+PR #23 review round 2 (2026-08-07): sessions now carry a Redis TTL
+(settings.session_timeout_seconds), refreshed on each authenticated read, so
+an abandoned token expires instead of living forever. The session also carries
+the stable `user_id` (users.id) as the authorization principal — username is
+kept only as display/audit metadata. There is still no second factor; password
+only (MFA remains out of scope for this catch-up).
 """
 import base64
 import hashlib
@@ -49,18 +51,40 @@ def _redis():
     return _redis_client
 
 
-def create_session(username: str, role: str) -> str:
+def create_session(user_id: int, username: str, role: str) -> str:
     token = uuid.uuid4().hex
-    # NOTE: no expiry / TTL is set, so sessions never expire.
-    _redis().hset(f"session:{token}", mapping={"username": username, "role": role})
+    key = f"session:{token}"
+    # user_id is the stable authorization principal; username/role are display
+    # + audit metadata. Redis values are strings (decode_responses=True).
+    _redis().hset(key, mapping={"user_id": str(user_id), "username": username, "role": role})
+    _redis().expire(key, settings.session_timeout_seconds)  # idle TTL, refreshed on read
     return token
 
 
 def get_session(token: str) -> dict | None:
     if not token:
         return None
-    data = _redis().hgetall(f"session:{token}")
-    return data or None
+    key = f"session:{token}"
+    data = _redis().hgetall(key)
+    if not data:
+        return None
+    # PR #23 review round 3 (2026-08-08): a session issued before the user_id
+    # principal (origin/main sessions carried only username/role, and never
+    # expired) cannot authorize anything — routes would forward an empty
+    # X-Actor-Id and the caller would silently get empty rosters / 403s, and
+    # intake would create patients with no registrar grant. Treat such a
+    # session as invalid: delete it and return None so require_session issues a
+    # clean 401 and the user simply logs in again (minting a user_id session).
+    # Validate BEFORE refreshing, so a malformed session's life is never
+    # extended (the review's second point).
+    if not data.get("user_id"):
+        _redis().delete(key)
+        return None
+    # Sliding expiration: each authenticated request refreshes the idle TTL, so
+    # an active user is never logged out mid-session but an abandoned token
+    # lapses after settings.session_timeout_seconds of inactivity.
+    _redis().expire(key, settings.session_timeout_seconds)
+    return data
 
 
 def destroy_session(token: str) -> None:

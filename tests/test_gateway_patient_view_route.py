@@ -17,7 +17,7 @@ from conftest import load_module
 app_mod = load_module("services/gateway/app.py", "gateway_app_patient_view")
 
 VALID_TOKEN = "valid-token-abc"
-_VALID_SESSION = {"username": "frontdesk", "role": "staff"}
+_VALID_SESSION = {"user_id": "2", "username": "frontdesk", "role": "staff"}
 TEST_INTERNAL_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
 
@@ -64,7 +64,8 @@ def test_forwards_actor_id_from_session_and_a_correlation_header(client, monkeyp
 
     assert resp.status_code == 200
     assert captured["url"].endswith("/patients/1042/view")
-    assert captured["headers"]["X-Actor-Id"] == "frontdesk"
+    assert captured["headers"]["X-Actor-Id"] == "2"          # stable users.id
+    assert captured["headers"]["X-Actor-Name"] == "frontdesk"  # username, audit only
     assert captured["headers"]["X-Internal-Token"] == TEST_INTERNAL_TOKEN
     assert "X-Request-Id" in captured["headers"]
     assert len(captured["headers"]["X-Request-Id"]) == 32

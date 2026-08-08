@@ -75,14 +75,14 @@ CREATE INDEX IF NOT EXISTS patient_links_linked_patient_id_idx ON patient_links 
 -- stay enforced in code (see libs/patient_view_agent), not as columns here.
 CREATE TABLE IF NOT EXISTS patient_access_grants (
     id          SERIAL PRIMARY KEY,
-    username    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     granted_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     revoked_at  TIMESTAMPTZ,             -- NULL = active; set = explicitly revoked
     expires_at  TIMESTAMPTZ,             -- NULL = never expires
-    UNIQUE (username, patient_id)
+    UNIQUE (user_id, patient_id)
 );
-CREATE INDEX IF NOT EXISTS patient_access_grants_username_idx ON patient_access_grants (username);
+CREATE INDEX IF NOT EXISTS patient_access_grants_user_id_idx ON patient_access_grants (user_id);
 CREATE INDEX IF NOT EXISTS patient_access_grants_patient_id_idx ON patient_access_grants (patient_id);
 
 CREATE TABLE IF NOT EXISTS insurance_coverages (

@@ -74,35 +74,27 @@ class PatientLink(Base):
 
 
 class PatientAccessGrant(Base):
-    """Codex review (2026-08-07, PR #22 — high, no-ship): migration 014
-    (records-service) ships this table empty in every real deployment, and
-    records-service's SqlPatientAccessGate now requires an active row here
-    before serving ANY read of a patient's chart — including the chart the
-    staff member requesting THIS intake is about to create. Without this,
-    a newly registered patient's own chart would be immediately
-    inaccessible to the person who just registered them.
-    services/records-service/patient_access_gate.py owns reading/enforcing
-    this table; this copy (ADR 0001: no shared lib) exists here only to
-    INSERT the one grant intake is positioned to create correctly — the
-    acting staff member, for the patient they just created — never to
-    read or authorize anything itself."""
+    """Week 4 catch-up (migration 014) — the per-(user, patient) access grant
+    records-service's SqlPatientAccessGate authorizes against. intake-service
+    writes a row here when a *front-desk* staff member registers a patient (an
+    authenticated actor is present), so the registrar can immediately open the
+    chart they just created. Self-service intake has no actor and creates no
+    grant — those patients need an explicit grant before any staff can view
+    them (docs/runbook.md). Keyed on the stable users.id, never username.
+
+    user_id is deliberately a PLAIN column, NOT ForeignKey("users.id"):
+    intake-service's own Base.metadata has no `users` table (ADR 0001 per-
+    service metadata split), so an FK target can't resolve here and would raise
+    NoReferencedTableError the first time this model is inserted through the ORM
+    — which intake actually does (records-service, which owns/reads this table,
+    models `users` and keeps the FK). migration 014 enforces the real FK + ON
+    DELETE CASCADE at the database level regardless of this local declaration."""
 
     __tablename__ = "patient_access_grants"
-    __table_args__ = (UniqueConstraint("username", "patient_id"),)
+    __table_args__ = (UniqueConstraint("user_id", "patient_id"),)
 
     id = Column(Integer, primary_key=True)
-    # Round-1 live-verification fix: `username` is deliberately a plain
-    # column, NOT `ForeignKey("users.username")` — intake-service's own
-    # Base.metadata has no `users` table (it doesn't own that table, per
-    # ADR 0001's per-service-metadata split), so SQLAlchemy's unit-of-work
-    # cannot resolve a same-metadata FK target for it and raises
-    # NoReferencedTableError the first time this model is actually inserted
-    # through the ORM. The real Postgres table (migration 014,
-    # records-service) already enforces this FK, plus ON DELETE CASCADE, at
-    # the database level regardless of what this service's local model
-    # declares — patient_id below keeps its FK since `patients` IS defined
-    # in this same file/metadata and resolves without issue.
-    username = Column(Text, nullable=False)
+    user_id = Column(Integer, nullable=False)
     patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
     granted_at = Column(DateTime(timezone=True), server_default=func.now())
     revoked_at = Column(DateTime(timezone=True))

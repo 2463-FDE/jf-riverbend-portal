@@ -286,8 +286,8 @@ def create_intake(
     req: IntakeRequest,
     db: Session = Depends(get_db),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
-    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
 ):
     _verify_internal_token(x_internal_token)
 
@@ -357,7 +357,15 @@ def create_intake(
             coverage_id = _create_coverage(db, patient_id, req.insurance)
 
         _record_consents(db, patient_id, req.consents)
-        _grant_creator_access(db, x_actor_id, patient_id)
+
+        # PR #23 (Week 4 catch-up): grant the registering staff member access to
+        # the chart they just created, in the SAME atomic group as the patient
+        # write — so front-desk registration doesn't depend on the now
+        # patient-scoped /patients roster (records-service list_patients). Only
+        # when an authenticated actor is present (front-desk flow); self-service
+        # intake carries no X-Actor-Id and creates no grant, so those patients
+        # need an explicit grant before any staff can view them (docs/runbook.md).
+        _grant_registrar_access(db, x_actor_id, patient_id)
 
         # Round-13 review (2026-08-06): patient, coverage, and every consent
         # are only flushed above, not committed — this is the single commit
@@ -597,6 +605,27 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
         raise HTTPException(status_code=503, detail="patient store unavailable")
 
 
+def _grant_registrar_access(db: Session, x_actor_id: Optional[str], patient_id: int) -> None:
+    """Insert a patient_access_grant for the registering staff member (users.id
+    forwarded as X-Actor-Id) so they can immediately open the chart they just
+    created. Flush-only; create_intake's single commit makes it durable with
+    the patient row. No actor (self-service intake) → no grant. A write failure
+    fails the whole registration closed (503), matching this file's convention."""
+    try:
+        user_id = int(x_actor_id) if x_actor_id not in (None, "") else None
+    except (ValueError, TypeError):
+        user_id = None
+    if user_id is None:
+        return
+    try:
+        db.add(PatientAccessGrant(user_id=user_id, patient_id=patient_id))
+        db.flush()
+    except SQLAlchemyError as e:
+        db.rollback()
+        log.error("intake: failed to grant registrar access (error_type=%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="patient store unavailable")
+
+
 def _create_patient(db: Session, demo: Demographics) -> int:
     # Round-13 review (2026-08-06): flushes only — see create_intake's single
     # commit and the module docstring's round-13 entry for why this no
@@ -689,40 +718,6 @@ def _record_consents(db: Session, patient_id: int, kinds: list[str]) -> None:
                 kind, patient_id, type(e).__name__,
             )
             raise HTTPException(status_code=503, detail="consent store unavailable")
-
-
-def _grant_creator_access(db: Session, x_actor_id: Optional[str], patient_id: int) -> None:
-    """Codex review (2026-08-07, PR #22 — high, no-ship): records-service's
-    SqlPatientAccessGate (Week 4 catch-up) now requires an active
-    patient_access_grants row before serving ANY read of a patient's chart
-    — including immediately after this endpoint creates one. Without this,
-    the staff member who just registered a patient could not open the
-    chart they just created; every new registration would go dark on
-    arrival, on top of migration 014's already-documented empty-table gap
-    for pre-existing patients (docs/runbook.md).
-
-    Deliberately narrow: this creates exactly one grant — the acting
-    staff member, for the patient they just created — never a broader or
-    inferred grant. `x_actor_id` absent (e.g. a self-service intake with
-    no staff session forwarding an actor) means there is no one to grant
-    access to yet; that is a legitimate case, not an error, so this is a
-    no-op rather than a failure. Flushes only, as part of the SAME
-    transaction as the patient/coverage/consent rows above — create_intake
-    still performs the single commit; a failure here rolls back the whole
-    intake, matching every other write in this function.
-    """
-    if not x_actor_id:
-        return
-    try:
-        db.add(PatientAccessGrant(username=x_actor_id, patient_id=patient_id))
-        db.flush()
-    except SQLAlchemyError as e:
-        db.rollback()
-        log.error(
-            "intake: failed to grant creator access for patient %s (error_type=%s)",
-            patient_id, type(e).__name__,
-        )
-        raise HTTPException(status_code=503, detail="access grant store unavailable")
 
 
 def _start_eligibility_check(

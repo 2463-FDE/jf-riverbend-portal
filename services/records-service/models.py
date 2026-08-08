@@ -1,5 +1,5 @@
 """ORM models records-service touches. (Copy-paste per service — no shared lib yet, ADR 0001.)"""
-from sqlalchemy import Column, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.sql import func
 
@@ -58,32 +58,35 @@ class Record(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
+class User(Base):
+    """Minimal projection of the users table — records-service only needs to
+    confirm the authenticated principal (users.id) is still active before
+    honoring a grant (PR #23 review round 2: a disabled account must not
+    retain chart access via an existing grant/session)."""
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(Text)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class PatientAccessGrant(Base):
     """Week 4 catch-up (migration 014) — the patient-ownership/care-team-
     membership fact RIV-201 identified as missing (docs/analysis/
-    RIV-201-patient-records-IDOR.md §6). `username` mirrors
-    AuthorizationRequest.actor_id exactly (see services/records-service/
-    patient_access_gate.py). Action/purpose are enforced in code, not stored
-    per-row here — see that file's module docstring for why."""
+    RIV-201-patient-records-IDOR.md §6). `user_id` is the stable authenticated
+    principal (users.id) the gateway forwards as X-Actor-Id (PR #23 review
+    round 2 — never username). Action/purpose are enforced in code, not stored
+    per-row here — see patient_access_gate.py's module docstring for why."""
 
     __tablename__ = "patient_access_grants"
-    __table_args__ = (UniqueConstraint("username", "patient_id"),)
+    __table_args__ = (UniqueConstraint("user_id", "patient_id"),)
 
     id = Column(Integer, primary_key=True)
-    # Live-verification fix (intake-service hit this first): `username` is
-    # deliberately a plain column, NOT `ForeignKey("users.username")` —
-    # records-service's own Base.metadata has no `users` table (it doesn't
-    # own that table, per ADR 0001's per-service-metadata split), so
-    # SQLAlchemy's unit-of-work cannot resolve a same-metadata FK target for
-    # it and raises NoReferencedTableError the moment anything inserts this
-    # model through the ORM (this service currently only ever SELECTs it,
-    # which doesn't trigger the same resolution — kept plain anyway so an
-    # ORM-level write here doesn't quietly reintroduce the same bug later).
-    # The real Postgres table (migration 014) already enforces this FK, plus
-    # ON DELETE CASCADE, at the database level regardless of what this
-    # service's local model declares — patient_id below keeps its FK since
-    # `patients` IS defined in this same file/metadata and resolves fine.
-    username = Column(Text, nullable=False)
+    # Keyed on the stable users.id (PR #23 review). records-service now models a
+    # minimal `User` (above), so this FK resolves in this service's own
+    # metadata; migration 014 enforces it + ON DELETE CASCADE at the DB level.
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
     granted_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     revoked_at = Column(TIMESTAMP(timezone=True))  # NULL = active; set = explicitly revoked

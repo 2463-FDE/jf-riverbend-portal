@@ -108,7 +108,18 @@ def _bearer(authorization: Optional[str]) -> str:
 
 
 def require_session(authorization: Optional[str] = Header(default=None)) -> dict:
-    """Reject anonymous callers. (Does NOT scope access to a patient — see IDOR.)"""
+    """Reject anonymous callers.
+
+    PR #23 review round 2 (2026-08-07): the session now carries the stable
+    users.id (forwarded downstream as X-Actor-Id) and expires via a Redis idle
+    TTL that get_session refreshes on each read (security.py), so an abandoned
+    token no longer lives forever. Per-request re-validation of users.is_active
+    for chart data happens at the authorization boundary itself —
+    records-service's SqlPatientAccessGate joins users.is_active, so a disabled
+    account cannot read any patient chart even with a still-live session (login
+    also rejects inactive users up front). That join, not a DB round-trip on
+    every gateway call, is the central revocation point for PHI access.
+    """
     sess = get_session(_bearer(authorization))
     if not sess:
         raise HTTPException(status_code=401, detail="not authenticated")
@@ -125,8 +136,11 @@ def healthz():
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     """
-    Issue a session token. Password only (no MFA), and the token never expires
-    (no TTL on the Redis key) — see auth.yaml.
+    Issue a session token. Password only (no MFA). Login rejects inactive
+    users up front (below); the token carries the stable users.id and a Redis
+    idle TTL (settings.session_timeout_seconds) refreshed on each request —
+    see create_session. Per-request is_active revalidation for chart data is
+    enforced at records-service's SqlPatientAccessGate (PR #23 review round 2).
     """
     try:
         user = db.execute(select(User).where(User.username == req.username)).scalar_one_or_none()
@@ -139,7 +153,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
     user.last_login_at = func.now()
     db.commit()
-    token = create_session(user.username, user.role)
+    token = create_session(user.id, user.username, user.role)
     log.info("login ok user=%s", user.username)
     return {
         "token": token,
@@ -176,15 +190,15 @@ def proxy_intake(payload: dict, session: dict = Depends(require_session)):
     # an unauthenticated caller probe the duplicate-detection response as a
     # patient/SSN-existence oracle. Same shared secret as proxy_patient_view.
     #
-    # Codex review (2026-08-07, PR #22 — high, no-ship): also forward
-    # X-Actor-Id now, same as every patient-data route below. Week 4
-    # catch-up's SqlPatientAccessGate requires an active grant before
-    # serving any chart read, including the chart intake-service is about
-    # to create — without the actor, intake had no way to grant the
-    # registering staff member access to the patient they just registered.
+    # PR #23 (Week 4 catch-up): forward the authenticated actor so intake can
+    # grant the registrar immediate access to the chart they create (front-desk
+    # registration). X-Actor-Id is the stable users.id; X-Actor-Name is
+    # username for audit only. Both are only trustworthy behind X-Internal-Token
+    # (records/intake fail closed without it).
     headers = {
         "X-Internal-Token": settings.internal_service_token,
-        "X-Actor-Id": session.get("username") or "",
+        "X-Actor-Id": session.get("user_id") or "",
+        "X-Actor-Name": session.get("username") or "",
     }
     return _post("intake", "/intake", payload, headers=headers, forward_status=True)
 
@@ -242,20 +256,19 @@ def proxy_patients(
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    # Week 4 catch-up decision: deliberately left as "authenticated staff
-    # only," not patient-scoped. This is a roster browse/name-search used to
-    # FIND a patient (e.g. before registering them or booking their first
-    # visit) — a patient-specific grant can't exist yet for someone front
-    # desk hasn't located. Returns demographics/summary rows only, not chart
-    # content. See the module docstring above and the PR's "Open decisions."
-    #
-    # Codex review (2026-08-07, PR #23): that design decision doesn't excuse
-    # this route from proving the call came through the gateway at all —
-    # records-service's port is published to the host, so without
-    # X-Internal-Token a direct caller could skip require_session entirely
-    # and enumerate the whole roster. forward_status=True so a 401 (missing/
-    # misconfigured token) reaches the frontend, not a silently-flattened 200.
+    # PR #23 review round 2 (2026-08-07): GET /patients is now patient-scoped —
+    # records-service filters the roster/name-search to the caller's active
+    # grants (finding 2). This proxy MUST forward the actor, or records-service
+    # sees no actor and returns an empty PatientPage, so every real user gets
+    # total=0 even with active grants (the review's high finding: the failure is
+    # silent — an empty page looks like success). X-Actor-Id is the stable
+    # users.id used for the grant filter; X-Actor-Name is username for audit
+    # only; X-Internal-Token proves the call came via the gateway (records-
+    # service's port is published to the host). forward_status=True so a 401
+    # (missing/misconfigured token) reaches the frontend, not a flattened 200.
     headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get(
         "records", "/patients", params={"q": q, "limit": limit, "offset": offset},
@@ -277,7 +290,8 @@ def proxy_patients(
 @app.get("/patients/{patient_id}")
 def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get("records", f"/patients/{patient_id}", headers=headers, forward_status=True)
 
@@ -285,7 +299,8 @@ def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
 @app.get("/patients/{patient_id}/records")
 def proxy_records(patient_id: int, session: dict = Depends(require_session)):
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get("records", f"/patients/{patient_id}/records", headers=headers, forward_status=True)
 
@@ -301,7 +316,8 @@ def proxy_search(q: str, session: dict = Depends(require_session)):
     # patient_access_gate.py). A denied/unauthorized match is silently
     # dropped, never surfaced as a count or placeholder.
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get("records", "/records/search", params={"q": q}, headers=headers, forward_status=True)
 
@@ -337,7 +353,8 @@ def proxy_patient_view(
     session: dict = Depends(require_session),
 ):
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get(
         "records",

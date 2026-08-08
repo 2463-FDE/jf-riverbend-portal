@@ -183,7 +183,7 @@ def test_direct_caller_with_spoofed_actor_and_no_token_is_rejected(client):
 
 def test_wrong_token_with_valid_looking_actor_is_rejected(client):
     resp = client.get(
-        "/patients/1042/view", headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": "not-the-real-token"}
+        "/patients/1042/view", headers={"X-Actor-Id": "1", "X-Actor-Name": "frontdesk", "X-Internal-Token": "not-the-real-token"}
     )
     assert resp.status_code == 401
     assert created_sessions[0].added == []
@@ -194,7 +194,7 @@ def test_unconfigured_token_fails_closed_even_with_matching_empty_values(client,
     # services, an empty configured value must NOT compare equal to an empty
     # header — that would silently reopen the exact bypass being fixed.
     monkeypatch.setattr(app_mod.settings, "internal_service_token", "")
-    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": ""})
+    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "1", "X-Actor-Name": "frontdesk", "X-Internal-Token": ""})
     assert resp.status_code == 401
     assert created_sessions[0].added == []
 
@@ -205,7 +205,7 @@ def test_short_placeholder_token_is_rejected_even_when_it_matches_exactly(client
     # A short, human-typed value must fail closed even if both sides somehow
     # agree on it (e.g. an operator typed "changeme" on both services).
     monkeypatch.setattr(app_mod.settings, "internal_service_token", "changeme")
-    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "frontdesk", "X-Internal-Token": "changeme"})
+    resp = client.get("/patients/1042/view", headers={"X-Actor-Id": "1", "X-Actor-Name": "frontdesk", "X-Internal-Token": "changeme"})
     assert resp.status_code == 401
     assert created_sessions[0].added == []
 
@@ -232,7 +232,7 @@ def test_missing_actor_header_is_denied_and_audited(client):
 def test_authorized_actor_gets_completed_view_and_is_audited(client):
     # `client`'s FakeSession defaults to grant_exists=True — standing in for
     # a real patient_access_grants row for this (actor, patient) pair.
-    resp = client.get("/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"})
+    resp = client.get("/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -258,7 +258,7 @@ def test_unauthorized_actor_is_denied_for_a_patient_they_have_no_grant_for(monke
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_no_grant
     try:
         resp = TestClient(app_mod.app).get(
-            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "billing-clerk"}
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "2", "X-Actor-Name": "billing-clerk"}
         )
     finally:
         app_mod.app.dependency_overrides.clear()
@@ -279,7 +279,7 @@ def test_grant_lookup_failure_denies_closed(monkeypatch):
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_grant_lookup_failing
     try:
         resp = TestClient(app_mod.app).get(
-            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"}
         )
     finally:
         app_mod.app.dependency_overrides.clear()
@@ -293,7 +293,7 @@ def test_invalid_purpose_is_rejected_before_authorization(client):
     resp = client.get(
         "/patients/1042/view",
         params={"purpose": "not-a-real-purpose"},
-        headers={**_internal_header(), "X-Actor-Id": "frontdesk"},
+        headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"},
     )
     assert resp.status_code == 400
     # get_db is a FastAPI dependency, so a session is still created, but
@@ -328,7 +328,7 @@ def test_allowed_view_does_not_return_chart_data_if_audit_write_fails(monkeypatc
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_failing_commit
     try:
         resp = TestClient(app_mod.app).get(
-            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"}
         )
     finally:
         app_mod.app.dependency_overrides.clear()
@@ -368,7 +368,7 @@ def test_nonexistent_patient_id_returns_404_and_writes_no_audit_row(monkeypatch)
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db_missing_patient
     try:
         resp = TestClient(app_mod.app).get(
-            "/patients/999999/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/999999/view", headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"}
         )
     finally:
         app_mod.app.dependency_overrides.clear()
@@ -432,7 +432,7 @@ def test_repository_failure_returns_503_not_200(monkeypatch):
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db
     try:
         resp = TestClient(app_mod.app).get(
-            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"}
         )
     finally:
         app_mod.app.dependency_overrides.clear()
@@ -450,7 +450,7 @@ def test_repository_failure_still_writes_an_audit_row(monkeypatch):
     app_mod.app.dependency_overrides[app_mod.get_db] = _fake_get_db
     try:
         TestClient(app_mod.app).get(
-            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "frontdesk"}
+            "/patients/1042/view", headers={**_internal_header(), "X-Actor-Id": "1", "X-Actor-Name": "frontdesk"}
         )
     finally:
         app_mod.app.dependency_overrides.clear()

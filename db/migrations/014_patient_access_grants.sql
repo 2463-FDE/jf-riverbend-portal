@@ -8,11 +8,14 @@
 -- unauthorized proxy_patient/proxy_records IDOR.
 --
 -- Deliberately minimal (explicit-grant model, smallest safe option):
---   * `username` mirrors AuthorizationRequest.actor_id exactly — the same
---     stable identity string the gateway already forwards as X-Actor-Id
---     (session.get("username")). Not a users.id FK: the authorization port
---     receives a username string, never a numeric user id, and there is no
---     value in translating one to the other only to translate back.
+--   * `user_id` is the STABLE authenticated principal (users.id), the actor
+--     identity the gateway forwards as X-Actor-Id after PR #23 review round 2
+--     (2026-08-07). It is deliberately NOT `username`: a username can be
+--     reassigned and is not a durable identity, and the Codex review flagged
+--     keying authorization on it as unsafe. The gateway session carries
+--     users.id; username is retained only as display/audit metadata
+--     (X-Actor-Name). ON DELETE CASCADE drops a user's grants when the user
+--     row is deleted.
 --   * No action/purpose columns — those stay enforced in code exactly as
 --     StaffAccessGate/FakePolicyAuthorization already do (an allow-list
 --     constructor argument), so a grant is purely "may this actor ever act
@@ -38,13 +41,13 @@
 
 CREATE TABLE IF NOT EXISTS patient_access_grants (
     id          SERIAL PRIMARY KEY,
-    username    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     granted_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     revoked_at  TIMESTAMPTZ,             -- NULL = active; set = explicitly revoked
     expires_at  TIMESTAMPTZ,             -- NULL = never expires
-    UNIQUE (username, patient_id)
+    UNIQUE (user_id, patient_id)
 );
 
-CREATE INDEX IF NOT EXISTS patient_access_grants_username_idx ON patient_access_grants (username);
+CREATE INDEX IF NOT EXISTS patient_access_grants_user_id_idx ON patient_access_grants (user_id);
 CREATE INDEX IF NOT EXISTS patient_access_grants_patient_id_idx ON patient_access_grants (patient_id);

@@ -180,6 +180,35 @@ class _FakePatientRow:
         self.dob = dob
 
 
+# --- Grant-at-intake (PR #23 review round 2, finding 1) ---------------------
+
+
+def test_frontdesk_intake_grants_the_registrar_access_to_the_new_patient():
+    # A front-desk registration carries the staff actor (X-Actor-Id = users.id).
+    # intake creates a patient_access_grant so the registrar can open the chart
+    # they just created without depending on the now grant-scoped /patients.
+    db = _FakeSession()
+    app_mod.create_intake(
+        _request(insurance=None), db=db, x_request_id=None,
+        x_actor_id="2", x_internal_token=TEST_TOKEN,
+    )
+    grants = [o for o in db.added if isinstance(o, app_mod.PatientAccessGrant)]
+    assert len(grants) == 1
+    assert grants[0].user_id == 2
+    assert grants[0].patient_id is not None
+
+
+def test_self_service_intake_creates_no_grant():
+    # No authenticated actor (self-service) -> no grant; those patients need an
+    # explicit grant before any staff can view them (docs/runbook.md).
+    db = _FakeSession()
+    app_mod.create_intake(
+        _request(insurance=None), db=db, x_request_id=None,
+        x_actor_id=None, x_internal_token=TEST_TOKEN,
+    )
+    assert [o for o in db.added if isinstance(o, app_mod.PatientAccessGrant)] == []
+
+
 # --- Round-11 review: intake-service's internal-token gate ------------------
 #
 # The gateway already requires a valid staff session before it will forward
@@ -833,11 +862,11 @@ def test_grants_creator_access_to_the_newly_created_patient(monkeypatch):
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession()
 
-    result = _create_intake(_request(), db=db, x_request_id=None, x_actor_id="frontdesk")
+    result = _create_intake(_request(), db=db, x_request_id=None, x_actor_id="2")
 
     grants = [obj for obj in db.added if type(obj).__tablename__ == "patient_access_grants"]
     assert len(grants) == 1
-    assert grants[0].username == "frontdesk"
+    assert grants[0].user_id == 2
     assert grants[0].patient_id == result.patient_id
 
 
@@ -858,7 +887,7 @@ def test_grant_write_failure_rolls_back_the_whole_intake(monkeypatch):
     db = _GrantFailingSession()
 
     with pytest.raises(app_mod.HTTPException) as exc_info:
-        _create_intake(_request(), db=db, x_request_id=None, x_actor_id="frontdesk")
+        _create_intake(_request(), db=db, x_request_id=None, x_actor_id="2")
 
     assert exc_info.value.status_code == 503
     assert db.rollback_count == 1
@@ -878,7 +907,7 @@ def test_grant_is_created_for_the_duplicate_link_path_too(monkeypatch):
 
     result = _create_intake(
         _request(demographics={"name": "Maria Gonzalez", "ssn": "412-55-9981", "dob": "1971-03-03"}),
-        db=db, x_request_id=None, x_actor_id="frontdesk",
+        db=db, x_request_id=None, x_actor_id="2",
     )
 
     grants = [obj for obj in db.added if type(obj).__tablename__ == "patient_access_grants"]
