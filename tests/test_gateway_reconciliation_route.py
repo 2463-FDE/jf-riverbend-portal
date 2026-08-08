@@ -13,7 +13,7 @@ from conftest import load_module
 app_mod = load_module("services/gateway/app.py", "gateway_app_reconciliation")
 
 VALID_TOKEN = "valid-token-abc"
-_VALID_SESSION = {"username": "frontdesk", "role": "staff"}
+_VALID_SESSION = {"user_id": "2", "username": "frontdesk", "role": "staff"}
 TEST_INTERNAL_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
 
@@ -60,7 +60,11 @@ def test_forwards_actor_id_and_internal_token(client, monkeypatch):
 
     assert resp.status_code == 200
     assert captured["url"].endswith("/patients/1042/reconciliation")
-    assert captured["headers"]["X-Actor-Id"] == "frontdesk"
+    # Consolidation review (PR #22): the numeric users.id must reach records-
+    # service (username would be rejected by parse_user_id -> 403 for every real
+    # user). username rides along only as X-Actor-Name for audit.
+    assert captured["headers"]["X-Actor-Id"] == "2"
+    assert captured["headers"]["X-Actor-Name"] == "frontdesk"
     assert captured["headers"]["X-Internal-Token"] == TEST_INTERNAL_TOKEN
     assert "X-Request-Id" in captured["headers"]
 

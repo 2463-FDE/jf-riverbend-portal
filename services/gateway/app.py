@@ -375,8 +375,14 @@ def proxy_patient_reconciliation(
     patient_id: int,
     session: dict = Depends(require_session),
 ):
+    # Consolidation review (PR #22): records-service scopes reconciliation to the
+    # caller's grants keyed on the stable users.id — forward X-Actor-Id=user_id
+    # (username is non-numeric and parse_user_id() would reject it, 403ing every
+    # real user), X-Actor-Name=username for audit, same as the other patient
+    # proxies above.
     headers = _correlation_headers()
-    headers["X-Actor-Id"] = session.get("username") or ""
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
     headers["X-Internal-Token"] = settings.internal_service_token
     return _get(
         "records",
