@@ -162,6 +162,13 @@ table empty. Every chart route is deny-by-default; no one can read a patient
 they hold no explicit grant for. This phase is safe to deploy on its own — it
 removes the IDOR — but staff cannot open existing charts until Phase 2.
 
+`db/migrations/apply.sh` now **enforces** this as a preflight guard: if
+patients exist but `patient_access_grants` is empty, it fails loudly (non-zero
+exit) rather than let a routine migrate-and-restart silently lock everyone out.
+To perform Phase 1 intentionally (grants backfilled later in Phase 2), run it
+with `RIVERBEND_ALLOW_EMPTY_GRANTS=1 db/migrations/apply.sh` to acknowledge the
+closed state explicitly.
+
 *Phase 2 — populate grants from a reviewed source.* Insert only the specific
 user/patient relationships that are actually justified, keyed on `users.id`
 (never username), as an explicit, reviewed decision. From here on, front-desk
