@@ -38,13 +38,20 @@ def test_authenticated_user_can_read_a_chart():
     assert r.json()["patient_id"] == 1042
 
 
-@pytest.mark.xfail(
-    reason="IDOR (D11): any authenticated user can read ANY patient's chart — "
-    "the session is never bound to the patient. This SHOULD fail but doesn't.",
-    strict=False,
-)
 def test_user_cannot_read_other_patients_chart():
-    # frontdesk pulling an unrelated chart should be forbidden — but isn't.
+    # Week 4 catch-up (RIV-201 / DEBT D11 fix): this xfail is now a real,
+    # passing regression test. frontdesk is seeded with a patient_access_grants
+    # row for 1042 but NOT 1043 (db/seed/generate_seed.py) — pulling an
+    # unrelated chart is now actually forbidden, not just documented as should-be.
     headers = {"Authorization": f"Bearer {_token()}"}
     r = httpx.get(f"{GATEWAY}/patients/1043/records", headers=headers, timeout=10)
     assert r.status_code == 403
+
+
+def test_user_can_read_a_patient_they_are_granted() -> None:
+    # The other half of the same fact: frontdesk IS granted 1042, so this
+    # must keep working — same login, different chart, opposite outcome.
+    headers = {"Authorization": f"Bearer {_token()}"}
+    r = httpx.get(f"{GATEWAY}/patients/1042/records", headers=headers, timeout=10)
+    assert r.status_code == 200
+    assert r.json()["patient_id"] == 1042

@@ -20,7 +20,7 @@ from conftest import load_module
 app_mod = load_module("services/gateway/app.py", "gateway_app_intake")
 
 VALID_TOKEN = "valid-token-abc"
-_VALID_SESSION = {"username": "frontdesk", "role": "staff"}
+_VALID_SESSION = {"user_id": "2", "username": "frontdesk", "role": "staff"}
 TEST_INTERNAL_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
 
@@ -72,6 +72,12 @@ def test_intake_success_is_forwarded_as_201(client, monkeypatch):
     # Round-11 review: proves this call to intake-service carries the gateway's
     # shared secret, not just a bare forwarded payload.
     assert captured["headers"]["X-Internal-Token"] == TEST_INTERNAL_TOKEN
+    # Proves the session's actor is forwarded too, so intake-service can grant
+    # the registering staff member access to the patient they just created.
+    # Consolidated (PR #23): X-Actor-Id is the stable users.id; X-Actor-Name is
+    # the username, forwarded for audit only.
+    assert captured["headers"]["X-Actor-Id"] == "2"
+    assert captured["headers"]["X-Actor-Name"] == "frontdesk"
 
 
 def test_intake_duplicate_conflict_is_forwarded_as_409_not_flattened_to_200(client, monkeypatch):

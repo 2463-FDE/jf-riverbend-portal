@@ -1,5 +1,5 @@
 """ORM models intake-service touches. (Copy-paste per service — no shared lib yet.)"""
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.sql import func
 
 from db import Base
@@ -71,3 +71,31 @@ class PatientLink(Base):
     confirmed_by = Column(Text)                       # staff identifier; NULL until confirmed
     confirmed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PatientAccessGrant(Base):
+    """Week 4 catch-up (migration 014) — the per-(user, patient) access grant
+    records-service's SqlPatientAccessGate authorizes against. intake-service
+    writes a row here when a *front-desk* staff member registers a patient (an
+    authenticated actor is present), so the registrar can immediately open the
+    chart they just created. Self-service intake has no actor and creates no
+    grant — those patients need an explicit grant before any staff can view
+    them (docs/runbook.md). Keyed on the stable users.id, never username.
+
+    user_id is deliberately a PLAIN column, NOT ForeignKey("users.id"):
+    intake-service's own Base.metadata has no `users` table (ADR 0001 per-
+    service metadata split), so an FK target can't resolve here and would raise
+    NoReferencedTableError the first time this model is inserted through the ORM
+    — which intake actually does (records-service, which owns/reads this table,
+    models `users` and keeps the FK). migration 014 enforces the real FK + ON
+    DELETE CASCADE at the database level regardless of this local declaration."""
+
+    __tablename__ = "patient_access_grants"
+    __table_args__ = (UniqueConstraint("user_id", "patient_id"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True))
+    expires_at = Column(DateTime(timezone=True))

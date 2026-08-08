@@ -81,6 +81,45 @@ export interface PatientViewResult {
   execution: PatientViewExecution;
 }
 
+// Stage 2 (Week 6) — read-only "possible duplicate patient" reconciliation
+// view, served via GET /api/patients/[id]/reconciliation (gateway ->
+// records-service, StaffAccessGate — same authorization boundary as
+// PatientViewResult above, NOT patient-specific; does not fix RIV-201).
+// Exact-SSN-match only; allergies/medications are free text, not coded.
+export interface IdentitySignal {
+  signal_type: string; // "ssn_exact_match" is the only value this slice produces
+  masked_value: string; // e.g. "•••-••-9981" — never the full ssn
+}
+
+export interface ReconciliationSourceRecord {
+  patient_id: number;
+  is_requested_patient: boolean;
+  source_label: string; // "Current chart" | "Possible match"
+  name_on_file: string;
+  dob: string | null;
+  allergies: string[];
+  medications: string[];
+}
+
+export interface ReconciliationDiscrepancy {
+  category: string; // "allergy" | "medication"
+  value: string;
+  present_on_patient_ids: number[];
+  missing_on_patient_ids: number[];
+  evidence_ids: string[];
+  review_required: boolean;
+}
+
+export interface ReconciliationResult {
+  patient_id: number;
+  identity_signals: IdentitySignal[];
+  source_records: ReconciliationSourceRecord[];
+  discrepancies: ReconciliationDiscrepancy[];
+  limitations: string[];
+  escalation: boolean;
+  correlation_id: string;
+}
+
 export interface Slot {
   id: number;
   provider: string;

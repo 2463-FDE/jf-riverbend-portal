@@ -1062,6 +1062,9 @@ textarea:focus-visible,
   color: var(--rb-text-muted);
   margin-bottom: 4px;
 }
+.rb-table-scroll {
+  overflow-x: auto;
+}
 .rb-muted {
   color: var(--rb-text-muted);
 }

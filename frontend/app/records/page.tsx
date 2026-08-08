@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Card from "../components/Card";
 import StatusBadge, { statusVariant } from "../components/StatusBadge";
 import { IconRecords, IconLab, IconSearch, IconStethoscope } from "../components/icons";
 import { apiFetch } from "../lib/session";
-import type { EncounterBlock, PatientViewResult, RecordItem } from "../lib/types";
+import type { EncounterBlock, PatientViewResult, ReconciliationResult, RecordItem } from "../lib/types";
 import { fmtDate } from "../lib/format";
 
 function isResult(r: RecordItem): boolean {
@@ -30,6 +30,13 @@ export default function RecordsPage() {
   // (IDOR — intentional teaching point; see docs/handover/portal.har). We pass
   // whatever id is entered straight through to /api/records.
   const [patientId, setPatientId] = useState("1042");
+  // Mirrors patientId for reads inside already-in-flight async callbacks —
+  // state captured by a closure at call time can't see a later change, and
+  // an in-flight fetch has to know if the id moved on before it applies its
+  // response (see handlePatientIdChange below).
+  const patientIdRef = useRef(patientId);
+  patientIdRef.current = patientId;
+
   const [data, setData] = useState<EncounterBlock[] | null>(null);
   const [selected, setSelected] = useState<EncounterBlock | null>(null);
   const [status, setStatus] = useState("");
@@ -43,13 +50,69 @@ export default function RecordsPage() {
   const [aiStatus, setAiStatus] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
 
+  // Stage 2 (Week 6) — read-only "possible duplicate patient" reconciliation
+  // check (GET /api/patients/[id]/reconciliation). Its own on-demand button
+  // and its own audit trail — a distinct, more sensitive read than the AI
+  // chart view above, so it is never auto-fetched.
+  const [reconciliation, setReconciliation] = useState<ReconciliationResult | null>(null);
+  const [reconciliationStatus, setReconciliationStatus] = useState("");
+  const [reconciliationBusy, setReconciliationBusy] = useState(false);
+
+  // None of the three reads on this page bind their result to a specific
+  // caller/patient relationship server-side (see RIV-201 and the comments
+  // on each load* function below) — so the ONLY thing standing between a
+  // clinician and reading a different patient's data under the wrong
+  // heading is this client clearing stale panels the moment the id changes.
+  // Every keystroke drops all three results immediately; the load* functions
+  // additionally guard against a slow response for the OLD id landing after
+  // the id has already moved on (see patientIdRef checks below).
+  function handlePatientIdChange(value: string) {
+    setPatientId(value);
+    setData(null);
+    setSelected(null);
+    setStatus("");
+    setAiView(null);
+    setAiStatus("");
+    setReconciliation(null);
+    setReconciliationStatus("");
+  }
+
+  async function loadReconciliation() {
+    const requestedId = patientId;
+    setReconciliationBusy(true);
+    setReconciliationStatus("");
+    setReconciliation(null);
+    try {
+      const res = await apiFetch(`/api/patients/${encodeURIComponent(requestedId)}/reconciliation`);
+      const json = await res.json();
+      if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
+      if (!res.ok) {
+        const detail = json?.detail;
+        const reason = typeof detail === "string" ? detail : detail?.reason;
+        setReconciliationStatus(
+          reason ? `Could not check for related records: ${reason}` : "Could not check for related records."
+        );
+        return;
+      }
+      setReconciliation(json as ReconciliationResult);
+    } catch (e) {
+      if (patientIdRef.current === requestedId) {
+        setReconciliationStatus(e instanceof Error ? e.message : "Could not check for related records.");
+      }
+    } finally {
+      setReconciliationBusy(false);
+    }
+  }
+
   async function loadAiView() {
+    const requestedId = patientId;
     setAiBusy(true);
     setAiStatus("");
     setAiView(null);
     try {
-      const res = await apiFetch(`/api/patients/${encodeURIComponent(patientId)}/view`);
+      const res = await apiFetch(`/api/patients/${encodeURIComponent(requestedId)}/view`);
       const json = await res.json();
+      if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
       if (!res.ok) {
         const detail = json?.detail;
         const reason = typeof detail === "string" ? detail : detail?.reason;
@@ -58,26 +121,50 @@ export default function RecordsPage() {
       }
       setAiView(json as PatientViewResult);
     } catch (e) {
-      setAiStatus(e instanceof Error ? e.message : "Could not load AI chart view.");
+      if (patientIdRef.current === requestedId) {
+        setAiStatus(e instanceof Error ? e.message : "Could not load AI chart view.");
+      }
     } finally {
       setAiBusy(false);
     }
   }
 
   async function load() {
+    const requestedId = patientId;
     setBusy(true);
     setStatus("");
     setSelected(null);
     try {
-      const res = await apiFetch(`/api/records?patient_id=${encodeURIComponent(patientId)}`);
-      const json = await res.json();
+      const res = await apiFetch(`/api/records?patient_id=${encodeURIComponent(requestedId)}`);
+      const json = await res.json().catch(() => ({}));
+      if (patientIdRef.current !== requestedId) return; // patient changed while this was in flight
+      // PR #22 review: records-service now returns 401/403/503 (auth/grant/DB).
+      // These must NEVER render as an empty chart — a denied or failed read
+      // shown as "No records found" could make staff believe a chart is
+      // clinically empty. Surface it as an error instead, like the AI/
+      // reconciliation loaders below.
+      if (!res.ok) {
+        const reason = json?.detail?.reason || json?.error;
+        setStatus(
+          res.status === 403
+            ? "You are not authorized to view this patient's records."
+            : reason
+              ? `Could not load records: ${reason}.`
+              : "Could not load records. Please try again.",
+        );
+        setData([]);
+        setSelected(null);
+        return;
+      }
       const encounters: EncounterBlock[] = json.encounters ?? [];
       setData(encounters);
       setSelected(encounters[0] ?? null);
       if (encounters.length === 0) setStatus("No records found for this patient.");
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Could not load records.");
-      setData([]);
+      if (patientIdRef.current === requestedId) {
+        setStatus(e instanceof Error ? e.message : "Could not load records.");
+        setData([]);
+      }
     } finally {
       setBusy(false);
     }
@@ -100,7 +187,7 @@ export default function RecordsPage() {
               id="rec-patient"
               className="rb-input"
               value={patientId}
-              onChange={(e) => setPatientId(e.target.value)}
+              onChange={(e) => handlePatientIdChange(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && load()}
               inputMode="numeric"
             />
@@ -173,6 +260,142 @@ export default function RecordsPage() {
                 role="alert"
               >
                 <strong>Clinician review required.</strong> {AI_CALLOUT[aiView.outcome]}
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Possible Duplicate Records" icon={<IconSearch />}>
+        <p className="rb-muted" style={{ marginTop: 0 }}>
+          Checks whether any other chart shares this patient&apos;s exact Social
+          Security Number — a read-only candidate signal for a clinician to
+          review, never an automatic match or merge.
+        </p>
+        <button
+          className="rb-btn rb-btn--ghost"
+          onClick={loadReconciliation}
+          disabled={reconciliationBusy}
+          type="button"
+        >
+          {reconciliationBusy ? "Checking…" : "Check for related records"}
+        </button>
+
+        {reconciliationStatus && (
+          <div className="rb-alert rb-alert--err" role="status" style={{ marginTop: 12 }}>
+            {reconciliationStatus}
+          </div>
+        )}
+
+        {reconciliation && (
+          <div style={{ marginTop: 14 }}>
+            <span className="rb-eyebrow">Record review</span>
+            <h3 style={{ margin: 0 }}>
+              {reconciliation.source_records.length > 1
+                ? "These records may describe one patient."
+                : "No reconciliation candidates were returned for this chart."}
+            </h3>
+
+            {reconciliation.escalation && (
+              <div className="rb-alert rb-alert--warn" role="alert" style={{ marginTop: 10 }}>
+                <strong>Clinician review required.</strong> This is evidence for a
+                clinician to assess — not an automatic merge, diagnosis, or
+                treatment decision.
+              </div>
+            )}
+
+            {reconciliation.source_records.length > 1 && (
+              <div className="rb-table-scroll">
+                <table className="rb-table">
+                  <thead>
+                    <tr>
+                      <th>Chart</th>
+                      <th>Name on file</th>
+                      <th>Date of birth</th>
+                      <th>Allergies</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconciliation.source_records.map((r) => (
+                      <tr key={r.patient_id}>
+                        <td>
+                          {r.patient_id}
+                          <div className="rb-muted" style={{ fontSize: "0.78rem" }}>
+                            {r.source_label}
+                          </div>
+                        </td>
+                        <td>{r.name_on_file}</td>
+                        <td>{r.dob ?? "—"}</td>
+                        <td>
+                          {r.allergies.length === 0
+                            ? "none recorded"
+                            : r.allergies.map((a) => {
+                                const flagged = reconciliation.discrepancies.some(
+                                  (d) =>
+                                    d.category === "allergy" &&
+                                    d.value === a &&
+                                    d.present_on_patient_ids.includes(r.patient_id)
+                                );
+                                return (
+                                  <span
+                                    key={a}
+                                    style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 8 }}
+                                  >
+                                    {a}
+                                    {flagged && (
+                                      <span className="rb-badge rb-badge--warn">not on all charts</span>
+                                    )}
+                                  </span>
+                                );
+                              })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {reconciliation.discrepancies.length > 0 && (
+              <ul className="rb-muted" style={{ marginTop: 10 }}>
+                {reconciliation.discrepancies.map((d) => (
+                  <li key={`${d.category}-${d.value}`}>
+                    {d.category === "allergy" ? "Allergy" : "Medication"} &quot;{d.value}&quot; recorded on
+                    chart{d.present_on_patient_ids.length > 1 ? "s" : ""}{" "}
+                    {d.present_on_patient_ids.join(", ")}, not on{" "}
+                    {d.missing_on_patient_ids.join(", ")}.
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {reconciliation.identity_signals.length > 0 && (
+              <p className="rb-muted" style={{ marginTop: 10 }}>
+                Matching signal: {reconciliation.identity_signals.map((s) => s.masked_value).join(", ")}
+              </p>
+            )}
+
+            {reconciliation.discrepancies.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div className="rb-eyebrow">Evidence</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {Array.from(new Set(reconciliation.discrepancies.flatMap((d) => d.evidence_ids))).map((id) => (
+                    <span key={id} className="rb-badge rb-badge--neutral">
+                      {id}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {reconciliation.limitations.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div className="rb-eyebrow">Limitations</div>
+                <ul className="rb-muted" style={{ marginTop: 0 }}>
+                  {reconciliation.limitations.map((l) => (
+                    <li key={l}>{l}</li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>

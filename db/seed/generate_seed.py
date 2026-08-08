@@ -9,6 +9,9 @@ PRESERVES the hand-authored teaching fixtures verbatim:
   * James O'Brien (1043) and Aisha Khan (1601).
   * Two confirmed appointments for the SAME slot 88231 ~400ms apart (retry race).
   * The PHI-laden audit_logs rows (audit-is-logging debt).
+  * Week 4 catch-up: deliberately different patient_access_grants per user
+    (frontdesk/drpatel/drnguyen) — see that INSERT's own comment below for
+    exactly who is granted what and why frontdesk is NOT granted 1043.
 and then layers a few hundred realistic rows on top so the database reads like a
 real, lived-in clinic network.
 
@@ -342,6 +345,36 @@ for pid_ in gen_patient_ids:
     if random.random() < 0.7:
         crows.append(f" ({pid_}, 'treatment_consent', now())")
 emit(",\n".join(crows) + ";")
+emit()
+
+# ---------------------------------------------------------------------------
+# patient_access_grants — Week 4 catch-up (migration 014): the real
+# per-(actor, patient) authorization fact SqlPatientAccessGate checks
+# (services/records-service/patient_access_gate.py), replacing the
+# authenticated-staff-only StaffAccessGate. Deliberately different scopes
+# per user, not a blanket "everyone sees everything" grant:
+#   frontdesk registers/handles the Maria Gonzalez charts (1042/1330/1588,
+#     all the SAME person under three unmerged rows — see the module
+#     docstring above) and Aisha Khan (1601, front_desk-registered).
+#   drpatel is James O'Brien's (1043) physician (encounter 4's provider).
+#   drnguyen also treats Maria Gonzalez's 1330 chart and Aisha Khan (1601)
+#     — encounters 2 and 5's provider — overlapping with frontdesk's grants
+#     on purpose (multiple staff legitimately need the same chart).
+# frontdesk is deliberately NOT granted 1043 — tests/integration/
+# test_records_flow.py::test_user_cannot_read_other_patients_chart and
+# test_patient_view_flow.py rely on exactly this to prove cross-patient
+# denial with real seeded accounts, not just unit-test fixtures.
+# ---------------------------------------------------------------------------
+# PR #23 review round 2 (2026-08-07): grants are keyed on users.id (the stable
+# principal the gateway forwards as X-Actor-Id), never username. Ids from the
+# users INSERT above: frontdesk=2, drpatel=5, drnguyen=6.
+emit("INSERT INTO patient_access_grants (user_id, patient_id) VALUES")
+gwrows = [
+    " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
+    " (5, 1043)",                                             # drpatel
+    " (6, 1330)", " (6, 1601)",                               # drnguyen
+]
+emit(",\n".join(gwrows) + ";")
 emit()
 
 # ---------------------------------------------------------------------------

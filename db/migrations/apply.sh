@@ -29,3 +29,16 @@ for f in db/migrations/*.sql; do
 done
 
 echo "All migrations applied (already-applied ones were no-ops)."
+
+# This runner only applies SCHEMA — it never blocks on data state, so a routine
+# deploy, an intentional partial/Phase-1 rollout, and `make seed` in dev all
+# complete cleanly (PR #22 review: don't fail a deploy after already mutating
+# the schema, and don't reject the seeded/demo state).
+#
+# Grant-coverage validation is a SEPARATE, OPT-IN step, not part of this
+# unconditional runner. Before ENABLING grant enforcement in production, verify
+# every existing patient has an active grant:
+#   db/migrations/scripts/check_grant_coverage.sh
+# records-service's gate honors only active grants, so a table of revoked/
+# expired grants or a partial backfill would still deny those charts — see
+# docs/runbook.md "Phase 2".

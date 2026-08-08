@@ -133,6 +133,110 @@ was counting on the cancelled appointment needs to be told). Re-run
 `apply.sh` afterward; migration 013's preflight will pass once no slot has
 more than one confirmed appointment left.
 
+**Before enforcing migration 014 on any environment with real existing
+patients (Week 4 catch-up, RIV-201):** migration 014 adds
+`patient_access_grants` — the table `services/records-service/
+patient_access_gate.py`'s `SqlPatientAccessGate` checks before serving
+`GET /patients/{id}`, `GET /patients/{id}/records`, or `GET
+/patients/{id}/view`. The table ships **empty**; only the demo seed
+(`db/seed/generate_seed.py`) populates rows. Applying `apply.sh` alone
+against a real environment does **not** create any grants — every
+existing staff account would be denied every existing patient's chart the
+moment this code deploys, with no in-app way to add a grant.
+
+This is deliberate, not an oversight: there is no existing digital signal
+in this schema (no care-team table, no per-patient assignment — see
+`docs/analysis/RIV-201-patient-records-IDOR.md` §6) that could be used to
+correctly auto-infer which staff member should be granted which patient.
+Guessing (e.g. "grant every active user every existing patient" as a
+migration-time default) would silently defeat the fix this migration
+exists to deliver — the same reasoning `adr/0004-master-patient-index-
+match-key.md` used to rule out auto-merging duplicate patients rather
+than flagging them for review.
+
+**Required rollout step (two-phase), before this code serves real chart
+access:**
+
+*Phase 1 — deploy closed.* Apply migration 014 and this code with the grant
+table empty. Every chart route is deny-by-default; no one can read a patient
+they hold no explicit grant for. This phase is safe to deploy on its own — it
+removes the IDOR — but staff cannot open existing charts until Phase 2.
+
+`db/migrations/apply.sh` only applies schema — it never blocks on data state,
+so it succeeds the same way for a routine deploy, an intentional Phase-1
+rollout, and a freshly seeded/demo database (PR #22 review round 4: an earlier
+version ran this check unconditionally post-migration, which broke `make seed`
++ apply.sh in dev and could report a deploy as "failed" after the schema was
+already mutated).
+
+Before **promoting past Phase 1** — i.e. before relying on grant enforcement
+against real existing patients — run the separate, explicit, opt-in check:
+
+```bash
+db/migrations/scripts/check_grant_coverage.sh
+```
+
+It counts patients with no **active** grant to an active user, using the exact
+same predicate as records-service's gate (`revoked_at IS NULL`, not expired,
+user `is_active`), so revoked/expired/partial rows don't count as coverage.
+Exit 0 means every patient is reachable; a non-zero exit reports how many are
+not, so you can distinguish "backfill incomplete" from "safe to enforce."
+
+You don't have to remember to run it, though: records-service also runs the
+identical check on every real process start (`app.py::
+_check_patient_grant_coverage`). What happens if it finds an unreachable
+patient depends on `ENVIRONMENT`:
+
+- **`ENVIRONMENT=production`** — **refuses to start** (raises, uvicorn exits
+  non-zero) rather than boot into a deploy that would deny every unbackfilled
+  chart (PR #22 review round 6 — a warning alone didn't mechanically stop a
+  bad deploy).
+- **Anything else** (the default, including this repo's own `.env` and the
+  seeded demo) — logs a **warning** with the unreachable count and continues,
+  so `make up`/`make seed` keeps booting (round 4's lesson: don't hard-fail
+  against the committed seed or a deliberately partial Phase-1 rollout).
+
+Either way, this never disables enforcement itself — this codebase's own
+authorization safety rules explicitly rule out an all-staff or administrator
+bypass, so there is no "enforcement off" flag to flip; grant enforcement is
+always deny-by-default. Backfilling grants (or running the coverage script
+above) is how you resolve the warning/failure, in either environment.
+
+*Phase 2 — populate grants from a reviewed source.* Insert only the specific
+user/patient relationships that are actually justified, keyed on `users.id`
+(never username), as an explicit, reviewed decision. From here on, front-desk
+registration grants the registrar their new patient automatically
+(`intake-service`), so Phase 2 is a one-time backfill for patients that
+already existed before this deploy.
+
+Do **not** grant broadly. A `CROSS JOIN users × patients` — or any "every
+active staff member gets every patient" backfill — re-creates the exact
+"any staff can see any chart" posture this migration exists to close. It is
+not an acceptable shortcut. Derive grants from a real, reviewed assignment
+signal and confirm the result before enforcing, for example:
+
+```sql
+-- Minimum-necessary starting point: grant each provider the patients they
+-- have actually treated (encounters.provider ~ the provider's name), keyed on
+-- users.id. This is an ILLUSTRATION of a reviewed, per-relationship backfill —
+-- NOT every staff member every patient. Replace the join with your clinic's
+-- real assignment source and review the rows before running.
+INSERT INTO patient_access_grants (user_id, patient_id)
+SELECT DISTINCT u.id, e.patient_id
+FROM users u
+JOIN encounters e ON e.provider = u.full_name
+WHERE u.is_active
+ON CONFLICT (user_id, patient_id) DO NOTHING;
+```
+
+Anything not covered by such a reviewed signal stays denied until an explicit
+grant is added — that residual is the point, not a gap. A deployment that
+cannot complete a reviewed Phase 2 can still run Phase 1 safely: an empty grant
+table is a hard, correct denial for every protected route. Grants are revoked
+by setting `revoked_at`, and can carry an `expires_at`; disabling a user
+(`users.is_active = false`) immediately blocks all their grants (the gateway
+re-checks `is_active` per request and `SqlPatientAccessGate` joins it).
+
 ## Demo accounts
 
 All seeded users share password `portal123`, role `staff`. Examples:
