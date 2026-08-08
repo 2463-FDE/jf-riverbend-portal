@@ -183,15 +183,24 @@ Exit 0 means every patient is reachable; a non-zero exit reports how many are
 not, so you can distinguish "backfill incomplete" from "safe to enforce."
 
 You don't have to remember to run it, though: records-service also runs the
-identical check as a non-blocking **startup warning** (`app.py::
-_warn_if_patients_lack_active_grant`, PR #22 review round 5) — it logs a count
-if any patient is unreachable, on every real process start, but never fails
-startup and never disables enforcement. That's a deliberate choice: this
-codebase's own authorization safety rules explicitly rule out an all-staff or
-administrator bypass, so there is no "enforcement off" flag to flip — grant
-enforcement is always deny-by-default. The warning is visibility so a partial
-rollout can't be silently missed; running the coverage script above (or
-backfilling grants) is still how you act on it.
+identical check on every real process start (`app.py::
+_check_patient_grant_coverage`). What happens if it finds an unreachable
+patient depends on `ENVIRONMENT`:
+
+- **`ENVIRONMENT=production`** — **refuses to start** (raises, uvicorn exits
+  non-zero) rather than boot into a deploy that would deny every unbackfilled
+  chart (PR #22 review round 6 — a warning alone didn't mechanically stop a
+  bad deploy).
+- **Anything else** (the default, including this repo's own `.env` and the
+  seeded demo) — logs a **warning** with the unreachable count and continues,
+  so `make up`/`make seed` keeps booting (round 4's lesson: don't hard-fail
+  against the committed seed or a deliberately partial Phase-1 rollout).
+
+Either way, this never disables enforcement itself — this codebase's own
+authorization safety rules explicitly rule out an all-staff or administrator
+bypass, so there is no "enforcement off" flag to flip; grant enforcement is
+always deny-by-default. Backfilling grants (or running the coverage script
+above) is how you resolve the warning/failure, in either environment.
 
 *Phase 2 — populate grants from a reviewed source.* Insert only the specific
 user/patient relationships that are actually justified, keyed on `users.id`

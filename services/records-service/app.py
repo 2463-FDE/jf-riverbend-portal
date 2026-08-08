@@ -71,21 +71,32 @@ def _internal_token_is_configured() -> bool:
     return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
 
 
-def _warn_if_patients_lack_active_grant() -> None:
-    """PR #22 review round 5 (2026-08-08 — high): three prior rounds tried
-    different mechanisms for surfacing the grant-rollout-lockout risk (an
-    inline apply.sh preflight that blocked migrations and rejected the seeded
-    demo db; then a separate opt-in script, check_grant_coverage.sh). The
-    review's remaining complaint was that an opt-in script can be forgotten.
-    This closes that gap WITHOUT re-opening RIV-201 or breaking the seeded
-    demo: it runs on every real process start (can't be skipped the way a
-    standalone script can), but only WARNS — same query as
-    check_grant_coverage.sh — never blocks startup. Enforcement itself stays
-    deny-by-default with no bypass; this is operator visibility, not a
-    feature flag that would make enforcement optional (this codebase's own
-    safety rules for this authorization work explicitly rule out an all-staff
-    or administrator bypass). A DB error here is swallowed (logged, not
-    raised) — a coverage warning must never become a new reason the service
+def _check_patient_grant_coverage() -> None:
+    """Grant-rollout-lockout risk, round 6 (2026-08-08 — high): migration 014
+    ships patient_access_grants empty, and SqlPatientAccessGate denies any
+    patient with no active grant. Without this check, a normal
+    apply.sh + restart against a database that already has patients can boot
+    straight into a clinic-wide chart-access outage with no hard failure —
+    round 5's warning-only version was exactly this: visible in logs, but
+    nothing mechanically stopped the bad deploy.
+
+    Environment-gated fail-hard, not a blanket one: round 4 already
+    established that hard-failing this unconditionally breaks the committed
+    seed (255 patients, 7 grants) and any deliberately partial Phase-1
+    rollout — `make up`/`make seed` must keep booting in dev. So this WARNS
+    in every environment except `production` (ENVIRONMENT=production, unset
+    elsewhere including this repo's own .env), and in production it RAISES —
+    uvicorn then exits non-zero at startup instead of serving traffic that
+    would deny every existing chart, mirroring the INTERNAL_SERVICE_TOKEN
+    check above. Same underlying query as check_grant_coverage.sh, so the
+    on-demand script and this always-on check can never disagree.
+
+    Still no enforcement bypass: this only ever WARNS or RAISES, never
+    disables SqlPatientAccessGate — this codebase's own safety rules for this
+    authorization work explicitly rule out an all-staff or administrator
+    bypass, so there is no flag that makes enforcement itself optional. A DB
+    error here is swallowed (logged, not raised) in every environment — a
+    coverage check must never become an unrelated new reason the service
     fails to start."""
     try:
         db = get_sessionmaker()()
@@ -108,13 +119,16 @@ def _warn_if_patients_lack_active_grant() -> None:
     except SQLAlchemyError:
         log.exception("startup grant-coverage check failed (database unavailable) — continuing")
         return
-    if unreachable:
-        log.warning(
-            "startup: %s patient(s) have no active grant to an active user — those "
-            "charts will be denied until grants are backfilled (docs/runbook.md "
-            "'Phase 2', or run db/migrations/scripts/check_grant_coverage.sh)",
-            unreachable,
-        )
+    if not unreachable:
+        return
+    message = (
+        f"{unreachable} patient(s) have no active grant to an active user — those "
+        f"charts will be denied until grants are backfilled (docs/runbook.md "
+        f"'Phase 2', or run db/migrations/scripts/check_grant_coverage.sh)"
+    )
+    if settings.environment == "production":
+        raise RuntimeError(f"refusing to start: {message}")
+    log.warning("startup: %s", message)
 
 
 @asynccontextmanager
@@ -132,15 +146,16 @@ async def lifespan(_app: FastAPI):
     uvicorn-started process. See gateway's and intake-service's identical
     fix.
 
-    Also runs the (non-blocking) grant-coverage warning above — same
-    "real process only, never fires in this repo's unit tests" property."""
+    Also runs the grant-coverage check above — same "real process only, never
+    fires in this repo's unit tests" property; it raises (refusing to start)
+    in production, warns everywhere else."""
     if not _internal_token_is_configured():
         raise RuntimeError(
             f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
-    _warn_if_patients_lack_active_grant()
+    _check_patient_grant_coverage()
     yield
 
 
