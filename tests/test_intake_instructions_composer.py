@@ -97,6 +97,23 @@ def test_provider_error_falls_back_immediately_without_exhausting_attempts():
     assert used_fallback is True
 
 
+def test_non_llmclienterror_provider_failure_also_falls_back_to_template():
+    # Codex review (2026-08-09, PR #24, medium): compose() used to only catch
+    # libs.llm_client.errors.LLMClientError, but a real vendor provider can
+    # fail in ways that type doesn't cover — e.g. a lazy SDK import failure
+    # (openai/anthropic/boto3 aren't in intake-service's requirements.txt),
+    # an auth exception, or a malformed-response bug. Any such failure must
+    # still degrade to the template, not escape as an unhandled exception
+    # that would 502/500 this optional, best-effort endpoint.
+    client = _client([ModuleNotFoundError("No module named 'openai'")])
+
+    result, attempts, used_fallback = compose("insurance", llm_client=client, max_attempts=2)
+
+    assert result.summary == _STEP_TEMPLATES["insurance"]
+    assert attempts == 1
+    assert used_fallback is True
+
+
 # --- prompt construction: minimum-necessary, no PHI-shaped fields ----------
 
 

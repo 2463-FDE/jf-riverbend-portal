@@ -13,7 +13,13 @@ deterministic-template-fallback shape: `llm_client=None` skips the model
 entirely (0 attempts, template, `used_fallback=False` — there is nothing to
 fall back FROM); with a client, at most `max_attempts` bounded
 `LLMClient.complete()` calls are made before giving up and using the
-template. This never raises.
+template. This never raises: `compose()` catches any exception from
+`llm_client.complete()` (Codex review, 2026-08-09, PR #24), not just
+`libs.llm_client.errors.LLMClientError` — a real vendor provider can fail in
+ways that error type doesn't cover (a lazy SDK import failure, an auth
+exception, a malformed response), and this optional, best-effort endpoint
+must degrade to its template on every one of them, not just the ones
+`llm_client`'s own adapters happen to normalize.
 """
 from __future__ import annotations
 
@@ -22,7 +28,6 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 from libs.llm_client.client import LLMClient
-from libs.llm_client.errors import LLMClientError
 from libs.safe_logging import get_safe_logger
 
 log = get_safe_logger(__name__)
@@ -115,7 +120,18 @@ def compose(
         attempts = attempt
         try:
             result = llm_client.complete(_build_prompt(step, retry_note), schema=ComposedInstructions)
-        except LLMClientError as exc:
+        except Exception as exc:
+            # Codex review (2026-08-09, PR #24, medium): deliberately broader
+            # than `except LLMClientError` — libs/llm_client's provider
+            # adapters only normalize their OWN transport/timeout failures to
+            # LLMClientError subclasses (see providers/base.py's contract); a
+            # real vendor provider's lazy SDK import failure
+            # (ModuleNotFoundError — openai/anthropic/boto3 are not in
+            # intake-service's requirements.txt), an auth exception, or a
+            # malformed-response bug would otherwise escape uncaught and turn
+            # this optional, best-effort helper into a hard 502/500 instead
+            # of its safe per-step template. Every failure mode here must
+            # degrade the same way; only the exception TYPE is ever logged.
             log.warning(
                 "intake_instructions compose provider error (step=%s, attempt=%s, error_type=%s)",
                 step,

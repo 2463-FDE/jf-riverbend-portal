@@ -162,6 +162,26 @@ def test_provider_timeout_degrades_quickly_to_the_template(monkeypatch):
     assert elapsed < 1.0
 
 
+def test_non_llmclienterror_provider_failure_returns_200_with_template_not_5xx(monkeypatch):
+    # Codex review (2026-08-09, PR #24, medium): a real vendor provider can
+    # fail in ways libs.llm_client's adapters don't normalize to
+    # LLMClientError (e.g. a lazy SDK import failure). Full request-path
+    # regression: this must never surface as a 502/500 to the caller.
+    real_provider_shaped_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ModuleNotFoundError("No module named 'openai'")]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: real_provider_shaped_client)
+
+    resp = _client().post("/intake/instructions", json={"step": "insurance"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["used_fallback"] is True
+    assert body["summary"]
+
+
 def test_log_line_never_contains_the_composed_summary_text(caplog):
     caplog.set_level(logging.INFO, logger=app_mod.log.name)
 
