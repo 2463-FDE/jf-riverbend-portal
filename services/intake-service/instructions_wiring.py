@@ -24,6 +24,16 @@ answer here. INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS/_MAX_RETRIES (see
 .env.example) override just these two fields; provider/model/token-budget
 selection still comes from the same shared LLM_PROVIDER/OLLAMA_*/etc vars
 every other LLMClient consumer in this repo uses.
+
+Codex review (2026-08-09, PR #24): INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS/
+_MAX_RETRIES used to be parsed with a bare float()/int() at MODULE IMPORT
+TIME — a malformed value (e.g. "eight") raised before get_llm_client() ever
+ran, and app.py imports this module at process startup, so a typo in this
+OPTIONAL feature's config could crash intake-service entirely, taking core
+patient registration down with it. Parsing now happens lazily, inside
+get_llm_client()'s own guarded call, and a malformed value logs a warning
+and falls back to the safe default rather than propagating — this module can
+no longer prevent the service from starting, period.
 """
 import os
 from typing import Optional
@@ -36,26 +46,57 @@ log = get_safe_logger(__name__)
 # Comfortably under the gateway's fixed 30s downstream timeout, with no
 # in-client retry — a stalled/slow provider must degrade to the deterministic
 # template well before the gateway would otherwise 502 the caller.
-_TIMEOUT_SECONDS = float(os.getenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", "8"))
-_MAX_RETRIES = int(os.getenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES", "0"))
+_DEFAULT_TIMEOUT_SECONDS = 8.0
+_DEFAULT_MAX_RETRIES = 0
 
 _client: Optional[LLMClient] = None
 _client_build_failed = False
 
 
+def _bounded_timeout_seconds() -> float:
+    raw = os.getenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS")
+    if raw is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(
+            "invalid INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS=%r — using default %s",
+            raw,
+            _DEFAULT_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_TIMEOUT_SECONDS
+
+
+def _bounded_max_retries() -> int:
+    raw = os.getenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES")
+    if raw is None:
+        return _DEFAULT_MAX_RETRIES
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(
+            "invalid INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES=%r — using default %s",
+            raw,
+            _DEFAULT_MAX_RETRIES,
+        )
+        return _DEFAULT_MAX_RETRIES
+
+
 def get_llm_client() -> Optional[LLMClient]:
     """Memoized `LLMClient`, or `None` if it could not be built. Never
-    raises — a construction failure (e.g. `ProviderNotConfiguredError`) is
-    logged (TYPE only) once and remembered. `None` makes
-    `libs.intake_instructions.composer.compose` skip the model and return
-    its deterministic per-step template instead."""
+    raises — a construction failure (e.g. `ProviderNotConfiguredError`, or a
+    malformed timeout/retry env var) is logged (TYPE only, or the invalid raw
+    value for a config typo — never patient data) once and remembered. `None`
+    makes `libs.intake_instructions.composer.compose` skip the model and
+    return its deterministic per-step template instead."""
     global _client, _client_build_failed
     if _client is not None:
         return _client
     if _client_build_failed:
         return None
     try:
-        _client = LLMClient(LLMConfig(timeout_seconds=_TIMEOUT_SECONDS, max_retries=_MAX_RETRIES))
+        _client = LLMClient(LLMConfig(timeout_seconds=_bounded_timeout_seconds(), max_retries=_bounded_max_retries()))
         return _client
     except Exception as exc:
         log.warning("intake instructions LLM client unavailable (error_type=%s)", type(exc).__name__)

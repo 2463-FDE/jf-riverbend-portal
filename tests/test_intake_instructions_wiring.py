@@ -86,9 +86,6 @@ def test_default_timeout_and_retries_are_bounded_well_under_the_gateway_budget(m
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     monkeypatch.delenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES", raising=False)
-    # _TIMEOUT_SECONDS/_MAX_RETRIES are read once at module import time — the
-    # loaded module under test already reflects the repo's real defaults
-    # (8s/0 retries), so this only needs to assert the shape, not re-read env.
 
     client = wiring.get_llm_client()
 
@@ -99,13 +96,61 @@ def test_default_timeout_and_retries_are_bounded_well_under_the_gateway_budget(m
 
 
 def test_timeout_and_retries_are_configurable_via_env(monkeypatch):
-    # Reload the module so its module-level _TIMEOUT_SECONDS/_MAX_RETRIES
-    # constants pick up the overridden env vars.
     monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", "3")
     monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES", "1")
-    reloaded = load_module("services/intake-service/instructions_wiring.py", "intake_instructions_wiring_reload")
 
-    client = reloaded.get_llm_client()
+    client = wiring.get_llm_client()
 
     assert client._config.timeout_seconds == 3.0
     assert client._config.max_retries == 1
+
+
+# --- Codex review (2026-08-09, PR #24, high): malformed config must never --
+# --- crash the service, only disable the optional model path --------------
+#
+# INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS/_MAX_RETRIES used to be parsed with
+# a bare float()/int() at MODULE IMPORT TIME — a typo (e.g. "eight") raised
+# before get_llm_client() ever ran, and services/intake-service/app.py
+# imports this module at process startup, so a config typo for this OPTIONAL
+# feature could crash intake-service entirely, taking core patient
+# registration (/intake) down with it.
+
+
+def test_malformed_timeout_env_var_does_not_crash_import_or_get_llm_client(monkeypatch):
+    monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", "eight")
+    monkeypatch.delenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES", raising=False)
+
+    # The critical assertion: importing the module with a malformed value
+    # already present in the environment must not raise — this is exactly
+    # the scenario that would have taken down intake-service at startup.
+    reloaded = load_module("services/intake-service/instructions_wiring.py", "intake_instructions_wiring_bad_timeout")
+
+    client = reloaded.get_llm_client()
+
+    assert client is not None
+    assert client._config.timeout_seconds == reloaded._DEFAULT_TIMEOUT_SECONDS
+
+
+def test_malformed_max_retries_env_var_does_not_crash_import_or_get_llm_client(monkeypatch):
+    monkeypatch.delenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES", "not-a-number")
+
+    reloaded = load_module("services/intake-service/instructions_wiring.py", "intake_instructions_wiring_bad_retries")
+
+    client = reloaded.get_llm_client()
+
+    assert client is not None
+    assert client._config.max_retries == reloaded._DEFAULT_MAX_RETRIES
+
+
+def test_malformed_config_logs_a_warning_with_the_invalid_raw_value(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", "eight")
+    caplog.set_level(logging.WARNING, logger=wiring.log.name)
+
+    wiring.get_llm_client()
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS" in log_text
+    assert "eight" in log_text  # operator config, not patient data — safe to log verbatim

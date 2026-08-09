@@ -128,10 +128,27 @@ def test_default_provider_returns_the_template_and_marks_fallback_used(monkeypat
     assert resp.status_code == 200
     body = resp.json()
     # LLM_PROVIDER defaults to "fake" (FakeProvider returns "{}", which never
-    # validates as ComposedInstructions) — every call in CI takes the
-    # template fallback path deterministically.
+    # validates as _VariantSelection — no variant_index field) — every call
+    # in CI takes the template fallback path deterministically.
     assert body["used_fallback"] is True
     assert body["summary"]
+
+
+def test_unavailable_provider_reports_used_fallback_true_through_the_endpoint(monkeypatch):
+    # Codex review (2026-08-09, PR #24, medium): compose(step, llm_client=None)
+    # used to report used_fallback=False, indistinguishable from "the model
+    # was never asked" — but this endpoint's only caller of that branch is
+    # get_llm_client() returning None because construction genuinely failed
+    # (e.g. an unconfigured/misconfigured provider). Full request-path
+    # regression: that must surface as used_fallback=True, not False.
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: None)
+
+    resp = _client().post("/intake/instructions", json={"step": "demographics"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == _STEP_TEMPLATES["demographics"]
+    assert body["used_fallback"] is True
 
 
 # --- safe logging: only step/attempts/used_fallback/elapsed, never PHI -----

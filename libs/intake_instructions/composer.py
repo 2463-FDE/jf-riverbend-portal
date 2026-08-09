@@ -9,11 +9,19 @@ the four known steps the caller is on, so there is nothing patient-specific
 for a model to see, echo, or leak.
 
 Mirrors `libs/patient_view_agent/composer.py`'s bounded-attempt /
-deterministic-template-fallback shape: `llm_client=None` skips the model
-entirely (0 attempts, template, `used_fallback=False` — there is nothing to
-fall back FROM); with a client, at most `max_attempts` bounded
-`LLMClient.complete()` calls are made before giving up and using the
-template. This never raises: `compose()` catches any exception from
+deterministic-template-fallback shape, with one deliberate difference
+(Codex review, 2026-08-09, PR #24): `llm_client=None` here returns
+`used_fallback=True`, not `False`. `libs.patient_view_agent`'s `None` is a
+caller's deliberate choice to skip the model, so there is genuinely nothing
+to "fall back" from; this module's only real caller
+(`services/intake-service/app.py`) always passes
+`instructions_wiring.get_llm_client()`'s return value, and that function
+only ever returns `None` when it tried and failed to build a client
+(unconfigured/misconfigured provider) — i.e. the model path actually was
+unavailable, which is exactly what `used_fallback` exists to signal. With a
+client, at most `max_attempts` bounded `LLMClient.complete()` calls are made
+before giving up and using the template. This never raises: `compose()`
+catches any exception from
 `llm_client.complete()` (Codex review, 2026-08-09, PR #24), not just
 `libs.llm_client.errors.LLMClientError` — a real vendor provider can fail in
 ways that error type doesn't cover (a lazy SDK import failure, an auth
@@ -66,9 +74,11 @@ VALID_STEPS = frozenset(_STEP_LABELS)
 _STEP_TEMPLATES: dict[str, str] = {
     "demographics": (
         "This step collects your name, date of birth, and contact information so we "
-        "can create your patient record. Your SSN is optional and is only used to "
-        "check insurance coverage. If you're unsure about any field, you can ask "
-        "front-desk staff and still continue."
+        "can create your patient record. Your name and date of birth are required to "
+        "continue; phone, email, and address are optional. Your SSN is optional too — "
+        "if you provide it, we only use it to check for an existing record so we "
+        "don't create a duplicate patient file for you. Ask front-desk staff if you "
+        "have questions about any field."
     ),
     "insurance": (
         "If you have insurance, enter the carrier and member ID shown on your "
@@ -97,9 +107,11 @@ _STEP_VARIANTS: dict[str, tuple[str, ...]] = {
     "demographics": (
         _STEP_TEMPLATES["demographics"],
         (
-            "We need your name, date of birth, and a way to reach you to set up your "
-            "chart. Your SSN is optional and only used for insurance — front-desk "
-            "staff can help if you're missing anything."
+            "We need your name and date of birth to continue — phone, email, and "
+            "address are optional, just there to help us reach you. Your SSN is "
+            "optional as well; if you share it, we only use it to make sure we're not "
+            "creating a second file for someone already in our system. Front-desk "
+            "staff can help with any of this."
         ),
     ),
     "insurance": (
@@ -177,9 +189,13 @@ def compose(
     `services/intake-service/schemas.py::IntakeInstructionsRequest`), so an
     unknown step here is a programming error, not a data-validation concern
     for this function to re-check.
+
+    `used_fallback=True` for a `None` client (Codex review, 2026-08-09, PR
+    #24) — see the module docstring for why that differs from
+    `libs.patient_view_agent.composer`'s equivalent.
     """
     if llm_client is None:
-        return _template_instructions(step), 0, False
+        return _template_instructions(step), 0, True
 
     variants = _STEP_VARIANTS[step]
     retry_note = ""

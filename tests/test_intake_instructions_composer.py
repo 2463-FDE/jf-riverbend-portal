@@ -65,13 +65,20 @@ def _client(script):
 # --- no client: always the deterministic template, zero attempts -----------
 
 
-def test_no_llm_client_returns_template_with_zero_attempts_and_no_fallback_flag():
+def test_no_llm_client_returns_template_with_zero_attempts_and_marks_fallback_used():
+    # Codex review (2026-08-09, PR #24): this module's only real caller
+    # (services/intake-service/app.py) always passes
+    # instructions_wiring.get_llm_client()'s return value, which is only ever
+    # None when construction genuinely failed (unconfigured/misconfigured
+    # provider) — the model path really was unavailable, so this must report
+    # used_fallback=True, unlike libs.patient_view_agent.composer's `None`
+    # (a caller's deliberate, successful choice to skip the model entirely).
     for step in VALID_STEPS:
         result, attempts, used_fallback = compose(step, llm_client=None)
 
         assert result.summary == _STEP_TEMPLATES[step]
         assert attempts == 0
-        assert used_fallback is False  # nothing to "fall back" from
+        assert used_fallback is True
 
 
 def test_every_step_has_a_non_empty_template():
