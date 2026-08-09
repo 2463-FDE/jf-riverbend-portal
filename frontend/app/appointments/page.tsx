@@ -10,6 +10,7 @@ import {
   IconStethoscope,
   IconPlus,
 } from "../components/icons";
+import EligibilityChat from "../components/EligibilityChat";
 import { apiFetch } from "../lib/session";
 import type { Appointment, Slot } from "../lib/types";
 import { fmtDateTime, fmtTimeRange, fmtDate } from "../lib/format";
@@ -157,28 +158,35 @@ export default function AppointmentsPage() {
               {appts.map((a) => {
                 const cancelled = ["cancelled", "canceled"].includes(a.status?.toLowerCase());
                 return (
-                  <div className="rb-listrow" key={a.id}>
-                    <div className="rb-listrow__main">
-                      <div className="rb-listrow__title">{a.reason || "Office visit"}</div>
-                      <div className="rb-listrow__meta">
-                        <span><IconStethoscope width={15} height={15} /> {a.provider}</span>
-                        <span><IconClock width={15} height={15} /> {fmtDateTime(a.start_at)}</span>
-                        {a.location && <span><IconPin width={15} height={15} /> {a.location}</span>}
+                  <div className="rb-listrow" key={a.id} style={{ flexDirection: "column", alignItems: "stretch" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                      <div className="rb-listrow__main">
+                        <div className="rb-listrow__title">{a.reason || "Office visit"}</div>
+                        <div className="rb-listrow__meta">
+                          <span><IconStethoscope width={15} height={15} /> {a.provider}</span>
+                          <span><IconClock width={15} height={15} /> {fmtDateTime(a.start_at)}</span>
+                          {a.location && <span><IconPin width={15} height={15} /> {a.location}</span>}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
+                        <StatusBadge status={a.status} />
+                        {!cancelled && (
+                          <button
+                            className="rb-btn rb-btn--danger rb-btn--sm"
+                            onClick={() => cancel(a)}
+                            disabled={busyCancel === a.id}
+                            type="button"
+                          >
+                            {busyCancel === a.id ? "Cancelling…" : "Cancel"}
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
-                      <StatusBadge status={a.status} />
-                      {!cancelled && (
-                        <button
-                          className="rb-btn rb-btn--danger rb-btn--sm"
-                          onClick={() => cancel(a)}
-                          disabled={busyCancel === a.id}
-                          type="button"
-                        >
-                          {busyCancel === a.id ? "Cancelling…" : "Cancel"}
-                        </button>
-                      )}
-                    </div>
+                    {/* Stage 2 (feature-readiness): eligibility chat, scoped
+                        to this appointment. The gateway derives which
+                        patient/insurance this chat can discuss from the
+                        appointment id itself — see EligibilityChat.tsx. */}
+                    {!cancelled && <EligibilityChat appointmentId={a.id} />}
                   </div>
                 );
               })}

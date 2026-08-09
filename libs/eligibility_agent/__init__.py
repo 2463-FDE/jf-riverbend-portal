@@ -1,9 +1,11 @@
 """Provider-neutral, framework-swappable eligibility agent.
 
 Selected by ELIGIBILITY_AGENT_RUNTIME (raw_bedrock = default, no framework;
-langchain = comparison spike). Neither runtime is wired into a running
-service yet — see Stage 3 for the visit-chat endpoint and the Docker/libs-
-gap fix that comes with actually importing this package from a service.
+langchain = comparison spike; ollama = Stage 2 feature-readiness local demo —
+same raw_bedrock loop, an OllamaToolCapableModel in place of
+BedrockConverseToolModel). Wired into services/eligibility-service's
+POST /visits/{visit_id}/messages endpoint — see that service's
+agent_wiring.py.
 """
 from .contracts import (
     CheckEligibilityArgs,

@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 
 from .contracts import VisitTurnResult
 
-_KNOWN_RUNTIMES = ("raw_bedrock", "langchain")
+_KNOWN_RUNTIMES = ("raw_bedrock", "langchain", "ollama")
 
 
 class AgentRuntime(ABC):
@@ -58,6 +58,23 @@ def build_agent_runtime(name: str = None, **kwargs) -> AgentRuntime:
         from .runtimes.langchain_runtime import LangChainAgentRuntime
 
         return LangChainAgentRuntime(**kwargs)
+
+    if name == "ollama":
+        # Stage 2 (feature-readiness): local-demo runtime — the SAME
+        # RawBedrockAgentRuntime loop/tool-dispatch/memory logic, with an
+        # OllamaToolCapableModel in place of BedrockConverseToolModel. A
+        # caller-supplied `model` kwarg (e.g. a test double) still wins;
+        # this only supplies the default.
+        from .ollama_tool_port import OllamaToolCapableModel
+        from .runtimes.raw_bedrock import RawBedrockAgentRuntime
+
+        # NOT kwargs.setdefault(...) — that would construct
+        # OllamaToolCapableModel() (and validate OLLAMA_BASE_URL/OLLAMA_MODEL)
+        # unconditionally before setdefault ever runs, even when a caller
+        # already supplied their own `model`.
+        if "model" not in kwargs:
+            kwargs["model"] = OllamaToolCapableModel()
+        return RawBedrockAgentRuntime(**kwargs)
 
     raise ValueError(
         f"Unknown ELIGIBILITY_AGENT_RUNTIME '{name}' — expected one of: {', '.join(_KNOWN_RUNTIMES)}"
