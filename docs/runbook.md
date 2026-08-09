@@ -352,7 +352,8 @@ It should still exist and eventually reach a terminal state
 
 ### Switching the eligibility-assistant runtime
 `ELIGIBILITY_AGENT_RUNTIME` (`.env`) selects `raw_bedrock` (default, no
-framework) or `langchain` (comparison spike) for the
+framework), `langchain` (comparison spike), or `ollama` (feature-readiness
+Stage 2 local demo — see the section below) for the
 `POST /visits/{visit_id}/messages` chat endpoint. An unset or unrecognized
 value fails closed (the service logs a `ValueError` and the endpoint
 degrades to a safe "assistant unavailable" reply) rather than silently
@@ -385,6 +386,34 @@ failing the request — see `instructions_wiring.py::get_llm_client`. This is a
 local development/demo dependency only, not a hosted production service —
 see the Stage 1 PR's "Demo scope and known limitations" for what a real
 deployment would still need.
+
+### Local Ollama setup for the eligibility chat demo (feature-readiness Stage 2)
+`POST /visits/{visit_id}/messages` (services/eligibility-service, backed by
+`libs/eligibility_agent`) is a front-desk chat surface over the
+`check_eligibility` tool. Set `ELIGIBILITY_AGENT_RUNTIME=ollama` in `.env` to
+use a local model instead of the repo's default `raw_bedrock` (which has no
+live Bedrock credential and always replies "assistant unavailable" here) —
+it reads the same `OLLAMA_BASE_URL`/`OLLAMA_MODEL` vars as Stage 1's intake
+assistant above; see that section for the model-pull steps and the
+container-vs-host `OLLAMA_BASE_URL` distinction.
+
+The chat is only reachable through an **appointment the logged-in user has
+an active grant for** — from the portal, open Appointments and use "Ask
+about eligibility" on one of your own patient's appointments. There is no
+`visits` table in this system; the URL's `visit_id` is required to be a real
+`appointments.id`, checked against `patient_access_grants` before the
+gateway will proxy anything downstream (`services/gateway/
+visit_authorization.py`) — a visit for a patient you have no grant for
+returns 403, and neither `patient_id` nor `insurance_id` is ever taken from
+the browser regardless of what it sends; both are looked up server-side from
+the authorized appointment.
+
+A stopped/unreachable Ollama server, an unset/`changeme` `OLLAMA_MODEL`, or
+the model returning something that isn't a valid tool call/reply all
+degrade to the runtime's existing safe "assistant unavailable" reply
+(`agent_wiring.py::handle_visit_message`) — never a raw error to the
+patient's chart or the front-desk user. This is a local development/demo
+dependency only, not a hosted production service.
 
 ### PHI-safe diagnostics
 When debugging any of the above, only ever log/paste the job's `error` field

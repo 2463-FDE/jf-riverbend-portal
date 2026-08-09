@@ -94,6 +94,37 @@ def test_successfully_built_runtime_is_memoized(monkeypatch):
     assert second is sentinel
 
 
+# --- Stage 2 (feature-readiness): ollama runtime, through the real wiring --
+#
+# Unlike the tests above, this exercises the REAL build_agent_runtime (not
+# mocked) end-to-end through get_agent_runtime() — proves the wiring layer
+# actually produces a working local-demo runtime, not just that it degrades
+# safely when unconfigured.
+
+
+def test_ollama_runtime_builds_successfully_through_the_real_wiring(monkeypatch):
+    monkeypatch.setenv("ELIGIBILITY_AGENT_RUNTIME", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2:3b")
+
+    runtime = agent_wiring.get_agent_runtime()
+
+    assert runtime is not None
+    from libs.eligibility_agent.ollama_tool_port import OllamaToolCapableModel
+    from libs.eligibility_agent.runtimes.raw_bedrock import RawBedrockAgentRuntime
+
+    assert isinstance(runtime, RawBedrockAgentRuntime)
+    assert isinstance(runtime._model, OllamaToolCapableModel)
+
+
+def test_unconfigured_ollama_runtime_degrades_to_none_through_the_real_wiring(monkeypatch):
+    monkeypatch.setenv("ELIGIBILITY_AGENT_RUNTIME", "ollama")
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+
+    assert agent_wiring.get_agent_runtime() is None
+
+
 # --- handle_visit_message: safe degrade vs delegation ------------------------
 
 

@@ -29,6 +29,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
@@ -37,6 +38,7 @@ from db import get_db
 from logging_config import configure
 from models import User
 from security import create_session, destroy_session, get_session, verify_password
+from visit_authorization import find_authorized_appointment, latest_insurance_member_id, parse_user_id
 
 log = configure(settings.service_name)
 
@@ -225,14 +227,18 @@ def proxy_eligibility(insurance_id: str, session: dict = Depends(require_session
 # Stage 3: async eligibility job status/retry + visit-scoped assistant turns
 #
 # Same auth posture as every other route here: Depends(require_session) only
-# — no new unauthenticated internal-service exposure is introduced. These
-# routes carry the SAME limitation as the rest of the gateway: a valid
-# session is required, but it is never checked against the specific
-# job_id/visit_id being requested (see the IDOR note on proxy_records above)
-# because every account maps to the single flat "staff" role
-# (config/roles.yaml) — there is no per-action authorization to scope this
-# to. That is documented, existing debt (RIV-201), not something Stage 3
-# widens or attempts to fix.
+# — no new unauthenticated internal-service exposure is introduced.
+# proxy_eligibility_job_status/proxy_eligibility_job_retry below still carry
+# the SAME limitation as the rest of the gateway: a valid session is
+# required, but it is never checked against the specific job_id being
+# requested (see the IDOR note on proxy_records above) because every account
+# maps to the single flat "staff" role (config/roles.yaml) — there is no
+# per-action authorization to scope this to. That is documented, existing
+# debt (RIV-201), not something this stage widens or attempts to fix.
+#
+# proxy_visit_message below is the one exception (Stage 2, feature-
+# readiness): visit_id IS now checked against the caller's authorized
+# patients — see visit_authorization.py.
 # --------------------------------------------------------------------------- #
 @app.get("/eligibility/jobs/{job_id}")
 def proxy_eligibility_job_status(job_id: str, session: dict = Depends(require_session)):
@@ -249,11 +255,60 @@ def proxy_eligibility_job_retry(job_id: str, session: dict = Depends(require_ses
 
 
 @app.post("/visits/{visit_id}/messages")
-def proxy_visit_message(visit_id: str, payload: dict, session: dict = Depends(require_session)):
+def proxy_visit_message(
+    visit_id: str,
+    payload: dict,
+    session: dict = Depends(require_session),
+    db: Session = Depends(get_db),
+):
+    """Stage 2 (feature-readiness): unlike every route above, this one is no
+    longer a bare forward — `visit_id` is required to be a real
+    `appointments.id`, and the caller must hold an active
+    `patient_access_grants` row for that appointment's patient (see
+    visit_authorization.py). This closes the gap the module comment above
+    used to document as "never checked against the specific ... visit_id
+    being requested": a session alone no longer scopes this route to every
+    patient in the system.
+
+    `patient_id`/`insurance_id` are NEVER taken from `payload` — whatever a
+    caller sends there is dropped. They're derived here, server-side, from
+    the authorized appointment and the patient's insurance on file, which is
+    the only way eligibility-service's `bind_visit_context` ever sees them
+    (mirrors the same "server-derived, not client-supplied" principle
+    proxy_intake already applies to X-Actor-Id).
+    """
+    try:
+        appointment_id = int(visit_id)
+    except (TypeError, ValueError):
+        # Same response as a real-but-unauthorized id — never reveal whether
+        # the string was even shaped like a valid one (no format oracle).
+        raise HTTPException(status_code=403, detail="not authorized for this visit")
+
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized for this visit")
+
+    try:
+        appointment = find_authorized_appointment(db, user_id=user_id, appointment_id=appointment_id)
+    except SQLAlchemyError as e:
+        log.error("visit message: grant lookup failed (error_type=%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="authorization store unavailable")
+
+    if appointment is None:
+        raise HTTPException(status_code=403, detail="not authorized for this visit")
+
+    message = payload.get("message") if isinstance(payload, dict) else None
+    try:
+        insurance_id = latest_insurance_member_id(db, patient_id=appointment.patient_id)
+    except SQLAlchemyError as e:
+        log.error("visit message: insurance lookup failed (error_type=%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="patient store unavailable")
+
+    downstream_payload = {"message": message, "patient_id": appointment.patient_id, "insurance_id": insurance_id}
     return _post(
         "eligibility",
         f"/visits/{visit_id}/messages",
-        payload,
+        downstream_payload,
         headers=_correlation_headers(),
         forward_status=True,
     )

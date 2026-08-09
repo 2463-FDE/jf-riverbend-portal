@@ -144,6 +144,19 @@ export interface Appointment {
   status: string;
 }
 
+// Stage 2 (feature-readiness) — eligibility chat turn, served via
+// POST /api/visits/[id]/messages (gateway -> eligibility-service). `id` is a
+// real appointment id; the gateway verifies the caller is authorized for
+// that appointment's patient before this ever reaches eligibility-service.
+export interface VisitMessageResponse {
+  visit_id: string;
+  reply: string;
+  tool_called: boolean;
+  eligibility_status?: "active" | "inactive" | "unknown" | "pending" | "stale";
+  termination_reason: "answered" | "max_turns" | "provider_error";
+  turns_used: number;
+}
+
 // Stage 3: async eligibility job lifecycle (services/eligibility-service/jobs.py).
 export type EligibilityJobStatus =
   | "queued"
