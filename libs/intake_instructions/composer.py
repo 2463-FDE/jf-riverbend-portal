@@ -20,6 +20,14 @@ ways that error type doesn't cover (a lazy SDK import failure, an auth
 exception, a malformed response), and this optional, best-effort endpoint
 must degrade to its template on every one of them, not just the ones
 `llm_client`'s own adapters happen to normalize.
+
+A schema-valid, non-empty response is also not trusted outright (Codex
+review, 2026-08-09, PR #24, second finding): `_validation_failure_reason`
+rejects an over-length response or one containing a small denylist of
+phrases that would misstate this feature's own known step rules (e.g.
+claiming a required consent is optional, or an SSN is required) — a
+provider hallucination or drifted response fails this the same way an empty
+summary always has, and falls back to the template after `max_attempts`.
 """
 from __future__ import annotations
 
@@ -82,6 +90,46 @@ def _template_instructions(step: str) -> ComposedInstructions:
     return ComposedInstructions(summary=_STEP_TEMPLATES[step])
 
 
+# Codex review (2026-08-09, PR #24, medium): a schema-valid, non-empty
+# response was previously trusted outright — a provider hallucination or
+# drifted response could tell a patient a required consent is optional, that
+# their SSN is mandatory, or give medical guidance, none of which a bare
+# non-empty check catches. This is a bounded, denylist-style guard (not a
+# general content-safety system) scoped to the specific wrong claims this
+# feature could plausibly make about ITS OWN four wizard steps — matched
+# against `_STEP_TEMPLATES` above, which state the actual rules.
+_MAX_SUMMARY_CHARS = 400
+
+_DISALLOWED_SUBSTRINGS = (
+    "diagnos",  # diagnose / diagnosis — this assistant is explicitly non-clinical
+    "prescri",  # prescribe / prescription
+    "medication",
+    "treatment plan",
+    "ssn is required",
+    "ssn is mandatory",
+    "social security number is required",
+    "social security number is mandatory",
+    "consent is optional",  # contradicts: treatment + privacy consent are required
+    "consents are optional",
+    "insurance is required",  # contradicts: insurance step is always skippable
+)
+
+
+def _validation_failure_reason(summary: str) -> Optional[str]:
+    """Returns a short, fixed reason code, or None if `summary` is safe to
+    show a patient as-is. The reason is logged (never `summary` itself), so
+    it must never be able to embed model output."""
+    if not summary.strip():
+        return "empty_summary"
+    if len(summary) > _MAX_SUMMARY_CHARS:
+        return "summary_too_long"
+    lowered = summary.lower()
+    for phrase in _DISALLOWED_SUBSTRINGS:
+        if phrase in lowered:
+            return "disallowed_content"
+    return None
+
+
 def _build_prompt(step: str, retry_note: str = "") -> str:
     label = _STEP_LABELS[step]
     instructions = (
@@ -140,14 +188,21 @@ def compose(
             )
             return _template_instructions(step), attempts, True
 
-        if result.summary.strip():
+        reason = _validation_failure_reason(result.summary)
+        if reason is None:
             return result, attempts, False
 
         log.warning(
-            "intake_instructions compose rejected (step=%s, attempt=%s, reason=empty_summary)",
+            "intake_instructions compose rejected (step=%s, attempt=%s, reason=%s)",
             step,
             attempt,
+            reason,
         )
-        retry_note = "\nYour previous answer was empty. Provide a non-empty \"summary\"."
+        retry_note = (
+            "\nYour previous answer was rejected: "
+            + reason.replace("_", " ")
+            + ". Follow the instructions exactly — brief, plain-language, non-diagnostic guidance only, "
+            "with no claims about what is required or optional beyond what was asked."
+        )
 
     return _template_instructions(step), attempts, True

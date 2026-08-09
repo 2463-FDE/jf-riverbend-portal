@@ -5,11 +5,13 @@ Mirrors libs/patient_view_agent/composer.py's own test shape (bounded
 attempts, deterministic template fallback on any provider error, never
 raises) using the same FakeProvider-scripting approach as test_llm_client.py.
 """
+import json
+
 import pytest
 from pydantic import ValidationError
 
 from libs.intake_instructions import VALID_STEPS, ComposedInstructions, compose
-from libs.intake_instructions.composer import _STEP_TEMPLATES, _build_prompt
+from libs.intake_instructions.composer import _MAX_SUMMARY_CHARS, _STEP_TEMPLATES, _build_prompt
 from libs.llm_client import LLMClient, LLMConfig
 from libs.llm_client.errors import ProviderTimeoutError
 from libs.llm_client.providers.base import ProviderResponse
@@ -82,6 +84,62 @@ def test_empty_summary_is_rejected_and_retried_before_falling_back():
     assert result.summary == _STEP_TEMPLATES["consents"]
     assert attempts == 2
     assert used_fallback is True
+
+
+# --- Codex review (2026-08-09, PR #24, medium): schema-valid, non-empty
+# responses are not trusted outright — a provider hallucination or drifted
+# response must still be rejected and fall back to the template if it
+# misstates this feature's own known step rules or runs on too long.
+
+
+def test_overlong_summary_is_rejected_and_falls_back_to_template():
+    huge_summary = "x" * (_MAX_SUMMARY_CHARS + 1)
+    script = [ProviderResponse(text=json.dumps({"summary": huge_summary}), input_tokens=1, output_tokens=1)]
+    client = _client(script)
+
+    result, attempts, used_fallback = compose("review", llm_client=client, max_attempts=1)
+
+    assert result.summary == _STEP_TEMPLATES["review"]
+    assert used_fallback is True
+
+
+def test_disallowed_content_is_rejected_and_falls_back_to_template():
+    # A hallucinated/drifted response that contradicts this feature's own
+    # known rule (consents step: treatment + privacy consent ARE required)
+    # must never reach a patient as if it were a safe answer.
+    hallucinated = "Good news — treatment consent is optional here, so you can skip it if you'd like."
+    script = [ProviderResponse(text=json.dumps({"summary": hallucinated}), input_tokens=1, output_tokens=1)]
+    client = _client(script)
+
+    result, attempts, used_fallback = compose("consents", llm_client=client, max_attempts=1)
+
+    assert result.summary == _STEP_TEMPLATES["consents"]
+    assert used_fallback is True
+
+
+def test_disallowed_medical_language_is_rejected():
+    unsafe = "Based on your symptoms, we recommend starting this medication before your visit."
+    script = [ProviderResponse(text=json.dumps({"summary": unsafe}), input_tokens=1, output_tokens=1)]
+    client = _client(script)
+
+    result, attempts, used_fallback = compose("review", llm_client=client, max_attempts=1)
+
+    assert result.summary == _STEP_TEMPLATES["review"]
+    assert used_fallback is True
+
+
+def test_rejected_content_is_retried_with_a_corrective_note_before_falling_back():
+    script = [
+        ProviderResponse(text=json.dumps({"summary": "Your SSN is required, no exceptions."}), input_tokens=1, output_tokens=1),
+        ProviderResponse(text=json.dumps({"summary": "Fill in your name and date of birth."}), input_tokens=1, output_tokens=1),
+    ]
+    client = _client(script)
+
+    result, attempts, used_fallback = compose("demographics", llm_client=client, max_attempts=2)
+
+    assert result.summary == "Fill in your name and date of birth."
+    assert attempts == 2
+    assert used_fallback is False
 
 
 def test_provider_error_falls_back_immediately_without_exhausting_attempts():

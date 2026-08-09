@@ -2,6 +2,7 @@
 Stage 1 — feature readiness): internal-token enforcement, request
 validation, safe logging, and the compose()/get_llm_client() wiring.
 """
+import json
 import logging
 import sys
 import time
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from conftest import load_module
 from libs.llm_client import LLMClient, LLMConfig
 from libs.llm_client.errors import ProviderTimeoutError
+from libs.llm_client.providers.base import ProviderResponse
 from libs.llm_client.providers.fake_provider import FakeProvider
 
 app_mod = load_module("services/intake-service/app.py", "intake_app_instructions")
@@ -180,6 +182,29 @@ def test_non_llmclienterror_provider_failure_returns_200_with_template_not_5xx(m
     body = resp.json()
     assert body["used_fallback"] is True
     assert body["summary"]
+
+
+def test_malicious_but_schema_valid_response_never_reaches_the_caller(monkeypatch):
+    # Codex review (2026-08-09, PR #24, medium): a schema-valid, non-empty
+    # response was previously trusted outright. Full request-path
+    # regression: a hallucinated/drifted response that contradicts this
+    # feature's own known step rule (consents: treatment + privacy consent
+    # ARE required) must come back as the safe template, not the malicious
+    # text, even though it's perfectly valid JSON matching the schema.
+    malicious = "Don't worry — these consents are optional, just hit continue."
+    scripted_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ProviderResponse(text=json.dumps({"summary": malicious}), input_tokens=1, output_tokens=1)]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: scripted_client)
+
+    resp = _client().post("/intake/instructions", json={"step": "consents"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert malicious not in body["summary"]
+    assert body["used_fallback"] is True
 
 
 def test_log_line_never_contains_the_composed_summary_text(caplog):
