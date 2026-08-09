@@ -21,13 +21,22 @@ exception, a malformed response), and this optional, best-effort endpoint
 must degrade to its template on every one of them, not just the ones
 `llm_client`'s own adapters happen to normalize.
 
-A schema-valid, non-empty response is also not trusted outright (Codex
-review, 2026-08-09, PR #24, second finding): `_validation_failure_reason`
-rejects an over-length response or one containing a small denylist of
-phrases that would misstate this feature's own known step rules (e.g.
-claiming a required consent is optional, or an SSN is required) — a
-provider hallucination or drifted response fails this the same way an empty
-summary always has, and falls back to the template after `max_attempts`.
+Codex review (2026-08-09, PR #24, two more rounds): earlier revisions let the
+model return arbitrary free text validated by a non-empty check, then by a
+length cap plus a substring denylist. Both are unsound for rule-bearing
+content shown to a patient in a healthcare intake flow — a paraphrase (e.g.
+"you can skip the treatment agreement") defeats any denylist, and there is
+no bound on what a hallucinating or drifted provider might otherwise claim
+about a required consent, an SSN, or medical advice. The model NEVER
+generates the text a patient sees. Instead, `_STEP_VARIANTS` holds a small,
+fixed set of server-authored, human-reviewed phrasings per step (element 0
+is always `_STEP_TEMPLATES[step]`, the same deterministic fallback text);
+the model's only output is `_VariantSelection.variant_index`, an integer
+picking which pre-approved phrasing to show. There is structurally no path
+for the model to introduce a new factual claim, required/optional claim, or
+medical statement — an invalid index is rejected exactly like the old
+empty/malformed cases and retried, then falls back to variant 0 (the
+template).
 """
 from __future__ import annotations
 
@@ -79,6 +88,46 @@ _STEP_TEMPLATES: dict[str, str] = {
     ),
 }
 
+# Server-authored, human-reviewed phrasing options per step. Element 0 is
+# always _STEP_TEMPLATES[step] verbatim, so the deterministic fallback and
+# "the model picked variant 0" produce identical, already-tested text. Adding
+# a variant means writing and reviewing new text HERE, in source control —
+# never accepting one generated at request time.
+_STEP_VARIANTS: dict[str, tuple[str, ...]] = {
+    "demographics": (
+        _STEP_TEMPLATES["demographics"],
+        (
+            "We need your name, date of birth, and a way to reach you to set up your "
+            "chart. Your SSN is optional and only used for insurance — front-desk "
+            "staff can help if you're missing anything."
+        ),
+    ),
+    "insurance": (
+        _STEP_TEMPLATES["insurance"],
+        (
+            "Got insurance? Add the carrier and member ID from your card so we can "
+            "check your coverage. No insurance, or paying yourself? You can skip "
+            "this step and keep going."
+        ),
+    ),
+    "consents": (
+        _STEP_TEMPLATES["consents"],
+        (
+            "Take a moment to read each consent below. Treatment and the privacy "
+            "notice must be accepted to register; the financial and communications "
+            "consents are up to you. Ask front-desk staff first if anything's unclear."
+        ),
+    ),
+    "review": (
+        _STEP_TEMPLATES["review"],
+        (
+            "Look over what you entered — this is your last chance to fix a typo "
+            "before you submit. Front-desk staff will still review it, and you can "
+            "always correct something afterward."
+        ),
+    ),
+}
+
 
 class ComposedInstructions(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -86,61 +135,31 @@ class ComposedInstructions(BaseModel):
     summary: str
 
 
+class _VariantSelection(BaseModel):
+    """The model's ONLY possible output: which pre-approved phrasing to show.
+    There is no field here a model could use to supply its own text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    variant_index: int
+
+
 def _template_instructions(step: str) -> ComposedInstructions:
     return ComposedInstructions(summary=_STEP_TEMPLATES[step])
 
 
-# Codex review (2026-08-09, PR #24, medium): a schema-valid, non-empty
-# response was previously trusted outright — a provider hallucination or
-# drifted response could tell a patient a required consent is optional, that
-# their SSN is mandatory, or give medical guidance, none of which a bare
-# non-empty check catches. This is a bounded, denylist-style guard (not a
-# general content-safety system) scoped to the specific wrong claims this
-# feature could plausibly make about ITS OWN four wizard steps — matched
-# against `_STEP_TEMPLATES` above, which state the actual rules.
-_MAX_SUMMARY_CHARS = 400
-
-_DISALLOWED_SUBSTRINGS = (
-    "diagnos",  # diagnose / diagnosis — this assistant is explicitly non-clinical
-    "prescri",  # prescribe / prescription
-    "medication",
-    "treatment plan",
-    "ssn is required",
-    "ssn is mandatory",
-    "social security number is required",
-    "social security number is mandatory",
-    "consent is optional",  # contradicts: treatment + privacy consent are required
-    "consents are optional",
-    "insurance is required",  # contradicts: insurance step is always skippable
-)
-
-
-def _validation_failure_reason(summary: str) -> Optional[str]:
-    """Returns a short, fixed reason code, or None if `summary` is safe to
-    show a patient as-is. The reason is logged (never `summary` itself), so
-    it must never be able to embed model output."""
-    if not summary.strip():
-        return "empty_summary"
-    if len(summary) > _MAX_SUMMARY_CHARS:
-        return "summary_too_long"
-    lowered = summary.lower()
-    for phrase in _DISALLOWED_SUBSTRINGS:
-        if phrase in lowered:
-            return "disallowed_content"
-    return None
-
-
 def _build_prompt(step: str, retry_note: str = "") -> str:
     label = _STEP_LABELS[step]
+    variants = _STEP_VARIANTS[step]
+    numbered_options = "\n".join(f"{i}: {text}" for i, text in enumerate(variants))
     instructions = (
-        "You are a friendly, non-clinical assistant helping a patient complete a "
-        f'new-patient registration form at a community health clinic. In two or '
-        f'three short plain-language sentences, explain what the patient needs to '
-        f'do on the "{label}" step and why it is needed. Do not give medical '
-        f"advice, do not diagnose, and do not ask the patient to repeat any "
-        f"personal information back to you. If something might need clarifying, "
-        f"tell the patient to ask front-desk staff. Return JSON with exactly one "
-        f'field, "summary", containing your answer.'
+        "You are helping pick the clearest, most patient-friendly wording for the "
+        f'"{label}" step of a clinic new-patient registration form. Every option '
+        "below has already been written and reviewed for accuracy — choose the ONE "
+        "that reads best to a patient. Do not write your own wording, and do not "
+        'combine options. Return JSON with exactly one field, "variant_index", the '
+        f"integer index (0 to {len(variants) - 1}) of your chosen option.\n\n"
+        f"{numbered_options}"
     )
     return instructions + retry_note
 
@@ -162,24 +181,18 @@ def compose(
     if llm_client is None:
         return _template_instructions(step), 0, False
 
+    variants = _STEP_VARIANTS[step]
     retry_note = ""
     attempts = 0
     for attempt in range(1, max_attempts + 1):
         attempts = attempt
         try:
-            result = llm_client.complete(_build_prompt(step, retry_note), schema=ComposedInstructions)
+            selection = llm_client.complete(_build_prompt(step, retry_note), schema=_VariantSelection)
         except Exception as exc:
-            # Codex review (2026-08-09, PR #24, medium): deliberately broader
-            # than `except LLMClientError` — libs/llm_client's provider
-            # adapters only normalize their OWN transport/timeout failures to
-            # LLMClientError subclasses (see providers/base.py's contract); a
-            # real vendor provider's lazy SDK import failure
-            # (ModuleNotFoundError — openai/anthropic/boto3 are not in
-            # intake-service's requirements.txt), an auth exception, or a
-            # malformed-response bug would otherwise escape uncaught and turn
-            # this optional, best-effort helper into a hard 502/500 instead
-            # of its safe per-step template. Every failure mode here must
-            # degrade the same way; only the exception TYPE is ever logged.
+            # Deliberately broader than `except LLMClientError` — see the
+            # module docstring's first Codex-review note. Every provider
+            # failure mode degrades the same way; only the exception TYPE is
+            # ever logged.
             log.warning(
                 "intake_instructions compose provider error (step=%s, attempt=%s, error_type=%s)",
                 step,
@@ -188,21 +201,17 @@ def compose(
             )
             return _template_instructions(step), attempts, True
 
-        reason = _validation_failure_reason(result.summary)
-        if reason is None:
-            return result, attempts, False
+        if 0 <= selection.variant_index < len(variants):
+            return ComposedInstructions(summary=variants[selection.variant_index]), attempts, False
 
         log.warning(
-            "intake_instructions compose rejected (step=%s, attempt=%s, reason=%s)",
+            "intake_instructions compose rejected (step=%s, attempt=%s, reason=invalid_variant_index)",
             step,
             attempt,
-            reason,
         )
         retry_note = (
-            "\nYour previous answer was rejected: "
-            + reason.replace("_", " ")
-            + ". Follow the instructions exactly — brief, plain-language, non-diagnostic guidance only, "
-            "with no claims about what is required or optional beyond what was asked."
+            f"\nYour previous answer was invalid. Return a variant_index "
+            f"between 0 and {len(variants) - 1}, inclusive."
         )
 
     return _template_instructions(step), attempts, True

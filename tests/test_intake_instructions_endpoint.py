@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import load_module
+from libs.intake_instructions.composer import _STEP_TEMPLATES, _STEP_VARIANTS
 from libs.llm_client import LLMClient, LLMConfig
 from libs.llm_client.errors import ProviderTimeoutError
 from libs.llm_client.providers.base import ProviderResponse
@@ -184,17 +185,17 @@ def test_non_llmclienterror_provider_failure_returns_200_with_template_not_5xx(m
     assert body["summary"]
 
 
-def test_malicious_but_schema_valid_response_never_reaches_the_caller(monkeypatch):
-    # Codex review (2026-08-09, PR #24, medium): a schema-valid, non-empty
-    # response was previously trusted outright. Full request-path
-    # regression: a hallucinated/drifted response that contradicts this
-    # feature's own known step rule (consents: treatment + privacy consent
-    # ARE required) must come back as the safe template, not the malicious
-    # text, even though it's perfectly valid JSON matching the schema.
-    malicious = "Don't worry — these consents are optional, just hit continue."
+def test_endpoint_never_returns_anything_outside_the_pre_approved_variants(monkeypatch):
+    # Codex review (2026-08-09, PR #24, two rounds): free text validated by a
+    # non-empty check, then by a length cap + substring denylist, both proved
+    # unsound against paraphrase. The model's only possible output is now
+    # which pre-approved variant to show (libs/intake_instructions/composer.py
+    # ::_VariantSelection) — full request-path regression: whatever the model
+    # selects, the returned summary is always exactly one of this step's own
+    # server-authored variants, never arbitrary model-written text.
     scripted_client = LLMClient(
         config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
-        provider=FakeProvider([ProviderResponse(text=json.dumps({"summary": malicious}), input_tokens=1, output_tokens=1)]),
+        provider=FakeProvider([ProviderResponse(text=json.dumps({"variant_index": 1}), input_tokens=1, output_tokens=1)]),
         sleep=lambda _s: None,
     )
     monkeypatch.setattr(app_mod, "get_llm_client", lambda: scripted_client)
@@ -203,7 +204,26 @@ def test_malicious_but_schema_valid_response_never_reaches_the_caller(monkeypatc
 
     assert resp.status_code == 200
     body = resp.json()
-    assert malicious not in body["summary"]
+    assert body["summary"] in _STEP_VARIANTS["consents"]
+    assert body["used_fallback"] is False
+
+
+def test_endpoint_falls_back_to_template_on_an_out_of_range_selection(monkeypatch):
+    # An adversarial/drifted attempt to select something outside the known
+    # variant set must degrade to the template exactly like any other
+    # invalid response — there is no way for this to surface arbitrary text.
+    scripted_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ProviderResponse(text=json.dumps({"variant_index": 999}), input_tokens=1, output_tokens=1)]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: scripted_client)
+
+    resp = _client().post("/intake/instructions", json={"step": "consents"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == _STEP_TEMPLATES["consents"]
     assert body["used_fallback"] is True
 
 
