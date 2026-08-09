@@ -154,3 +154,45 @@ def test_malformed_config_logs_a_warning_with_the_invalid_raw_value(monkeypatch,
     log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert "INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS" in log_text
     assert "eight" in log_text  # operator config, not patient data — safe to log verbatim
+
+
+# --- Codex review (2026-08-09, PR #24, high, second round): a value that ---
+# --- parses successfully is not automatically safe -------------------------
+#
+# 60s alone already exceeds the gateway's fixed 30s downstream timeout
+# (services/gateway/app.py::_post), and NaN/Infinity are valid Python floats
+# that would otherwise reach httpx as a nonsensical timeout. Every one of
+# these must degrade to the default exactly like a parse failure does.
+
+
+@pytest.mark.parametrize("raw_timeout", ["60", "-1", "0", "nan", "inf", "-inf"])
+def test_out_of_range_timeout_falls_back_to_default(monkeypatch, raw_timeout):
+    monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS", raw_timeout)
+
+    client = wiring.get_llm_client()
+
+    assert client._config.timeout_seconds == wiring._DEFAULT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("raw_retries", ["-1", "2", "100"])
+def test_out_of_range_max_retries_falls_back_to_default(monkeypatch, raw_retries):
+    monkeypatch.setenv("INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES", raw_retries)
+
+    client = wiring.get_llm_client()
+
+    assert client._config.max_retries == wiring._DEFAULT_MAX_RETRIES
+
+
+def test_in_range_boundary_values_are_accepted():
+    assert wiring._MAX_ALLOWED_TIMEOUT_SECONDS > 0
+    assert wiring._MAX_ALLOWED_RETRIES >= 0
+
+
+def test_worst_case_call_duration_stays_under_the_gateway_downstream_timeout():
+    # Locks in the safety invariant instructions_wiring.py itself asserts at
+    # import time — this test still catches a regression even if that assert
+    # were ever bypassed (e.g. Python run with -O, which strips asserts).
+    worst_case = (wiring._MAX_ALLOWED_RETRIES + 1) * wiring._MAX_ALLOWED_TIMEOUT_SECONDS + (
+        wiring._MAX_ALLOWED_RETRIES * wiring._LLM_CLIENT_MAX_BACKOFF_SECONDS
+    )
+    assert worst_case < wiring._GATEWAY_DOWNSTREAM_TIMEOUT_SECONDS

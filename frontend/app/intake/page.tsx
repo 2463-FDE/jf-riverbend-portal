@@ -233,7 +233,20 @@ export default function IntakePage() {
               </div>
               <div className="rb-field-row">
                 <SsnField id="ssn" value={demo.ssn} onChange={(v) => setDemo({ ...demo, ssn: v })}
-                  hint="Used for insurance verification only." />
+                  // Codex review (2026-08-09, PR #24, high): this said "Used
+                  // for insurance verification only" — false (grepped
+                  // services/intake-service/app.py: SSN is never sent to
+                  // eligibility-service, which uses member_id only; SSN's
+                  // actual use is the duplicate-patient match-key lookup,
+                  // see _normalize_ssn/_find_match_candidates) and directly
+                  // contradicted the new intake-instructions assistant's
+                  // demographics text on this same screen
+                  // (libs/intake_instructions/composer.py). Kept scoped to
+                  // what this field is used for at intake time — full
+                  // plaintext-storage/staff-access data-lifecycle disclosure
+                  // (adr/0002) belongs in the Notice of Privacy Practices
+                  // consent step, not a form-field hint.
+                  hint="Optional — used to check for an existing patient record, not for insurance." />
               </div>
             </fieldset>
 

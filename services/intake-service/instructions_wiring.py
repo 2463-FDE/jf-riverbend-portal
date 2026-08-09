@@ -34,7 +34,24 @@ patient registration down with it. Parsing now happens lazily, inside
 get_llm_client()'s own guarded call, and a malformed value logs a warning
 and falls back to the safe default rather than propagating — this module can
 no longer prevent the service from starting, period.
+
+Codex review (2026-08-09, PR #24, second round on this file): parsing
+successfully is not the same as being safe. A syntactically valid but
+oversized/negative/non-finite value (e.g. 60, -1, "nan", "inf") used to pass
+straight through — 60s alone already exceeds the gateway's fixed 30s
+downstream timeout (services/gateway/app.py::_post), reintroducing the exact
+"gateway 502s before the template can return, worker keeps retrying for a
+gone caller" failure this config was added to prevent, and NaN/Infinity as
+an httpx timeout is undefined/unbounded behavior. `_bounded_timeout_seconds`/
+`_bounded_max_retries` now also range-check the parsed value — out of range
+degrades to the default exactly like a parse failure does. `_WORST_CASE_...`
+below computes the worst-case total call duration these bounds allow
+((max_retries + 1) attempts at the timeout ceiling, plus a capped backoff
+sleep between each) and asserts it at import time against the gateway's
+fixed budget, so a careless future change to either ceiling fails loudly
+here instead of silently reopening this exact defect.
 """
+import math
 import os
 from typing import Optional
 
@@ -49,6 +66,27 @@ log = get_safe_logger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 8.0
 _DEFAULT_MAX_RETRIES = 0
 
+# Hard ceilings an operator-configured value may never exceed, regardless of
+# how it parses — see the module docstring's second Codex-review note.
+_MAX_ALLOWED_TIMEOUT_SECONDS = 10.0
+_MAX_ALLOWED_RETRIES = 1
+
+# services/gateway/app.py::_post's hardcoded downstream call timeout.
+_GATEWAY_DOWNSTREAM_TIMEOUT_SECONDS = 30.0
+# libs/llm_client/client.py::_BACKOFF_MAX_SECONDS — the largest possible
+# sleep LLMClient inserts between retry attempts.
+_LLM_CLIENT_MAX_BACKOFF_SECONDS = 8.0
+
+_WORST_CASE_CALL_DURATION_SECONDS = (
+    (_MAX_ALLOWED_RETRIES + 1) * _MAX_ALLOWED_TIMEOUT_SECONDS
+    + _MAX_ALLOWED_RETRIES * _LLM_CLIENT_MAX_BACKOFF_SECONDS
+)
+assert _WORST_CASE_CALL_DURATION_SECONDS < _GATEWAY_DOWNSTREAM_TIMEOUT_SECONDS, (
+    "intake instructions' worst-case LLM call duration must stay under the "
+    "gateway's downstream timeout — tighten _MAX_ALLOWED_TIMEOUT_SECONDS "
+    "and/or _MAX_ALLOWED_RETRIES above"
+)
+
 _client: Optional[LLMClient] = None
 _client_build_failed = False
 
@@ -58,7 +96,7 @@ def _bounded_timeout_seconds() -> float:
     if raw is None:
         return _DEFAULT_TIMEOUT_SECONDS
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         log.warning(
             "invalid INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS=%r — using default %s",
@@ -66,6 +104,16 @@ def _bounded_timeout_seconds() -> float:
             _DEFAULT_TIMEOUT_SECONDS,
         )
         return _DEFAULT_TIMEOUT_SECONDS
+    if not math.isfinite(value) or not (0 < value <= _MAX_ALLOWED_TIMEOUT_SECONDS):
+        log.warning(
+            "INTAKE_INSTRUCTIONS_LLM_TIMEOUT_SECONDS=%r is outside the safe range "
+            "(0, %s] — using default %s",
+            raw,
+            _MAX_ALLOWED_TIMEOUT_SECONDS,
+            _DEFAULT_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_TIMEOUT_SECONDS
+    return value
 
 
 def _bounded_max_retries() -> int:
@@ -73,7 +121,7 @@ def _bounded_max_retries() -> int:
     if raw is None:
         return _DEFAULT_MAX_RETRIES
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         log.warning(
             "invalid INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES=%r — using default %s",
@@ -81,6 +129,16 @@ def _bounded_max_retries() -> int:
             _DEFAULT_MAX_RETRIES,
         )
         return _DEFAULT_MAX_RETRIES
+    if not (0 <= value <= _MAX_ALLOWED_RETRIES):
+        log.warning(
+            "INTAKE_INSTRUCTIONS_LLM_MAX_RETRIES=%r is outside the safe range "
+            "[0, %s] — using default %s",
+            raw,
+            _MAX_ALLOWED_RETRIES,
+            _DEFAULT_MAX_RETRIES,
+        )
+        return _DEFAULT_MAX_RETRIES
+    return value
 
 
 def get_llm_client() -> Optional[LLMClient]:
