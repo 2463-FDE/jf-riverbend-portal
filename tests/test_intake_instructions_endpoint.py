@@ -1,0 +1,256 @@
+"""Tests for POST /intake/instructions (services/intake-service/app.py,
+Stage 1 — feature readiness): internal-token enforcement, request
+validation, safe logging, and the compose()/get_llm_client() wiring.
+"""
+import json
+import logging
+import sys
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from conftest import load_module
+from libs.intake_instructions.composer import _STEP_TEMPLATES, _STEP_VARIANTS
+from libs.llm_client import LLMClient, LLMConfig
+from libs.llm_client.errors import ProviderTimeoutError
+from libs.llm_client.providers.base import ProviderResponse
+from libs.llm_client.providers.fake_provider import FakeProvider
+
+app_mod = load_module("services/intake-service/app.py", "intake_app_instructions")
+# app.py's `from instructions_wiring import get_llm_client` caches the module
+# under this bare name (see conftest.load_module) — grabbed here so tests can
+# reset its memoized LLMClient singleton between cases.
+wiring_mod = sys.modules["instructions_wiring"]
+
+TEST_TOKEN = "test-internal-token-for-intake-well-over-32-chars"
+
+
+@pytest.fixture(autouse=True)
+def _configured_internal_token(monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_client_singleton():
+    wiring_mod._client = None
+    wiring_mod._client_build_failed = False
+    yield
+    wiring_mod._client = None
+    wiring_mod._client_build_failed = False
+
+
+def _client():
+    return TestClient(app_mod.app)
+
+
+def _headers(token=TEST_TOKEN):
+    return {"X-Internal-Token": token} if token is not None else {}
+
+
+# --- transport trust: same gate as /intake ----------------------------------
+
+
+def test_missing_internal_token_is_rejected(monkeypatch):
+    resp = _client().post("/intake/instructions", json={"step": "demographics"}, headers=_headers(None))
+
+    assert resp.status_code == 401
+
+
+def test_wrong_internal_token_is_rejected():
+    resp = _client().post(
+        "/intake/instructions", json={"step": "demographics"}, headers=_headers("not-the-real-token")
+    )
+
+    assert resp.status_code == 401
+
+
+def test_unconfigured_internal_token_fails_closed(monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "")
+
+    resp = _client().post("/intake/instructions", json={"step": "demographics"}, headers=_headers(""))
+
+    assert resp.status_code == 401
+
+
+# --- request validation: closed set of steps, no extra fields ---------------
+
+
+def test_valid_step_returns_a_summary():
+    resp = _client().post("/intake/instructions", json={"step": "insurance"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body["summary"], str) and body["summary"]
+    assert isinstance(body["used_fallback"], bool)
+
+
+@pytest.mark.parametrize("step", ["demographics", "insurance", "consents", "review"])
+def test_every_known_step_is_accepted(step):
+    resp = _client().post("/intake/instructions", json={"step": step}, headers=_headers())
+
+    assert resp.status_code == 200
+
+
+def test_unknown_step_is_rejected_with_422():
+    resp = _client().post("/intake/instructions", json={"step": "not-a-real-step"}, headers=_headers())
+
+    assert resp.status_code == 422
+
+
+def test_missing_step_is_rejected_with_422():
+    resp = _client().post("/intake/instructions", json={}, headers=_headers())
+
+    assert resp.status_code == 422
+
+
+def test_unexpected_field_is_rejected_not_silently_dropped():
+    # extra="forbid" — this endpoint has no legitimate use for anything
+    # beyond `step`, and a patient_id/demographics field slipping in here
+    # unnoticed is exactly what this test guards against.
+    resp = _client().post(
+        "/intake/instructions",
+        json={"step": "demographics", "patient_id": 42},
+        headers=_headers(),
+    )
+
+    assert resp.status_code == 422
+
+
+# --- default (fake) provider: deterministic template, no network call ------
+
+
+def test_default_provider_returns_the_template_and_marks_fallback_used(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+    resp = _client().post("/intake/instructions", json={"step": "consents"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # LLM_PROVIDER defaults to "fake" (FakeProvider returns "{}", which never
+    # validates as _VariantSelection — no variant_index field) — every call
+    # in CI takes the template fallback path deterministically.
+    assert body["used_fallback"] is True
+    assert body["summary"]
+
+
+def test_unavailable_provider_reports_used_fallback_true_through_the_endpoint(monkeypatch):
+    # Codex review (2026-08-09, PR #24, medium): compose(step, llm_client=None)
+    # used to report used_fallback=False, indistinguishable from "the model
+    # was never asked" — but this endpoint's only caller of that branch is
+    # get_llm_client() returning None because construction genuinely failed
+    # (e.g. an unconfigured/misconfigured provider). Full request-path
+    # regression: that must surface as used_fallback=True, not False.
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: None)
+
+    resp = _client().post("/intake/instructions", json={"step": "demographics"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == _STEP_TEMPLATES["demographics"]
+    assert body["used_fallback"] is True
+
+
+# --- safe logging: only step/attempts/used_fallback/elapsed, never PHI -----
+
+
+# --- Codex review (2026-08-08, PR #24, medium): a stalled provider must
+# degrade to the template well before the gateway's fixed 30s downstream
+# timeout could 502 the caller — never hang the request thread waiting on a
+# slow/retried provider call for an optional helper endpoint.
+
+
+def test_provider_timeout_degrades_quickly_to_the_template(monkeypatch):
+    stalled_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ProviderTimeoutError("provider stalled")]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: stalled_client)
+
+    started = time.time()
+    resp = _client().post("/intake/instructions", json={"step": "demographics"}, headers=_headers())
+    elapsed = time.time() - started
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["used_fallback"] is True
+    assert body["summary"]
+    # Well under the gateway's fixed 30s downstream timeout — this asserts
+    # the request-handling path itself never blocks on the provider, not a
+    # real 8s wait (FakeProvider raises synchronously, no real I/O).
+    assert elapsed < 1.0
+
+
+def test_non_llmclienterror_provider_failure_returns_200_with_template_not_5xx(monkeypatch):
+    # Codex review (2026-08-09, PR #24, medium): a real vendor provider can
+    # fail in ways libs.llm_client's adapters don't normalize to
+    # LLMClientError (e.g. a lazy SDK import failure). Full request-path
+    # regression: this must never surface as a 502/500 to the caller.
+    real_provider_shaped_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ModuleNotFoundError("No module named 'openai'")]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: real_provider_shaped_client)
+
+    resp = _client().post("/intake/instructions", json={"step": "insurance"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["used_fallback"] is True
+    assert body["summary"]
+
+
+def test_endpoint_never_returns_anything_outside_the_pre_approved_variants(monkeypatch):
+    # Codex review (2026-08-09, PR #24, two rounds): free text validated by a
+    # non-empty check, then by a length cap + substring denylist, both proved
+    # unsound against paraphrase. The model's only possible output is now
+    # which pre-approved variant to show (libs/intake_instructions/composer.py
+    # ::_VariantSelection) — full request-path regression: whatever the model
+    # selects, the returned summary is always exactly one of this step's own
+    # server-authored variants, never arbitrary model-written text.
+    scripted_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ProviderResponse(text=json.dumps({"variant_index": 1}), input_tokens=1, output_tokens=1)]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: scripted_client)
+
+    resp = _client().post("/intake/instructions", json={"step": "consents"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] in _STEP_VARIANTS["consents"]
+    assert body["used_fallback"] is False
+
+
+def test_endpoint_falls_back_to_template_on_an_out_of_range_selection(monkeypatch):
+    # An adversarial/drifted attempt to select something outside the known
+    # variant set must degrade to the template exactly like any other
+    # invalid response — there is no way for this to surface arbitrary text.
+    scripted_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ProviderResponse(text=json.dumps({"variant_index": 999}), input_tokens=1, output_tokens=1)]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: scripted_client)
+
+    resp = _client().post("/intake/instructions", json={"step": "consents"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == _STEP_TEMPLATES["consents"]
+    assert body["used_fallback"] is True
+
+
+def test_log_line_never_contains_the_composed_summary_text(caplog):
+    caplog.set_level(logging.INFO, logger=app_mod.log.name)
+
+    resp = _client().post("/intake/instructions", json={"step": "review"}, headers=_headers())
+    summary = resp.json()["summary"]
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "POST /intake/instructions ok" in log_text
+    assert "step=review" in log_text
+    assert summary not in log_text

@@ -167,10 +167,19 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db
+from instructions_wiring import get_llm_client
+from libs.intake_instructions import compose as compose_intake_instructions
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
 from models import Consent, InsuranceCoverage, Patient, PatientAccessGrant, PatientLink
-from schemas import Demographics, Insurance, IntakeRequest, IntakeResponse
+from schemas import (
+    Demographics,
+    Insurance,
+    IntakeInstructionsRequest,
+    IntakeInstructionsResponse,
+    IntakeRequest,
+    IntakeResponse,
+)
 
 log = configure(settings.service_name)
 
@@ -406,6 +415,38 @@ def create_intake(
         eligibility_job_id=eligibility_job_id,
         possible_duplicate_match=possible_duplicate_match,
     )
+
+
+@app.post("/intake/instructions", response_model=IntakeInstructionsResponse)
+def get_intake_instructions(
+    req: IntakeInstructionsRequest,
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+):
+    """Stage 1 (feature-readiness): a bounded, non-diagnostic, plain-language
+    explanation of one intake wizard step. Same gateway-only transport-trust
+    boundary as /intake (_verify_internal_token) — no patient session or
+    patient_id binding is needed here since the request carries no patient
+    data at all, only which of the four known wizard steps the caller is on
+    (schemas.IntakeInstructionsRequest / libs.intake_instructions.VALID_STEPS).
+    See libs/intake_instructions/composer.py for the prompt/template logic
+    and instructions_wiring.py for the memoized, safe LLMClient construction.
+    """
+    _verify_internal_token(x_internal_token)
+
+    started = time.time()
+    result, attempts, used_fallback = compose_intake_instructions(req.step, llm_client=get_llm_client())
+    elapsed = round(time.time() - started, 2)
+    # Safe to log in full: step is a closed-set string (schemas.py validates
+    # it against VALID_STEPS before this handler ever runs), and attempts/
+    # used_fallback/elapsed never vary with anything a patient entered.
+    log.info(
+        "POST /intake/instructions ok (step=%s, attempts=%s, used_fallback=%s, elapsed=%.2fs)",
+        req.step,
+        attempts,
+        used_fallback,
+        elapsed,
+    )
+    return IntakeInstructionsResponse(summary=result.summary, used_fallback=used_fallback)
 
 
 _INTAKE_LOG_SUMMARY_KEYS = frozenset({"correlation_id", "created_via"})

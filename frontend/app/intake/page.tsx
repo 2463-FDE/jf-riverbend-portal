@@ -7,7 +7,7 @@ import EligibilityStatus from "../components/EligibilityStatus";
 import StateCombobox from "../components/StateCombobox";
 import { IconEye, IconEyeOff } from "../components/icons";
 import { apiFetch } from "../lib/session";
-import type { IntakeResponse } from "../lib/types";
+import type { IntakeInstructionsResponse, IntakeInstructionsStep, IntakeResponse } from "../lib/types";
 
 interface Demographics {
   first_name: string;
@@ -37,6 +37,9 @@ interface Consents {
 }
 
 const STEPS = ["Demographics & Contact", "Insurance", "Consents", "Review & Submit"];
+// Stage 1 (feature-readiness): keys sent to POST /api/intake/instructions,
+// in the same order as STEPS above.
+const INSTRUCTIONS_STEPS: IntakeInstructionsStep[] = ["demographics", "insurance", "consents", "review"];
 
 export default function IntakePage() {
   const [step, setStep] = useState(0);
@@ -204,6 +207,13 @@ export default function IntakePage() {
       )}
 
       <Card title={STEPS[step]}>
+        {/* Codex review (2026-08-08, PR #24): key={step} forces React to
+            unmount/remount IntakeInstructions on every step change, resetting
+            its phase/summary state — without this, a patient who loaded the
+            demographics summary and clicked "Continue" kept seeing that same
+            text under the Insurance card. */}
+        <IntakeInstructions key={INSTRUCTIONS_STEPS[step]} step={INSTRUCTIONS_STEPS[step]} />
+
         {step === 0 && (
           <div>
             <fieldset className="rb-subsection" style={{ border: "none", margin: 0, padding: 0 }}>
@@ -223,7 +233,20 @@ export default function IntakePage() {
               </div>
               <div className="rb-field-row">
                 <SsnField id="ssn" value={demo.ssn} onChange={(v) => setDemo({ ...demo, ssn: v })}
-                  hint="Used for insurance verification only." />
+                  // Codex review (2026-08-09, PR #24, high): this said "Used
+                  // for insurance verification only" — false (grepped
+                  // services/intake-service/app.py: SSN is never sent to
+                  // eligibility-service, which uses member_id only; SSN's
+                  // actual use is the duplicate-patient match-key lookup,
+                  // see _normalize_ssn/_find_match_candidates) and directly
+                  // contradicted the new intake-instructions assistant's
+                  // demographics text on this same screen
+                  // (libs/intake_instructions/composer.py). Kept scoped to
+                  // what this field is used for at intake time — full
+                  // plaintext-storage/staff-access data-lifecycle disclosure
+                  // (adr/0002) belongs in the Notice of Privacy Practices
+                  // consent step, not a form-field hint.
+                  hint="Optional — used to check for an existing patient record, not for insurance." />
               </div>
             </fieldset>
 
@@ -364,6 +387,70 @@ export default function IntakePage() {
           )}
         </div>
       </Card>
+    </div>
+  );
+}
+
+// Stage 1 (feature-readiness): "Get plain-language summary" control for one
+// intake wizard step. Sends only `step` — never any demographics/insurance
+// field — to POST /api/intake/instructions, and renders the returned text
+// as plain text (never dangerouslySetInnerHTML) so nothing the provider
+// returns can execute in the browser.
+type InstructionsPhase = "idle" | "loading" | "success" | "unavailable";
+
+function IntakeInstructions({ step }: { step: IntakeInstructionsStep }) {
+  const [phase, setPhase] = useState<InstructionsPhase>("idle");
+  const [summary, setSummary] = useState<string | null>(null);
+
+  async function load() {
+    setPhase("loading");
+    try {
+      const res = await apiFetch("/api/intake/instructions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step }),
+      });
+      if (!res.ok) {
+        setPhase("unavailable");
+        return;
+      }
+      const data = (await res.json()) as IntakeInstructionsResponse;
+      if (!data?.summary) {
+        setPhase("unavailable");
+        return;
+      }
+      setSummary(data.summary);
+      setPhase("success");
+    } catch {
+      setPhase("unavailable");
+    }
+  }
+
+  return (
+    <div className="rb-subsection" style={{ marginBottom: 16 }}>
+      {phase === "idle" && (
+        <button type="button" className="rb-btn" onClick={load}>
+          What do I need for this step?
+        </button>
+      )}
+      {phase === "loading" && (
+        <span className="rb-muted">
+          <span className="rb-spinner" aria-hidden="true" /> Getting a plain-language summary…
+        </span>
+      )}
+      {phase === "success" && summary && (
+        <div className="rb-alert" role="status">
+          {summary}
+        </div>
+      )}
+      {phase === "unavailable" && (
+        <span className="rb-muted">
+          Couldn&apos;t load a summary right now — please ask front-desk staff if you have questions.{" "}
+          <button type="button" className="rb-btn" onClick={load}>
+            Try again
+          </button>
+        </span>
+      )}
     </div>
   );
 }

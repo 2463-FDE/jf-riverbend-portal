@@ -175,6 +175,17 @@ export interface IntakeResponse {
   eligibility_job_id?: string | null;
 }
 
+// Stage 1 (feature-readiness) — plain-language explanation of one intake
+// wizard step, served via POST /api/intake/instructions (gateway ->
+// intake-service). No patient data is sent or returned; `step` is one of
+// the four wizard steps in frontend/app/intake/page.tsx's STEPS.
+export type IntakeInstructionsStep = "demographics" | "insurance" | "consents" | "review";
+
+export interface IntakeInstructionsResponse {
+  summary: string;
+  used_fallback: boolean;
+}
+
 export interface RoiRequest {
   id: number;
   patient_id: number;

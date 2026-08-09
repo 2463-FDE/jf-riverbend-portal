@@ -1,7 +1,9 @@
 """Pydantic v2 request/response schemas for intake-service."""
 from typing import Any, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from libs.intake_instructions import VALID_STEPS
 
 # created_via is documented (models.py, schema.sql) as self_service | front_desk
 # only, but the field itself is a plain string a caller controls — see
@@ -183,3 +185,33 @@ class IntakeResponse(BaseModel):
     # has no auth dependency, so returning real patient ids would let an
     # unauthenticated caller enumerate patients via ssn/dob probing).
     possible_duplicate_match: bool = False
+
+
+# --- Stage 1 (feature-readiness): patient-friendly intake instructions -----
+#
+# Deliberately the smallest possible request shape: the caller identifies
+# which of the four known wizard steps (VALID_STEPS, shared with
+# libs.intake_instructions.composer) it's on, nothing else. There is no
+# patient_id, free-text field, or any Demographics/Insurance value here for
+# a model to ever see — extra="forbid" rejects any caller that tries to add
+# one rather than silently ignoring it.
+class IntakeInstructionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step: str
+
+    @model_validator(mode="after")
+    def _validate_step(self) -> "IntakeInstructionsRequest":
+        if self.step not in VALID_STEPS:
+            raise ValueError(f"unknown step: {self.step!r} (expected one of {sorted(VALID_STEPS)})")
+        return self
+
+
+class IntakeInstructionsResponse(BaseModel):
+    summary: str
+    # True when the model path was skipped/unavailable/rejected and the
+    # deterministic per-step template was returned instead — internal/demo
+    # visibility only; the template text is itself a complete, safe answer,
+    # so the frontend does not need to treat this differently from a
+    # model-composed response.
+    used_fallback: bool
