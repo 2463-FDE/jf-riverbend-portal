@@ -207,7 +207,12 @@ export default function IntakePage() {
       )}
 
       <Card title={STEPS[step]}>
-        <IntakeInstructions step={INSTRUCTIONS_STEPS[step]} />
+        {/* Codex review (2026-08-08, PR #24): key={step} forces React to
+            unmount/remount IntakeInstructions on every step change, resetting
+            its phase/summary state — without this, a patient who loaded the
+            demographics summary and clicked "Continue" kept seeing that same
+            text under the Insurance card. */}
+        <IntakeInstructions key={INSTRUCTIONS_STEPS[step]} step={INSTRUCTIONS_STEPS[step]} />
 
         {step === 0 && (
           <div>

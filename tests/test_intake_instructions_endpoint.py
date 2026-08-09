@@ -4,11 +4,15 @@ validation, safe logging, and the compose()/get_llm_client() wiring.
 """
 import logging
 import sys
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from conftest import load_module
+from libs.llm_client import LLMClient, LLMConfig
+from libs.llm_client.errors import ProviderTimeoutError
+from libs.llm_client.providers.fake_provider import FakeProvider
 
 app_mod = load_module("services/intake-service/app.py", "intake_app_instructions")
 # app.py's `from instructions_wiring import get_llm_client` caches the module
@@ -128,6 +132,34 @@ def test_default_provider_returns_the_template_and_marks_fallback_used(monkeypat
 
 
 # --- safe logging: only step/attempts/used_fallback/elapsed, never PHI -----
+
+
+# --- Codex review (2026-08-08, PR #24, medium): a stalled provider must
+# degrade to the template well before the gateway's fixed 30s downstream
+# timeout could 502 the caller — never hang the request thread waiting on a
+# slow/retried provider call for an optional helper endpoint.
+
+
+def test_provider_timeout_degrades_quickly_to_the_template(monkeypatch):
+    stalled_client = LLMClient(
+        config=LLMConfig(provider="fake", timeout_seconds=8.0, max_retries=0),
+        provider=FakeProvider([ProviderTimeoutError("provider stalled")]),
+        sleep=lambda _s: None,
+    )
+    monkeypatch.setattr(app_mod, "get_llm_client", lambda: stalled_client)
+
+    started = time.time()
+    resp = _client().post("/intake/instructions", json={"step": "demographics"}, headers=_headers())
+    elapsed = time.time() - started
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["used_fallback"] is True
+    assert body["summary"]
+    # Well under the gateway's fixed 30s downstream timeout — this asserts
+    # the request-handling path itself never blocks on the provider, not a
+    # real 8s wait (FakeProvider raises synchronously, no real I/O).
+    assert elapsed < 1.0
 
 
 def test_log_line_never_contains_the_composed_summary_text(caplog):
