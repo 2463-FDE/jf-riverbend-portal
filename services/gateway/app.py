@@ -203,6 +203,19 @@ def proxy_intake(payload: dict, session: dict = Depends(require_session)):
     return _post("intake", "/intake", payload, headers=headers, forward_status=True)
 
 
+@app.post("/intake/instructions")
+def proxy_intake_instructions(payload: dict, session: dict = Depends(require_session)):
+    """Stage 1 (feature-readiness): patient-friendly intake-step explanation.
+    Same X-Internal-Token transport-trust pattern as proxy_intake — proves
+    the call came through the gateway's own require_session check, not a
+    direct caller hitting intake-service's published host port. No patient
+    data crosses this path; the only body field is which of the four known
+    wizard steps the caller is on (intake-service validates it against a
+    closed set and rejects anything else)."""
+    headers = {"X-Internal-Token": settings.internal_service_token}
+    return _post("intake", "/intake/instructions", payload, headers=headers, forward_status=True)
+
+
 @app.get("/eligibility")
 def proxy_eligibility(insurance_id: str, session: dict = Depends(require_session)):
     return _get("eligibility", "/eligibility", params={"insurance_id": insurance_id})

@@ -362,6 +362,30 @@ picking a default. **No live Bedrock credential exists in this repo**
 until a real model id/region/credential is configured (see ADR 0005,
 "Unresolved").
 
+### Local Ollama setup for the intake-instructions demo (feature-readiness Stage 1)
+`POST /intake/instructions` (services/intake-service/app.py, backed by
+`libs/intake_instructions`) explains one new-patient wizard step in plain
+language. It reads the same `LLM_PROVIDER`/`OLLAMA_*` vars as everything else
+in `libs/llm_client` — see `.env.example`'s "Stage 1 (feature-readiness)"
+note for the exact `OLLAMA_BASE_URL` value a container needs versus a
+host-run process. With the repo's default `LLM_PROVIDER=fake`, this endpoint
+always returns its deterministic per-step template — a real local model is
+optional and only needed to see the AI-composed path:
+
+```bash
+ollama list                 # confirm a model is already pulled
+ollama pull llama3.2:3b     # if not — pick any small instruct model you have
+```
+
+Set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL` to that tag in `.env`, restart
+intake-service, then use the intake page's "What do I need for this step?"
+button. A stopped/unreachable Ollama server, or an unset/`changeme`
+`OLLAMA_MODEL`, degrades to the same deterministic template rather than
+failing the request — see `instructions_wiring.py::get_llm_client`. This is a
+local development/demo dependency only, not a hosted production service —
+see the Stage 1 PR's "Demo scope and known limitations" for what a real
+deployment would still need.
+
 ### PHI-safe diagnostics
 When debugging any of the above, only ever log/paste the job's `error` field
 (an exception TYPE name) and `status`/timestamps — never `insurance_id`, a

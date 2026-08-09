@@ -7,7 +7,7 @@ import EligibilityStatus from "../components/EligibilityStatus";
 import StateCombobox from "../components/StateCombobox";
 import { IconEye, IconEyeOff } from "../components/icons";
 import { apiFetch } from "../lib/session";
-import type { IntakeResponse } from "../lib/types";
+import type { IntakeInstructionsResponse, IntakeInstructionsStep, IntakeResponse } from "../lib/types";
 
 interface Demographics {
   first_name: string;
@@ -37,6 +37,9 @@ interface Consents {
 }
 
 const STEPS = ["Demographics & Contact", "Insurance", "Consents", "Review & Submit"];
+// Stage 1 (feature-readiness): keys sent to POST /api/intake/instructions,
+// in the same order as STEPS above.
+const INSTRUCTIONS_STEPS: IntakeInstructionsStep[] = ["demographics", "insurance", "consents", "review"];
 
 export default function IntakePage() {
   const [step, setStep] = useState(0);
@@ -204,6 +207,8 @@ export default function IntakePage() {
       )}
 
       <Card title={STEPS[step]}>
+        <IntakeInstructions step={INSTRUCTIONS_STEPS[step]} />
+
         {step === 0 && (
           <div>
             <fieldset className="rb-subsection" style={{ border: "none", margin: 0, padding: 0 }}>
@@ -364,6 +369,70 @@ export default function IntakePage() {
           )}
         </div>
       </Card>
+    </div>
+  );
+}
+
+// Stage 1 (feature-readiness): "Get plain-language summary" control for one
+// intake wizard step. Sends only `step` — never any demographics/insurance
+// field — to POST /api/intake/instructions, and renders the returned text
+// as plain text (never dangerouslySetInnerHTML) so nothing the provider
+// returns can execute in the browser.
+type InstructionsPhase = "idle" | "loading" | "success" | "unavailable";
+
+function IntakeInstructions({ step }: { step: IntakeInstructionsStep }) {
+  const [phase, setPhase] = useState<InstructionsPhase>("idle");
+  const [summary, setSummary] = useState<string | null>(null);
+
+  async function load() {
+    setPhase("loading");
+    try {
+      const res = await apiFetch("/api/intake/instructions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step }),
+      });
+      if (!res.ok) {
+        setPhase("unavailable");
+        return;
+      }
+      const data = (await res.json()) as IntakeInstructionsResponse;
+      if (!data?.summary) {
+        setPhase("unavailable");
+        return;
+      }
+      setSummary(data.summary);
+      setPhase("success");
+    } catch {
+      setPhase("unavailable");
+    }
+  }
+
+  return (
+    <div className="rb-subsection" style={{ marginBottom: 16 }}>
+      {phase === "idle" && (
+        <button type="button" className="rb-btn" onClick={load}>
+          What do I need for this step?
+        </button>
+      )}
+      {phase === "loading" && (
+        <span className="rb-muted">
+          <span className="rb-spinner" aria-hidden="true" /> Getting a plain-language summary…
+        </span>
+      )}
+      {phase === "success" && summary && (
+        <div className="rb-alert" role="status">
+          {summary}
+        </div>
+      )}
+      {phase === "unavailable" && (
+        <span className="rb-muted">
+          Couldn&apos;t load a summary right now — please ask front-desk staff if you have questions.{" "}
+          <button type="button" className="rb-btn" onClick={load}>
+            Try again
+          </button>
+        </span>
+      )}
     </div>
   );
 }
