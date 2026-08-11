@@ -9,8 +9,11 @@
 -- Authentication
 -- ---------------------------------------------------------------------------
 -- Portal + staff logins. Passwords are PBKDF2 (django-style string). Note:
--- there is exactly one role for everyone (see config/roles.yaml) and sessions
--- issued at login never expire (see services/gateway/auth.yaml).
+-- there is exactly one role for everyone (see config/roles.yaml) — sessions
+-- now carry both an idle and an absolute Redis TTL (production-readiness
+-- Stage 1; see services/gateway/security.py), they no longer live forever.
+-- mfa_secret/mfa_enrolled_at (016_user_mfa.sql) back a TOTP second factor,
+-- gated by config/roles.yaml's mfa_required — see services/gateway/mfa.py.
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
@@ -19,7 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
     role          TEXT NOT NULL DEFAULT 'staff',   -- single role for everyone
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     last_login_at TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    mfa_secret      TEXT,
+    mfa_enrolled_at TIMESTAMPTZ
 );
 
 -- ---------------------------------------------------------------------------

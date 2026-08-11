@@ -44,6 +44,12 @@ class Settings:
     # ABSOLUTE_SESSION_TIMEOUT_SECONDS.
     absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "86400"))
 
+    # Production-readiness Stage 1 item 3: how long a pending MFA challenge
+    # (issued after password verification, before the TOTP code is checked)
+    # stays valid. Short on purpose — this is a live login attempt, not a
+    # session. Override with MFA_CHALLENGE_TIMEOUT_SECONDS.
+    mfa_challenge_timeout_seconds = int(os.getenv("MFA_CHALLENGE_TIMEOUT_SECONDS", "300"))
+
     @property
     def db_url(self) -> str:
         return (

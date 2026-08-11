@@ -5,3 +5,8 @@ redis==5.2.1
 pydantic==2.10.4
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
+
+# production-readiness Stage 1: config/roles.yaml loader (roles_config.py)
+# and TOTP second factor (mfa.py).
+PyYAML==6.0.2
+pyotp==2.10.0
