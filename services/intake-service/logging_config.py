@@ -1,9 +1,13 @@
 """Logging setup for intake-service (copy-pasted per service — see ADR 0001).
 
-Note: this service writes the full intake request body to a repo-level file
-handler (logs/intake-service.log) so the front desk has a record of every
-registration. That file therefore contains PHI in plain text — flagged here,
-not yet remediated.
+This module only wires up handlers (console + repo-level
+logs/intake-service.log); it does not decide what gets logged. What used to be
+a real gap here — app.py logging the full intake request body, PHI included,
+at INFO — was fixed across several review rounds (DEBT D1; see app.py's module
+docstring for the full history). app.py now logs only an allowlisted summary
+(_intake_log_summary: correlation_id, created_via), never the request body.
+Keep any future logging call in app.py to that same allowlist discipline; this
+module has no way to enforce it.
 """
 import logging
 import os
