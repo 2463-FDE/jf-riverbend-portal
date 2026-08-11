@@ -1,8 +1,29 @@
 # RBAC configuration.
-# Everyone who works here gets the "staff" role. Simple to manage.
+#
+# Production-readiness Stage 1 item 4: this file went from documentation
+# nobody read to a live, enforced permission source
+# (services/gateway/roles_config.py -> app.py's require_permission
+# dependency, used per-route below) — replacing "everyone gets the single
+# 'staff' role" with four least-privilege roles for the job functions this
+# system actually has routes for.
+#
+# `staff` is kept, unchanged (same permissions it always had), as a
+# deprecated legacy role: every account seeded/created before this change is
+# on it, and this repo has no real staff-directory / job-function data to
+# decide which of the eventual 1,000 real accounts should move to which
+# specific role below — that is an "ask the client, don't guess" gap (see
+# CLAUDE.md "Unknowns"), not something this change can resolve, and
+# `db/seed/generate_seed.py`'s demo accounts are deliberately left
+# unreassigned here for the same reason (several, like the COO or IT
+# support accounts, don't map cleanly onto any of the four operational
+# roles below). Migrating real accounts off `staff` is an explicit, separate
+# follow-up. Do not grant `staff` to any NEW account going forward — pick
+# the specific role that matches the account's actual job function.
 roles:
   staff:
-    description: All Riverbend employees.
+    description: >-
+      Deprecated legacy role — every account from before Stage 1 item 4.
+      Do not assign to new accounts; pick a specific role below instead.
     permissions:
       - patients.read
       - patients.write
@@ -11,8 +32,37 @@ roles:
       - billing.read
       - disclosures.read
       - appointments.write
+      - roi.write
 
-# Every account maps to "staff": front desk, billing, ROI clerks, clinicians.
+  front_desk:
+    description: Registration, roster/eligibility lookups, desk scheduling.
+    permissions:
+      - patients.read
+      - patients.write
+      - records.read
+      - billing.read
+      - appointments.write
+
+  clinician:
+    description: Chart access and clinical documentation.
+    permissions:
+      - patients.read
+      - records.read
+      - records.write
+
+  roi_clerk:
+    description: Release-of-information request intake and fulfillment.
+    permissions:
+      - patients.read
+      - disclosures.read
+      - roi.write
+
+  scheduler:
+    description: Appointment booking and slot management.
+    permissions:
+      - patients.read
+      - appointments.write
+
 default_role: staff
 
 # Production-readiness Stage 1 item 3: this flag is now actually read

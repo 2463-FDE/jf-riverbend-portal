@@ -142,11 +142,23 @@ the remaining open items (its Stage 1/2/3 references below point there).
   `roi-service` have no equivalent check and are still fully trusted blind.
   `docker-compose.yml` still publishes every domain service's port to the
   host, not just the gateway's.
-- **Sessions now expire on an idle Redis TTL** (`services/gateway/config.py`,
-  default 8h, refreshed per request) — an absolute/max-lifetime cap is still
-  open. Every account still has a single flat role with no per-action
-  authorization, and there is still no MFA. Production-readiness Stage 1
-  closes all three.
+- ~~Sessions never expire~~ **Resolved.** `services/gateway/config.py` now
+  enforces both an idle TTL (default 8h, refreshed per request) and an
+  absolute lifetime cap (default 24h, checked regardless of activity).
+- **MFA mechanism exists but is not enforced.** A real, tested TOTP second
+  factor exists (`services/gateway/mfa.py`, `app.py`'s `/login`/`/login/mfa`)
+  gated by `config/roles.yaml`'s `mfa_required`, which stays `false` —
+  enforcing it repo-wide needs a coordinated rollout (frontend enrollment UI,
+  a plan for every existing account's first post-flip login), left as an
+  explicit follow-up rather than done here.
+- ~~Every account has a single flat role with no per-action authorization~~
+  **Partially resolved.** Four real, enforced least-privilege roles now exist
+  (`config/roles.yaml`: `front_desk`, `clinician`, `roi_clerk`, `scheduler`
+  — see `services/gateway/roles_config.py`/`app.py`'s `require_permission`).
+  The legacy `staff` role keeps its original full permission set, and every
+  existing/seeded account is still on it; migrating real accounts to a
+  specific role needs staff-directory/job-function data this repo doesn't
+  have — an open question for the client, not guessed here.
 - **Secrets are committed** (`.env` is tracked); CI has no secret/vuln scan.
   Still open; production-readiness Stage 1 closes the CI-scan half — `.env`
   itself stays committed per standing instruction, flagged as a pre-go-live

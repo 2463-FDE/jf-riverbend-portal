@@ -53,6 +53,11 @@ the remaining open items.
   exercising `_find_match_candidates`' exact/partial match-blocking logic in
   `services/intake-service/app.py` itself. Input normalization coverage
   remains absent.
-- Security/auth path coverage has improved — IDOR is now regression-tested —
-  but remains thin overall: no MFA or per-role authorization tests exist yet
-  (tracked as RIV-201; production-readiness Stage 1 adds both).
+- Security/auth path coverage has improved (tracked as RIV-201): IDOR is
+  regression-tested, `test_gateway_mfa.py`/`test_gateway_login_route.py`
+  cover the TOTP flow, and `test_gateway_rbac.py` proves each new
+  least-privilege role (`front_desk`/`clinician`/`roi_clerk`/`scheduler`) is
+  both denied a permission the old flat `staff` role granted and can still
+  reach its own permitted routes. Still no test exercises a real staff
+  account actually migrated off the legacy `staff` role — none exist yet to
+  test (see `config/roles.yaml`'s comment on that open follow-up).

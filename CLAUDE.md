@@ -144,13 +144,31 @@ catch-up branches — each is labeled. See
 `docs/planning/production-readiness-plan-08-10-2026.md` for the plan closing the
 remaining open items (its Stage 1/2/3 references below point there).
 
-- Sessions now expire on an idle Redis TTL (`services/gateway/config.py`'s
-  `session_timeout_seconds`, default 8h, refreshed on each authenticated
-  request) — `auth.yaml`'s `SESSION_TIMEOUT: never` is stale text, not current
-  behavior. An absolute/max-lifetime session cap is still open. There is still
-  no MFA, and every account still has a single flat `staff` role
-  (`config/roles.yaml`) with no per-action authorization. Production-readiness
-  Stage 1 closes all three (absolute TTL, MFA, least-privilege roles).
+- ~~Sessions in Redis never expire~~ **Resolved.** `services/gateway/config.py`
+  now enforces both an idle TTL (`session_timeout_seconds`, default 8h,
+  refreshed per request) and an absolute lifetime cap
+  (`absolute_session_timeout_seconds`, default 24h, checked at every lookup
+  regardless of activity) — `auth.yaml`'s `SESSION_TIMEOUT: never` was stale
+  text even before this cap existed.
+- **MFA mechanism exists but is not enforced.** A real, tested TOTP second
+  factor exists (`services/gateway/mfa.py`, `roles_config.py`'s
+  `mfa_required`, `app.py`'s `/login` + `/login/mfa`) but `mfa_required`
+  stays `false` — flipping it repo-wide would force every existing account
+  into enrollment with no frontend UI built for it, and break the
+  integration suite's single-step login helpers. Enforcing it is an explicit,
+  separate rollout decision (see `config/roles.yaml`'s comment and the Stage
+  1 PR).
+- ~~Every account has a single flat `staff` role — no per-action
+  authorization~~ **Partially resolved.** `config/roles.yaml` now defines
+  four real, enforced least-privilege roles (`front_desk`, `clinician`,
+  `roi_clerk`, `scheduler` — see `services/gateway/roles_config.py`'s
+  `permissions_for` and `app.py`'s `require_permission` dependency, which
+  gates every proxied route). `staff` is kept as a deprecated legacy role
+  with its original full permission set, and **every existing/seeded account
+  is still on it** — this repo has no real staff-directory/job-function data
+  to decide which of the eventual 1,000 real accounts should move to which
+  specific role, so migrating accounts off `staff` is a separate, explicit
+  follow-up (an "ask the client" gap, not something guessed here).
 - ~~**IDOR:** `GET /patients/{id}/records` doesn't bind the session to the
   requested `patient_id`~~ **Resolved** (Week 4 catch-up, RIV-201/DEBT D11):
   chart reads now go through `services/records-service/patient_access_gate.py`

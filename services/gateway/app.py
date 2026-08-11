@@ -4,9 +4,16 @@ gateway — backend-for-frontend / API gateway.
 The Next.js portal talks only to this service; it fans out to the internal
 FastAPI services and owns login/sessions.
 
-Inherited shortcomings (left as-is from the handoff):
-  * One role for everyone; no per-action authorization beyond "is logged in"
-    (production-readiness Stage 1 item 4 — see config/roles.yaml).
+Inherited shortcoming, partially resolved (production-readiness Stage 1 item
+4): every route used to accept any authenticated "staff" session regardless
+of role. require_permission (below) now gates each proxied route on a real
+permission from config/roles.yaml, and four least-privilege roles
+(front_desk/clinician/roi_clerk/scheduler) exist and are enforced — but
+every existing/seeded account is still on the deprecated `staff` role, which
+keeps its original full permission set. Migrating real accounts onto a
+specific role is a separate, explicit follow-up (config/roles.yaml's
+comment) — this repo has no staff-directory/job-function data to do that
+migration itself.
 
 PR #23 + production-readiness Stage 1: sessions used to never expire; they now
 carry both an idle Redis TTL (refreshed per request) and an absolute lifetime
@@ -143,6 +150,30 @@ def require_session(authorization: Optional[str] = Header(default=None)) -> dict
     return sess
 
 
+def require_permission(permission: str):
+    """Production-readiness Stage 1 item 4: per-route authorization on top
+    of require_session's "is this any authenticated staff session" check.
+    Every account maps to a role (config/roles.yaml); an authenticated
+    session whose role lacks `permission` gets 403, not the route's data —
+    same fail-closed posture as an unknown role (roles_config.permissions_for
+    returns no permissions for a role that isn't defined at all).
+
+    Returns a dependency, not a session directly, so it drops into a route
+    signature exactly where `Depends(require_session)` used to be:
+    `session: dict = Depends(require_permission("patients.write"))`.
+    """
+
+    def _check(session: dict = Depends(require_session)) -> dict:
+        role = session.get("role")
+        if permission not in roles_config.permissions_for(role):
+            raise HTTPException(
+                status_code=403, detail=f"role '{role}' lacks permission '{permission}'"
+            )
+        return session
+
+    return _check
+
+
 @app.get("/healthz")
 def healthz():
     if not _internal_token_is_configured():
@@ -264,7 +295,7 @@ def me(session: dict = Depends(require_session)):
 # intake / eligibility
 # --------------------------------------------------------------------------- #
 @app.post("/intake")
-def proxy_intake(payload: dict, session: dict = Depends(require_session)):
+def proxy_intake(payload: dict, session: dict = Depends(require_permission("patients.write"))):
     # PR #20 round-8 review: forward_status=True — the old default silently
     # flattened intake-service's 409 duplicate-patient response into a bare
     # 200, so the frontend read it as a successful submission with no
@@ -304,36 +335,36 @@ def proxy_intake_instructions(payload: dict, session: dict = Depends(require_ses
 
 
 @app.get("/eligibility")
-def proxy_eligibility(insurance_id: str, session: dict = Depends(require_session)):
+def proxy_eligibility(insurance_id: str, session: dict = Depends(require_permission("billing.read"))):
     return _get("eligibility", "/eligibility", params={"insurance_id": insurance_id})
 
 
 # --------------------------------------------------------------------------- #
 # Stage 3: async eligibility job status/retry + visit-scoped assistant turns
 #
-# Same auth posture as every other route here: Depends(require_session) only
-# — no new unauthenticated internal-service exposure is introduced.
-# proxy_eligibility_job_status/proxy_eligibility_job_retry below still carry
-# the SAME limitation as the rest of the gateway: a valid session is
-# required, but it is never checked against the specific job_id being
-# requested (see the IDOR note on proxy_records above) because every account
-# maps to the single flat "staff" role (config/roles.yaml) — there is no
-# per-action authorization to scope this to. That is documented, existing
-# debt (RIV-201), not something this stage widens or attempts to fix.
+# proxy_eligibility_job_status/proxy_eligibility_job_retry below now require
+# require_permission("billing.read") (production-readiness Stage 1 item 4),
+# not just any authenticated session — but that is PER-ACTION authorization
+# (does this role do billing lookups at all), not PER-RESOURCE authorization:
+# neither route checks that job_id actually belongs to a patient/visit this
+# caller is authorized for. Any billing.read-permitted caller can still read
+# or retry ANY job_id — the same category of gap as RIV-201 (see the IDOR
+# note on proxy_records above), just not the one item 4 closes. Documented,
+# existing debt, not something this stage widens or attempts to fix.
 #
 # proxy_visit_message below is the one exception (Stage 2, feature-
 # readiness): visit_id IS now checked against the caller's authorized
 # patients — see visit_authorization.py.
 # --------------------------------------------------------------------------- #
 @app.get("/eligibility/jobs/{job_id}")
-def proxy_eligibility_job_status(job_id: str, session: dict = Depends(require_session)):
+def proxy_eligibility_job_status(job_id: str, session: dict = Depends(require_permission("billing.read"))):
     return _get(
         "eligibility", f"/eligibility/jobs/{job_id}", headers=_correlation_headers(), forward_status=True
     )
 
 
 @app.post("/eligibility/jobs/{job_id}/retry")
-def proxy_eligibility_job_retry(job_id: str, session: dict = Depends(require_session)):
+def proxy_eligibility_job_retry(job_id: str, session: dict = Depends(require_permission("billing.read"))):
     return _post(
         "eligibility", f"/eligibility/jobs/{job_id}/retry", {}, headers=_correlation_headers(), forward_status=True
     )
@@ -343,7 +374,7 @@ def proxy_eligibility_job_retry(job_id: str, session: dict = Depends(require_ses
 def proxy_visit_message(
     visit_id: str,
     payload: dict,
-    session: dict = Depends(require_session),
+    session: dict = Depends(require_permission("patients.read")),
     db: Session = Depends(get_db),
 ):
     """Stage 2 (feature-readiness): unlike every route above, this one is no
@@ -404,7 +435,7 @@ def proxy_visit_message(
 # --------------------------------------------------------------------------- #
 @app.get("/patients")
 def proxy_patients(
-    session: dict = Depends(require_session),
+    session: dict = Depends(require_permission("patients.read")),
     q: Optional[str] = None,
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -441,7 +472,7 @@ def proxy_patients(
 # forward_status=True so that 401/403/404/503 from records-service reach the
 # frontend as-is instead of being silently flattened into a 200.
 @app.get("/patients/{patient_id}")
-def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
+def proxy_patient(patient_id: int, session: dict = Depends(require_permission("patients.read"))):
     headers = _correlation_headers()
     headers["X-Actor-Id"] = session.get("user_id") or ""
     headers["X-Actor-Name"] = session.get("username") or ""
@@ -450,7 +481,7 @@ def proxy_patient(patient_id: int, session: dict = Depends(require_session)):
 
 
 @app.get("/patients/{patient_id}/records")
-def proxy_records(patient_id: int, session: dict = Depends(require_session)):
+def proxy_records(patient_id: int, session: dict = Depends(require_permission("records.read"))):
     headers = _correlation_headers()
     headers["X-Actor-Id"] = session.get("user_id") or ""
     headers["X-Actor-Name"] = session.get("username") or ""
@@ -459,7 +490,7 @@ def proxy_records(patient_id: int, session: dict = Depends(require_session)):
 
 
 @app.get("/records/search")
-def proxy_search(q: str, session: dict = Depends(require_session)):
+def proxy_search(q: str, session: dict = Depends(require_permission("records.read"))):
     # Week 4 catch-up: unlike /patients above, this returns actual clinical
     # note content (record bodies/snippets) across the whole patient
     # population, keyed only by a free-text guess — an alternate IDOR path
@@ -503,7 +534,7 @@ def proxy_search(q: str, session: dict = Depends(require_session)):
 def proxy_patient_view(
     patient_id: int,
     purpose: Optional[str] = None,
-    session: dict = Depends(require_session),
+    session: dict = Depends(require_permission("records.read")),
 ):
     headers = _correlation_headers()
     headers["X-Actor-Id"] = session.get("user_id") or ""
@@ -526,7 +557,7 @@ def proxy_patient_view(
 @app.get("/patients/{patient_id}/reconciliation")
 def proxy_patient_reconciliation(
     patient_id: int,
-    session: dict = Depends(require_session),
+    session: dict = Depends(require_permission("records.read")),
 ):
     # Consolidation review (PR #22): records-service scopes reconciliation to the
     # caller's grants keyed on the stable users.id — forward X-Actor-Id=user_id
@@ -558,12 +589,12 @@ def proxy_slots(
 
 
 @app.get("/appointments")
-def proxy_list_appointments(patient_id: int, session: dict = Depends(require_session)):
+def proxy_list_appointments(patient_id: int, session: dict = Depends(require_permission("patients.read"))):
     return _get("scheduling", "/appointments", params={"patient_id": patient_id})
 
 
 @app.post("/appointments")
-def proxy_book(payload: dict, session: dict = Depends(require_session)):
+def proxy_book(payload: dict, session: dict = Depends(require_permission("appointments.write"))):
     # Stage 4 (Week 5, RIV-175): forward_status=True, same round-8 fix as
     # proxy_intake — the default silently flattened scheduling-service's
     # real 201 into a bare 200, which also would have masked a 422 (e.g. a
@@ -572,7 +603,7 @@ def proxy_book(payload: dict, session: dict = Depends(require_session)):
 
 
 @app.post("/appointments/{appointment_id}/cancel")
-def proxy_cancel(appointment_id: int, session: dict = Depends(require_session)):
+def proxy_cancel(appointment_id: int, session: dict = Depends(require_permission("appointments.write"))):
     return _post("scheduling", f"/appointments/{appointment_id}/cancel", {})
 
 
@@ -580,17 +611,17 @@ def proxy_cancel(appointment_id: int, session: dict = Depends(require_session)):
 # release of information
 # --------------------------------------------------------------------------- #
 @app.get("/roi/requests")
-def proxy_roi_list(session: dict = Depends(require_session), patient_id: Optional[int] = None):
+def proxy_roi_list(session: dict = Depends(require_permission("disclosures.read")), patient_id: Optional[int] = None):
     return _get("roi", "/roi/requests", params={"patient_id": patient_id})
 
 
 @app.post("/roi/requests")
-def proxy_roi_create(payload: dict, session: dict = Depends(require_session)):
+def proxy_roi_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
     return _post("roi", "/roi/requests", payload)
 
 
 @app.post("/roi/requests/{request_id}/fulfill")
-def proxy_roi_fulfill(request_id: int, session: dict = Depends(require_session)):
+def proxy_roi_fulfill(request_id: int, session: dict = Depends(require_permission("roi.write"))):
     return _post("roi", f"/roi/requests/{request_id}/fulfill", {})
 
 
@@ -598,7 +629,7 @@ def proxy_roi_fulfill(request_id: int, session: dict = Depends(require_session))
 # interop
 # --------------------------------------------------------------------------- #
 @app.post("/hl7/ingest")
-def proxy_hl7(payload: dict, session: dict = Depends(require_session)):
+def proxy_hl7(payload: dict, session: dict = Depends(require_permission("records.write"))):
     return _post("interop", "/hl7/ingest", payload)
 
 

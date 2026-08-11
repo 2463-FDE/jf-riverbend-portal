@@ -1,9 +1,10 @@
-"""Loader for config/roles.yaml — production-readiness Stage 1 item 3.
+"""Loader for config/roles.yaml — production-readiness Stage 1, items 3-4.
 
-Nothing in this repo read this file before now — it was pure documentation
-of an intent the code didn't enforce. This module makes mfa_required a real,
-live setting. (Stage 1 item 4 adds per-role permission enforcement on top of
-this same file — expect this module to grow then.)
+Nothing in this repo read this file before Stage 1 item 3 — it was pure
+documentation of an intent the code didn't enforce. mfa_required (item 3)
+was the first real setting; permissions_for (item 4) is the second —
+app.py's require_permission dependency uses it to gate routes per-role
+instead of "any authenticated staff session" for everything.
 
 Parsed once per process and cached; call reload() (tests only) to force a
 re-read after changing the file on disk.
@@ -34,3 +35,16 @@ def reload() -> None:
 
 def mfa_required() -> bool:
     return bool(_load().get("mfa_required", False))
+
+
+def roles() -> dict:
+    return _load().get("roles", {})
+
+
+def permissions_for(role: str) -> set:
+    """An unknown role gets no permissions — fail closed, not open, for a
+    role string that doesn't match anything defined in roles.yaml."""
+    role_def = roles().get(role)
+    if not role_def:
+        return set()
+    return set(role_def.get("permissions", []))
