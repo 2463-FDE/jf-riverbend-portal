@@ -36,6 +36,14 @@ class Settings:
     # override with SESSION_TIMEOUT_SECONDS.
     session_timeout_seconds = int(os.getenv("SESSION_TIMEOUT_SECONDS", "28800"))
 
+    # Production-readiness Stage 1: the idle TTL above only lapses an
+    # ABANDONED session — a session used at least once per idle window lives
+    # forever, since each read refreshes it. This is a separate, absolute cap
+    # on total session lifetime regardless of activity, enforced at lookup
+    # (security.get_session), not just at creation. Default 24h; override with
+    # ABSOLUTE_SESSION_TIMEOUT_SECONDS.
+    absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "86400"))
+
     @property
     def db_url(self) -> str:
         return (

@@ -62,22 +62,25 @@ class _FakeRedis:
 def test_create_session_carries_user_id_and_sets_ttl(monkeypatch):
     fake = _FakeRedis()
     monkeypatch.setattr(security, "_redis", lambda: fake)
+    monkeypatch.setattr(security, "_now", lambda: 1000.0)
 
     token = security.create_session(2, "frontdesk", "staff")
 
     assert token
     key, mapping = fake.hset_calls[0]
     assert key == f"session:{token}"
-    # The stable users.id is the principal; username/role are metadata.
-    assert mapping == {"user_id": "2", "username": "frontdesk", "role": "staff"}
+    # The stable users.id is the principal; username/role are metadata;
+    # created_at anchors the absolute-lifetime cap checked in get_session.
+    assert mapping == {"user_id": "2", "username": "frontdesk", "role": "staff", "created_at": "1000.0"}
     # Sessions no longer live forever — a TTL is set at creation.
     assert fake.expire_calls == [(f"session:{token}", security.settings.session_timeout_seconds)]
 
 
 def test_get_session_refreshes_ttl_on_read(monkeypatch):
     key = "session:tok"
-    fake = _FakeRedis(store={key: {"user_id": "2", "username": "frontdesk", "role": "staff"}})
+    fake = _FakeRedis(store={key: {"user_id": "2", "username": "frontdesk", "role": "staff", "created_at": "1000.0"}})
     monkeypatch.setattr(security, "_redis", lambda: fake)
+    monkeypatch.setattr(security, "_now", lambda: 1010.0)  # well inside both TTLs
 
     data = security.get_session("tok")
 
@@ -105,3 +108,54 @@ def test_get_session_rejects_and_deletes_a_legacy_session_without_user_id(monkey
     assert security.get_session("legacy") is None
     assert key in fake.deleted        # cleared, forcing a clean re-login
     assert fake.expire_calls == []    # a malformed session's TTL is never extended
+
+
+# --- absolute session lifetime cap (production-readiness Stage 1) ----------
+
+
+def test_get_session_rejects_and_deletes_a_session_missing_created_at(monkeypatch):
+    # A session issued before this fix has no created_at and can't be aged —
+    # same treatment as the missing-user_id legacy case above.
+    key = "session:pre-fix"
+    fake = _FakeRedis(store={key: {"user_id": "2", "username": "frontdesk", "role": "staff"}})
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+
+    assert security.get_session("pre-fix") is None
+    assert key in fake.deleted
+    assert fake.expire_calls == []
+
+
+def test_get_session_rejects_a_session_past_the_absolute_ttl_even_if_recently_active(monkeypatch):
+    # Idle refresh alone would keep this alive forever; the absolute cap must
+    # still cut it off once total lifetime exceeds
+    # settings.absolute_session_timeout_seconds, independent of activity.
+    key = "session:stale"
+    created_at = 1000.0
+    fake = _FakeRedis(store={
+        key: {"user_id": "2", "username": "frontdesk", "role": "staff", "created_at": str(created_at)}
+    })
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+    monkeypatch.setattr(
+        security, "_now", lambda: created_at + security.settings.absolute_session_timeout_seconds + 1
+    )
+
+    assert security.get_session("stale") is None
+    assert key in fake.deleted
+    assert fake.expire_calls == []  # never refreshed once past the absolute cap
+
+
+def test_get_session_accepts_a_session_within_the_absolute_ttl(monkeypatch):
+    key = "session:fresh"
+    created_at = 1000.0
+    fake = _FakeRedis(store={
+        key: {"user_id": "2", "username": "frontdesk", "role": "staff", "created_at": str(created_at)}
+    })
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+    monkeypatch.setattr(
+        security, "_now", lambda: created_at + security.settings.absolute_session_timeout_seconds - 1
+    )
+
+    data = security.get_session("fresh")
+
+    assert data["user_id"] == "2"
+    assert fake.expire_calls == [(key, security.settings.session_timeout_seconds)]

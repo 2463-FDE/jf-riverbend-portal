@@ -5,8 +5,13 @@ The Next.js portal talks only to this service; it fans out to the internal
 FastAPI services and owns login/sessions.
 
 Inherited shortcomings (left as-is from the handoff):
-  * Sessions never expire (see security.create_session / auth.yaml).
-  * One role for everyone; no per-action authorization beyond "is logged in".
+  * One role for everyone; no per-action authorization beyond "is logged in"
+    (production-readiness Stage 1 item 4 — see config/roles.yaml).
+
+PR #23 + production-readiness Stage 1: sessions used to never expire; they now
+carry both an idle Redis TTL (refreshed per request) and an absolute lifetime
+cap enforced regardless of activity — see security.create_session/get_session.
+auth.yaml is descriptive only, not read by this module.
 
 Week 4 catch-up: the RIV-201 IDOR ("Records fan-out forwards the caller's
 session but never binds it to the {patient_id} being requested") is fixed

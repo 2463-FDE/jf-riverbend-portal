@@ -6,13 +6,22 @@ PR #23 review round 2 (2026-08-07): sessions now carry a Redis TTL
 (settings.session_timeout_seconds), refreshed on each authenticated read, so
 an abandoned token expires instead of living forever. The session also carries
 the stable `user_id` (users.id) as the authorization principal — username is
-kept only as display/audit metadata. There is still no second factor; password
-only (MFA remains out of scope for this catch-up).
+kept only as display/audit metadata.
+
+Production-readiness Stage 1: the idle TTL alone caps only abandonment — an
+actively-used session refreshed every read never lapsed. create_session now
+also stamps `created_at`; get_session enforces settings.
+absolute_session_timeout_seconds against it before refreshing the idle TTL,
+so total session lifetime is bounded regardless of activity. A session
+missing `created_at` (issued before this fix, same as the pre-user_id
+sessions PR #23 round 3 already invalidates below) is treated as invalid,
+not grandfathered in.
 """
 import base64
 import hashlib
 import hmac
 import os
+import time
 import uuid
 
 import redis as redis_lib
@@ -51,12 +60,25 @@ def _redis():
     return _redis_client
 
 
+def _now() -> float:
+    return time.time()
+
+
 def create_session(user_id: int, username: str, role: str) -> str:
     token = uuid.uuid4().hex
     key = f"session:{token}"
     # user_id is the stable authorization principal; username/role are display
-    # + audit metadata. Redis values are strings (decode_responses=True).
-    _redis().hset(key, mapping={"user_id": str(user_id), "username": username, "role": role})
+    # + audit metadata. created_at anchors the absolute-lifetime cap enforced
+    # in get_session below. Redis values are strings (decode_responses=True).
+    _redis().hset(
+        key,
+        mapping={
+            "user_id": str(user_id),
+            "username": username,
+            "role": role,
+            "created_at": str(_now()),
+        },
+    )
     _redis().expire(key, settings.session_timeout_seconds)  # idle TTL, refreshed on read
     return token
 
@@ -78,6 +100,20 @@ def get_session(token: str) -> dict | None:
     # Validate BEFORE refreshing, so a malformed session's life is never
     # extended (the review's second point).
     if not data.get("user_id"):
+        _redis().delete(key)
+        return None
+    # Production-readiness Stage 1: a session issued before this fix has no
+    # created_at and cannot be aged — same reasoning as the user_id check
+    # above, treat it as invalid rather than grandfathering it into an
+    # unbounded lifetime.
+    created_at = data.get("created_at")
+    if not created_at:
+        _redis().delete(key)
+        return None
+    # Absolute lifetime cap: unlike the idle TTL below, this is never
+    # refreshed, so a session dies at settings.absolute_session_timeout_seconds
+    # after creation no matter how continuously it's used.
+    if _now() - float(created_at) > settings.absolute_session_timeout_seconds:
         _redis().delete(key)
         return None
     # Sliding expiration: each authenticated request refreshes the idle TTL, so
