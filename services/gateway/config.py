@@ -36,7 +36,7 @@ class Settings:
     # override with SESSION_TIMEOUT_SECONDS.
     session_timeout_seconds = int(os.getenv("SESSION_TIMEOUT_SECONDS", "28800"))
 
-    # Production-readiness Stage 1: the idle TTL above only lapses an
+    # The idle TTL above only lapses an
     # ABANDONED session — a session used at least once per idle window lives
     # forever, since each read refreshes it. This is a separate, absolute cap
     # on total session lifetime regardless of activity, enforced at lookup

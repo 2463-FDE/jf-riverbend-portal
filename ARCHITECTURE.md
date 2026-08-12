@@ -89,13 +89,12 @@ PHI columns (`ssn`, `notes`, …) are stored as plain `TEXT` (see `adr/0002`).
 These are documented honestly so the next team can prioritize. Several were
 still open as of the original handoff; some have since been closed in later
 catch-up work (cited inline below) — this list is corrected to match current
-code, not the original handoff snapshot. See
-`docs/planning/production-readiness-plan-08-10-2026.md` for the plan closing
-the remaining open items (its Stage 1/2/3 references below point there).
+code, not the original handoff snapshot. Each remaining item is marked open
+here; sequencing lives in the current delivery plan, not in this file.
 
 - **Compliance posture is self-asserted.** PHI columns are plaintext (`adr/0002`,
   unchanged); "audit" is still mutable request logging, not a tamper-evident
-  access trail. Still open; production-readiness Stage 1 closes this.
+  access trail. Still open.
 - ~~**PHI in application logs** — intake logs full request bodies at INFO.~~
   **Resolved.** `services/intake-service/app.py`'s `_intake_log_summary` now
   logs an allowlist only (`correlation_id`, `created_via`), not the request
@@ -128,14 +127,12 @@ the remaining open items (its Stage 1/2/3 references below point there).
   `db/migrations/014_patient_access_grants.sql`; see
   `tests/integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`.
 - **N+1 + full-table scans** in the records read/search paths. Still open,
-  deliberately deferred (`docs/analysis/W4-records-N-plus-one.md`, DEBT D8);
-  production-readiness Stage 3 closes this alongside the missing indexes.
+  deliberately deferred (`docs/analysis/W4-records-N-plus-one.md`, DEBT D8).
+  Needs fixing alongside the missing patient-scoped indexes, not before them.
 - **Brittle HL7 mapping** — only PID/PV1 are mapped; AL1 (allergies) and RXA
-  (medications) are silently dropped. Still open; production-readiness Stage 2
-  adds safe containment and a schema-validated mapping ADR, not a fix.
+  (medications) are silently dropped. Still open.
 - **ROI has no authorization enforcement** — disclosures go out with no recorded
-  45 CFR 164.508 authorization and no accounting trail. Still open;
-  production-readiness Stage 1 closes this.
+  45 CFR 164.508 authorization and no accounting trail. Still open.
 - **Gateway-to-service trust is now partial.** `intake-service` and
   `records-service` verify a shared `INTERNAL_SERVICE_TOKEN` (fails closed if
   unset); `eligibility-service`, `scheduling-service`, `interop-service`, and
@@ -159,9 +156,8 @@ the remaining open items (its Stage 1/2/3 references below point there).
   specific role needs staff-directory/job-function data this repo doesn't
   have — an open question for the client, not guessed here.
 - **Secrets are committed** (`.env` is tracked); CI has no secret/vuln scan.
-  Still open; production-readiness Stage 1 closes the CI-scan half — `.env`
-  itself stays committed per standing instruction, flagged as a pre-go-live
-  deployment decision, not a code change.
+  Both still open. `.env` stays committed per standing instruction and is
+  flagged as a pre-go-live deployment decision, not a code change.
 
 ## 8. Local development
 

@@ -1,4 +1,4 @@
-"""RBAC enforcement tests — production-readiness Stage 1 item 4.
+"""RBAC enforcement tests — gateway route gating.
 
 config/roles.yaml went from documentation nobody read to a live permission
 source; these prove require_permission actually blocks a role from a route

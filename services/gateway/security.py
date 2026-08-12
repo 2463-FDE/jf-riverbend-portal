@@ -8,7 +8,7 @@ an abandoned token expires instead of living forever. The session also carries
 the stable `user_id` (users.id) as the authorization principal — username is
 kept only as display/audit metadata.
 
-Production-readiness Stage 1: the idle TTL alone caps only abandonment — an
+The idle TTL alone caps only abandonment — an
 actively-used session refreshed every read never lapsed. create_session now
 also stamps `created_at`; get_session enforces settings.
 absolute_session_timeout_seconds against it before refreshing the idle TTL,
@@ -102,7 +102,7 @@ def get_session(token: str) -> dict | None:
     if not data.get("user_id"):
         _redis().delete(key)
         return None
-    # Production-readiness Stage 1: a session issued before this fix has no
+    # A session issued before this fix has no
     # created_at and cannot be aged — same reasoning as the user_id check
     # above, treat it as invalid rather than grandfathering it into an
     # unbounded lifetime.

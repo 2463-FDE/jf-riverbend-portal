@@ -4,10 +4,11 @@
 # truth (env-var driven, matching every other service's config.py in this
 # repo). Nothing here is loaded by code; keep these values in sync with
 # config.py's defaults by hand, or delete this file, rather than let it
-# describe behavior the code doesn't have (it did exactly that until
-# production-readiness Stage 1: this said "never expire" while sessions
-# already carried a Redis TTL).
+# describe behavior the code doesn't have — which it did for a long time,
+# claiming "never expire" while sessions already carried a Redis TTL.
 SESSION_IDLE_TIMEOUT_SECONDS: 28800     # 8h, refreshed on each authenticated request — SESSION_TIMEOUT_SECONDS
+                                        # NOTE: too long for a shared clinical workstation; a shorter
+                                        # value is pending the client's decision.
 SESSION_ABSOLUTE_TIMEOUT_SECONDS: 86400 # 24h cap regardless of activity — ABSOLUTE_SESSION_TIMEOUT_SECONDS
-mfa_enabled: false          # password login only — see config/roles.yaml mfa_required (production-readiness Stage 1 item 3)
+mfa_enabled: false          # password login only — no second factor exists; TOTP is parked (config/roles.yaml)
 password_min_length: 6

@@ -4,8 +4,8 @@ gateway — backend-for-frontend / API gateway.
 The Next.js portal talks only to this service; it fans out to the internal
 FastAPI services and owns login/sessions.
 
-Inherited shortcoming, partially resolved (production-readiness Stage 1 item
-4): every route used to accept any authenticated "staff" session regardless
+Inherited shortcoming, partially resolved: every route used to accept any
+authenticated "staff" session regardless
 of role. require_permission (below) now gates each proxied route on a real
 permission from config/roles.yaml, and four least-privilege roles
 (front_desk/clinician/roi_clerk/scheduler) exist and are enforced — but
@@ -15,7 +15,7 @@ specific role is a separate, explicit follow-up (config/roles.yaml's
 comment) — this repo has no staff-directory/job-function data to do that
 migration itself.
 
-PR #23 + production-readiness Stage 1: sessions used to never expire; they now
+PR #23 and a later follow-up: sessions used to never expire; they now
 carry both an idle Redis TTL (refreshed per request) and an absolute lifetime
 cap enforced regardless of activity — see security.create_session/get_session.
 auth.yaml is descriptive only, not read by this module.
@@ -142,8 +142,8 @@ def require_session(authorization: Optional[str] = Header(default=None)) -> dict
 
 
 def require_permission(permission: str):
-    """Production-readiness Stage 1 item 4: per-route authorization on top
-    of require_session's "is this any authenticated staff session" check.
+    """Per-route authorization on top of require_session's "is this any
+    authenticated staff session" check.
     Every account maps to a role (config/roles.yaml); an authenticated
     session whose role lacks `permission` gets 403, not the route's data —
     same fail-closed posture as an unknown role (roles_config.permissions_for
@@ -273,8 +273,8 @@ def proxy_eligibility(insurance_id: str, session: dict = Depends(require_permiss
 # Stage 3: async eligibility job status/retry + visit-scoped assistant turns
 #
 # proxy_eligibility_job_status/proxy_eligibility_job_retry below now require
-# require_permission("billing.read") (production-readiness Stage 1 item 4),
-# not just any authenticated session — but that is PER-ACTION authorization
+# require_permission("billing.read"), not just any authenticated session —
+# but that is PER-ACTION authorization
 # (does this role do billing lookups at all), not PER-RESOURCE authorization:
 # neither route checks that job_id actually belongs to a patient/visit this
 # caller is authorized for. Any billing.read-permitted caller can still read

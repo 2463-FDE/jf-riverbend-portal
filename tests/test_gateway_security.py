@@ -110,7 +110,7 @@ def test_get_session_rejects_and_deletes_a_legacy_session_without_user_id(monkey
     assert fake.expire_calls == []    # a malformed session's TTL is never extended
 
 
-# --- absolute session lifetime cap (production-readiness Stage 1) ----------
+# --- absolute session lifetime cap -----------------------------------------
 
 
 def test_get_session_rejects_and_deletes_a_session_missing_created_at(monkeypatch):

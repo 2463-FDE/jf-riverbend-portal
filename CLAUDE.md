@@ -140,9 +140,9 @@ repo's own `.env` is already tracked in git; do not overwrite or edit it.
 
 Verified against `ARCHITECTURE.md` §7, the ADRs, and source in this session. This
 list mixes items still genuinely open with items already closed in later
-catch-up branches — each is labeled. See
-`docs/planning/production-readiness-plan-08-10-2026.md` for the plan closing the
-remaining open items (its Stage 1/2/3 references below point there).
+catch-up branches — each is labeled. Sequencing for the remaining open items
+lives in the current delivery plan, not in this file; treat anything marked
+open here as open until the code says otherwise.
 
 - ~~Sessions in Redis never expire~~ **Resolved.** `services/gateway/config.py`
   now enforces both an idle TTL (`session_timeout_seconds`, default 8h,
@@ -198,7 +198,7 @@ remaining open items (its Stage 1/2/3 references below point there).
   host, not just the gateway's — the "gateway is the only entry point"
   description in `ARCHITECTURE.md` §1 still overstates reality for those four
   services.
-- All services share a single Postgres credential (`riverbend_app`) — no per-service least privilege (`adr/0001` names this as deferred work). Still open; production-readiness Stage 1 closes this.
+- All services share a single Postgres credential (`riverbend_app`) — no per-service least privilege (`adr/0001` names this as deferred work). Still open.
 - `.env` is committed to git (not listed in `.gitignore`). Still true by standing instruction — not touched by this or any other item; flagged separately as a pre-go-live deployment decision.
 - ~~The payer eligibility call is synchronous with no timeout, inline on the
   `/intake` path — causes slow registration (RIV-088) and a full intake freeze
@@ -213,9 +213,9 @@ remaining open items (its Stage 1/2/3 references below point there).
   `db/migrations/013_appointment_idempotency_and_uniqueness.sql` plus
   `services/scheduling-service/book.py`'s single-transaction check-and-insert;
   see `tests/integration/test_scheduling_concurrency.py`.
-- HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped. Still open; production-readiness Stage 2 adds safe containment and a schema-validated mapping ADR, not a full fix.
-- ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap); `audit_logs` is mutable request-dump logging, not a tamper-evident access trail — `docs/handover/auditor-questionnaire.md` shows staff were unable to answer a real auditor's request for a disclosure accounting / per-patient access log. Still open; production-readiness Stage 1 closes this.
-- No dependency, container image, or secret scanning in CI; images build straight from `main` with no deploy gate visible in this repo. Still open; production-readiness Stage 1 closes this.
+- HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped. Still open.
+- ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap); `audit_logs` is mutable request-dump logging, not a tamper-evident access trail — `docs/handover/auditor-questionnaire.md` shows staff were unable to answer a real auditor's request for a disclosure accounting / per-patient access log. Still open.
+- No dependency, container image, or secret scanning in CI; images build straight from `main` with no deploy gate visible in this repo. Still open.
 - Duplicate patients (RIV-160) are **partially** addressed: `/intake` now runs
   a deterministic (dob, ssn) match-key lookup before creating a patient
   (`services/intake-service/app.py::_find_match_candidates`, `adr/0004`) —

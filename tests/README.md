@@ -26,9 +26,7 @@ repo root on `sys.path` for this.
 ## Known coverage gaps (deliberate — this is an inherited codebase)
 These are NOT oversights to "fix" in the test suite; they mirror real gaps.
 Several were true at handoff and have since been closed in later catch-up
-work — corrected below to match current tests, not the handoff snapshot. See
-`docs/planning/production-readiness-plan-08-10-2026.md` for the plan closing
-the remaining open items.
+work — corrected below to match current tests, not the handoff snapshot.
 - ~~**No tests for the scheduling race / double-booking** (`book.py`). The
   happy path is exercised manually only.~~ **Resolved** (Week 5 catch-up,
   RIV-175) — `integration/test_scheduling_concurrency.py` exercises concurrent
@@ -40,11 +38,9 @@ the remaining open items.
   is a real, passing regression test (403 for an ungranted chart), not an
   xfail.
 - **HL7 allergy/medication extraction is `xfail`** — the parser silently drops
-  AL1/RXA; the test documents the gap rather than hiding it. Still open;
-  production-readiness Stage 2 promotes this into a properly labeled
-  characterization artifact, not a fix.
+  AL1/RXA; the test documents the gap rather than hiding it. Still open.
 - **No tests for ROI authorization enforcement** — none exists to test. Still
-  open; production-readiness Stage 1 closes this.
+  open.
 - **No tests for input normalization / duplicate-patient prevention** —
   **partially covered now**:
   `test_registration_user_can_review_the_seeded_duplicate_cluster` in

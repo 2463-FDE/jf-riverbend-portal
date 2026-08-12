@@ -1,7 +1,6 @@
 # RBAC configuration.
 #
-# Production-readiness Stage 1 item 4: this file went from documentation
-# nobody read to a live, enforced permission source
+# This file went from documentation nobody read to a live permission source
 # (services/gateway/roles_config.py -> app.py's require_permission
 # dependency, used per-route below) — replacing "everyone gets the single
 # 'staff' role" with four least-privilege roles for the job functions this
@@ -22,7 +21,7 @@
 roles:
   staff:
     description: >-
-      Deprecated legacy role — every account from before Stage 1 item 4.
+      Deprecated legacy role — every account predating the role split.
       Do not assign to new accounts; pick a specific role below instead.
     permissions:
       - patients.read
