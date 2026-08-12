@@ -54,10 +54,14 @@ the remaining open items.
   `services/intake-service/app.py` itself. Input normalization coverage
   remains absent.
 - Security/auth path coverage has improved (tracked as RIV-201): IDOR is
-  regression-tested, `test_gateway_mfa.py`/`test_gateway_login_route.py`
-  cover the TOTP flow, and `test_gateway_rbac.py` proves each new
-  least-privilege role (`front_desk`/`clinician`/`roi_clerk`/`scheduler`) is
-  both denied a permission the old flat `staff` role granted and can still
-  reach its own permitted routes. Still no test exercises a real staff
-  account actually migrated off the legacy `staff` role — none exist yet to
-  test (see `config/roles.yaml`'s comment on that open follow-up).
+  regression-tested, and `test_gateway_rbac.py` proves each least-privilege
+  role is both denied a permission the legacy flat `staff` role granted and
+  can still reach its own permitted routes. Two real gaps remain: no test
+  exercises a staff account actually migrated off `staff` (none exist yet —
+  that migration is gated on the client's roster), and `test_gateway_rbac.py`
+  covers gateway-route gating only. There is **no** test of role enforcement
+  at the data-query boundary, because that enforcement doesn't exist yet —
+  `records-service` consults no role at all today. That is this cycle's
+  primary RBAC work, and it is where the enforcement test must live.
+- No MFA tests: the TOTP prototype and its tests are parked, unmerged, on
+  `feat/mfa-totp-parked`.

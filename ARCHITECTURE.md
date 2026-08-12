@@ -145,12 +145,11 @@ the remaining open items (its Stage 1/2/3 references below point there).
 - ~~Sessions never expire~~ **Resolved.** `services/gateway/config.py` now
   enforces both an idle TTL (default 8h, refreshed per request) and an
   absolute lifetime cap (default 24h, checked regardless of activity).
-- **MFA mechanism exists but is not enforced.** A real, tested TOTP second
-  factor exists (`services/gateway/mfa.py`, `app.py`'s `/login`/`/login/mfa`)
-  gated by `config/roles.yaml`'s `mfa_required`, which stays `false` —
-  enforcing it repo-wide needs a coordinated rollout (frontend enrollment UI,
-  a plan for every existing account's first post-flip login), left as an
-  explicit follow-up rather than done here.
+- **No MFA — still open, deferred to next cycle by client direction
+  (2026-08-12).** A TOTP second factor was built and tested, then parked to
+  be delivered as one complete rollout rather than a bare mechanism. The
+  prototype is on `feat/mfa-totp-parked`, unmerged and incomplete against
+  the agreed scope. `/login` in the merged tree is password-only.
 - ~~Every account has a single flat role with no per-action authorization~~
   **Partially resolved.** Four real, enforced least-privilege roles now exist
   (`config/roles.yaml`: `front_desk`, `clinician`, `roi_clerk`, `scheduler`

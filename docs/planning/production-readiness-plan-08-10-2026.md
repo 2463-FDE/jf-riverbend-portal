@@ -92,7 +92,7 @@ Per explicit instruction, the LLM backend stays on **Ollama** through all three 
 
 **Goal:** deliver the two client commitments that never happened, using the existing "spec-first, small-PR-stages" pattern already proven in Weeks 4/5/6-UI.
 
-1. **Week 6, executed as originally scoped** (`.claude/skills/w6-deliverable-planner/SKILL.md` already describes this almost exactly): 
+1. **Week 6, executed as originally scoped** (`.claude/skills/w6-deliverable-planner/SKILL.md` already describes this almost exactly):
    - AI-augmented legacy-comprehension report on `services/interop-service`'s HL7 parser — what PID/PV1 map to today, confirm AL1/RXA are silently dropped.
    - Characterization tests pinning current parser behavior (so the later mapping change can't silently regress PID/PV1 handling).
    - One new *failing* test explicitly demonstrating the AL1/RXA drop (the existing `tests/test_hl7_parser.py:38` xfail already documents this gap but predates any Week 6 effort — promote it to a properly-labeled characterization artifact, don't just leave it).

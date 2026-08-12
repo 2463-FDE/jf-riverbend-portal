@@ -45,21 +45,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
-import mfa
 import roles_config
 from config import settings
 from db import get_db
 from logging_config import configure
 from models import User
-from security import (
-    create_mfa_challenge,
-    create_session,
-    destroy_mfa_challenge,
-    destroy_session,
-    get_mfa_challenge,
-    get_session,
-    verify_password,
-)
+from security import create_session, destroy_session, get_session, verify_password
 from visit_authorization import find_authorized_appointment, latest_insurance_member_id, parse_user_id
 
 log = configure(settings.service_name)
@@ -184,16 +175,20 @@ def healthz():
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     """
-    Verify the password. When config/roles.yaml's mfa_required is false
-    (the shipped default — see that file and roles_config.py for why it
-    isn't flipped on by this change), issue a session directly, same as
-    before. When true, return a short-lived pending_mfa_token for
-    POST /login/mfa instead of a session — a password alone is no longer
-    enough. Login rejects inactive users up front; the eventual session
-    token carries the stable users.id and both an idle and absolute Redis
-    TTL — see create_session. Per-request is_active revalidation for chart
-    data is enforced at records-service's SqlPatientAccessGate (PR #23
-    review round 2).
+    Issue a session token. Password only — there is no second factor here.
+
+    A working TOTP implementation was built and tested on this branch and
+    then removed from it: the client's 2026-08-12 direction was to park MFA
+    for a later, complete rollout (backup codes, supervisor-verified reset,
+    reset logging, shared-login remediation, pilot clinic, grace period,
+    dated cutover) rather than ship the mechanism alone this cycle. The
+    prototype lives on `feat/mfa-totp-parked`, unmerged, with a planning
+    card — see that branch's PR. Do not re-add a partial second factor here.
+
+    Login rejects inactive users up front; the token carries the stable
+    users.id and both an idle and an absolute Redis TTL (see
+    create_session). Per-request is_active revalidation for chart data is
+    enforced at records-service's SqlPatientAccessGate (PR #23 round 2).
     """
     try:
         user = db.execute(select(User).where(User.username == req.username)).scalar_one_or_none()
@@ -204,78 +199,13 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     if not user or not user.is_active or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid username or password")
 
-    if not roles_config.mfa_required():
-        return _issue_session(db, user)
-
-    if not user.mfa_secret:
-        # First MFA-required login for this account: mint a secret now, but
-        # it isn't "confirmed" until login_mfa verifies one code against it
-        # (mfa_enrolled_at stays null until then) — hand back everything an
-        # authenticator app needs to enroll it before the first code is due.
-        user.mfa_secret = mfa.generate_secret()
-        db.commit()
-        log.info("login: mfa enrollment started user=%s", user.username)
-        return {
-            "mfa_enrollment_required": True,
-            "pending_mfa_token": create_mfa_challenge(user.id),
-            "otpauth_uri": mfa.otpauth_uri(user.mfa_secret, user.username),
-        }
-
-    log.info("login: mfa challenge issued user=%s", user.username)
-    return {"mfa_required": True, "pending_mfa_token": create_mfa_challenge(user.id)}
-
-
-class MfaVerifyRequest(BaseModel):
-    pending_mfa_token: str
-    code: str
-
-
-@app.post("/login/mfa")
-def login_mfa(req: MfaVerifyRequest, db: Session = Depends(get_db)):
-    """
-    Second step of login when mfa_required: verify the TOTP code against the
-    pending_mfa_token /login issued, then mint the real session. A wrong
-    code does NOT consume the challenge — the caller can retry until the
-    challenge's own short TTL lapses (settings.mfa_challenge_timeout_seconds)
-    — but a successful verify always destroys it, so it can't be replayed.
-    """
-    user_id = get_mfa_challenge(req.pending_mfa_token)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="mfa challenge expired or invalid")
-
-    try:
-        user = db.get(User, user_id)
-    except Exception as e:  # DB down in local dev without compose
-        log.error("login/mfa db error: %s", e)
-        raise HTTPException(status_code=503, detail="auth backend unavailable")
-
-    if not user or not user.is_active or not user.mfa_secret:
-        # Not a wrong-code case — the account itself can't complete MFA right
-        # now (deactivated or enrollment was never actually started), so
-        # retrying this same challenge can't help.
-        destroy_mfa_challenge(req.pending_mfa_token)
-        raise HTTPException(status_code=401, detail="mfa not available for this account")
-
-    if not mfa.verify_code(user.mfa_secret, req.code):
-        raise HTTPException(status_code=401, detail="invalid mfa code")
-
-    destroy_mfa_challenge(req.pending_mfa_token)
-    if not user.mfa_enrolled_at:
-        user.mfa_enrolled_at = func.now()
-        db.commit()
-        log.info("login/mfa: enrollment confirmed user=%s", user.username)
-
-    return _issue_session(db, user)
-
-
-def _issue_session(db: Session, user: User) -> dict:
     user.last_login_at = func.now()
     db.commit()
     token = create_session(user.id, user.username, user.role)
     log.info("login ok user=%s", user.username)
     return {
         "token": token,
-        "mfa": bool(user.mfa_enrolled_at),
+        "mfa": False,
         "user": {"username": user.username, "full_name": user.full_name, "role": user.role},
     }
 

@@ -150,14 +150,15 @@ remaining open items (its Stage 1/2/3 references below point there).
   (`absolute_session_timeout_seconds`, default 24h, checked at every lookup
   regardless of activity) — `auth.yaml`'s `SESSION_TIMEOUT: never` was stale
   text even before this cap existed.
-- **MFA mechanism exists but is not enforced.** A real, tested TOTP second
-  factor exists (`services/gateway/mfa.py`, `roles_config.py`'s
-  `mfa_required`, `app.py`'s `/login` + `/login/mfa`) but `mfa_required`
-  stays `false` — flipping it repo-wide would force every existing account
-  into enrollment with no frontend UI built for it, and break the
-  integration suite's single-step login helpers. Enforcing it is an explicit,
-  separate rollout decision (see `config/roles.yaml`'s comment and the Stage
-  1 PR).
+- **No MFA. Still open, deliberately deferred to next cycle.** A working TOTP
+  second factor was built and tested, then parked at the client's 2026-08-12
+  direction: they want it as one complete rollout (backup codes,
+  supervisor-verified reset, reset logging, shared-front-desk-login
+  remediation, pilot clinic, two-week prompt-only grace period, dated
+  cutover, shared-workstation validation) rather than a mechanism shipped
+  alone. The prototype lives on `feat/mfa-totp-parked`, **unmerged**, with a
+  planning card; it is incomplete against those requirements. Nothing in the
+  merged tree provides a second factor — `/login` is password-only.
 - ~~Every account has a single flat `staff` role — no per-action
   authorization~~ **Partially resolved.** `config/roles.yaml` now defines
   four real, enforced least-privilege roles (`front_desk`, `clinician`,

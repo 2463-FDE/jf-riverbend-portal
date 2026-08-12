@@ -125,33 +125,3 @@ def get_session(token: str) -> dict | None:
 
 def destroy_session(token: str) -> None:
     _redis().delete(f"session:{token}")
-
-
-# --- MFA challenge (production-readiness Stage 1 item 3) -------------------
-#
-# A challenge is issued after password verification succeeds but before the
-# TOTP code is checked — it carries no permissions itself (unlike a session,
-# get_session never accepts one) and only proves "this caller already knows
-# the password for this user_id," for the short window login_mfa needs to
-# check the code. Short, fixed TTL — never refreshed, unlike a session.
-
-
-def create_mfa_challenge(user_id: int) -> str:
-    token = uuid.uuid4().hex
-    key = f"mfa_challenge:{token}"
-    _redis().hset(key, mapping={"user_id": str(user_id)})
-    _redis().expire(key, settings.mfa_challenge_timeout_seconds)
-    return token
-
-
-def get_mfa_challenge(token: str) -> int | None:
-    if not token:
-        return None
-    data = _redis().hgetall(f"mfa_challenge:{token}")
-    if not data or not data.get("user_id"):
-        return None
-    return int(data["user_id"])
-
-
-def destroy_mfa_challenge(token: str) -> None:
-    _redis().delete(f"mfa_challenge:{token}")

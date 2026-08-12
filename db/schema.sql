@@ -8,23 +8,23 @@
 -- ---------------------------------------------------------------------------
 -- Authentication
 -- ---------------------------------------------------------------------------
--- Portal + staff logins. Passwords are PBKDF2 (django-style string). Note:
--- there is exactly one role for everyone (see config/roles.yaml) — sessions
--- now carry both an idle and an absolute Redis TTL (production-readiness
--- Stage 1; see services/gateway/security.py), they no longer live forever.
--- mfa_secret/mfa_enrolled_at (016_user_mfa.sql) back a TOTP second factor,
--- gated by config/roles.yaml's mfa_required — see services/gateway/mfa.py.
+-- Portal + staff logins. Passwords are PBKDF2 (django-style string).
+-- Sessions now carry both an idle and an absolute Redis TTL (see
+-- services/gateway/security.py) — they no longer live forever. There is no
+-- second factor: TOTP was built, tested, and parked for a complete
+-- next-cycle rollout (see config/roles.yaml).
+-- `role` still holds 'staff' for every existing account; the real
+-- least-privilege roles live in config/roles.yaml and no account has been
+-- migrated onto one yet (that migration is gated on the client's roster).
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     full_name     TEXT,
-    role          TEXT NOT NULL DEFAULT 'staff',   -- single role for everyone
+    role          TEXT NOT NULL DEFAULT 'staff',
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     last_login_at TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    mfa_secret      TEXT,
-    mfa_enrolled_at TIMESTAMPTZ
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------------

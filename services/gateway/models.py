@@ -19,12 +19,6 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     last_login_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    # production-readiness Stage 1 item 3 (016_user_mfa.sql): mfa_secret is
-    # set on first MFA-required login, but not "confirmed" until
-    # mfa_enrolled_at is stamped by a successful /login/mfa verify — see
-    # mfa.py and app.py::login/login_mfa.
-    mfa_secret = Column(Text)
-    mfa_enrolled_at = Column(DateTime(timezone=True))
 
 
 # --- Stage 2 (feature-readiness): visit-chat authorization -----------------

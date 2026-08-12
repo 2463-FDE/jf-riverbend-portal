@@ -65,20 +65,16 @@ roles:
 
 default_role: staff
 
-# Production-readiness Stage 1 item 3: this flag is now actually read
-# (services/gateway/roles_config.py -> app.py::login) and gates a real TOTP
-# challenge (services/gateway/mfa.py) — it used to be documentation of an
-# intent the code didn't enforce.
+# MFA is deliberately absent from this file.
 #
-# Left false deliberately in this change, not flipped to true: every seeded
-# and existing account has no enrolled TOTP secret, so flipping this
-# repo-wide today would turn every account's next login into a forced
-# enrollment with no corresponding frontend flow built yet, and would break
-# the integration suite's single-step login helpers
-# (tests/integration/test_records_flow.py::_token/_token_for). Flip this to
-# true only after a coordinated rollout: frontend enrollment/challenge UI,
-# and a plan for active accounts' first post-flip login. See the Stage 1 PR
-# for this as an explicit open decision, following the same phased-rollout
-# pattern db/migrations/015 and docs/runbook.md "Phase 2" already use for
-# patient_access_grants enforcement.
-mfa_required: false
+# A working TOTP second factor was built and tested, then parked at the
+# client's 2026-08-12 direction: they want it delivered as one complete
+# rollout next cycle (backup codes, supervisor-verified reset, reset
+# logging, shared-front-desk-login remediation, pilot clinic, two-week
+# prompt-only grace period, dated cutover, shared-workstation validation)
+# rather than as a mechanism shipped alone. The prototype lives on
+# `feat/mfa-totp-parked`, unmerged, with a planning card.
+#
+# Do not re-add an `mfa_required` flag here without that rollout — a flag
+# that nothing enforces is exactly the documentation-pretending-to-be-a-
+# control problem this file already had.

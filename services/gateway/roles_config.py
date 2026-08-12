@@ -1,10 +1,16 @@
-"""Loader for config/roles.yaml — production-readiness Stage 1, items 3-4.
+"""Loader for config/roles.yaml — the live RBAC permission source.
 
-Nothing in this repo read this file before Stage 1 item 3 — it was pure
-documentation of an intent the code didn't enforce. mfa_required (item 3)
-was the first real setting; permissions_for (item 4) is the second —
+Nothing in this repo read this file before now — it was pure documentation
+of an intent the code didn't enforce. permissions_for is what makes it real:
 app.py's require_permission dependency uses it to gate routes per-role
-instead of "any authenticated staff session" for everything.
+instead of accepting "any authenticated staff session" for everything.
+
+Gateway-route gating is only the first layer. Per the client's 2026-08-12
+direction, the authoritative check belongs at the data-query boundary
+(records-service, alongside patient_access_gate.py) — several domain
+services are still reachable directly on published ports with no gateway
+trust check at all, so this file alone does not make permissions
+unbypassable. See the current cycle's plan.
 
 Parsed once per process and cached; call reload() (tests only) to force a
 re-read after changing the file on disk.
@@ -31,10 +37,6 @@ def reload() -> None:
     normal request handling relies on the cached, process-lifetime config."""
     global _config
     _config = None
-
-
-def mfa_required() -> bool:
-    return bool(_load().get("mfa_required", False))
 
 
 def roles() -> dict:
