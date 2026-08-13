@@ -382,3 +382,42 @@ def test_management_reads_reporting_surfaces_but_no_patient_data(client, monkeyp
     assert client.get("/roi/requests", headers=_auth()).status_code == 200
     assert client.get("/patients/1042", headers=_auth()).status_code == 403
     assert client.get("/patients/1042/records", headers=_auth()).status_code == 403
+
+
+# --- /slots (PR #26 gated it; these are the tests that PR lost) -------------
+#
+# The gating landed on main but its tests did not survive the branch shuffle.
+# Re-added here because this branch owns the current shape of this file.
+#
+# appointments.write rather than appointments.read is deliberate and correct
+# under the signed matrix: you look at open slots in order to book one, and the
+# roles that book are exactly front_desk, scheduler and legacy staff. Clinician,
+# nursing, billing and management hold appointments.read to see a patient's
+# booked appointments — not to shop for availability.
+
+
+def test_slots_requires_a_booking_permission(client, monkeypatch):
+    # Previously reachable by any authenticated session, which left the
+    # authorization model inconsistent across the scheduling endpoints.
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
+
+    resp = client.get("/slots", headers=_auth())
+
+    assert resp.status_code == 403
+    assert "appointments.write" in resp.json()["detail"]
+
+
+def test_slots_is_reachable_by_exactly_the_roles_that_book(client, monkeypatch):
+    _stub_downstream(monkeypatch, payload={"items": []})
+
+    for role in ("front_desk", "scheduler", "staff"):
+        monkeypatch.setattr(app_mod, "get_session", lambda t, r=role: _session_for(r) if t == VALID_TOKEN else None)
+        assert client.get("/slots", headers=_auth()).status_code == 200, f"{role} should reach /slots"
+
+    for role in ("clinician", "nursing_ma", "lab", "billing", "roi_clerk", "it_admin", "management"):
+        monkeypatch.setattr(app_mod, "get_session", lambda t, r=role: _session_for(r) if t == VALID_TOKEN else None)
+        assert client.get("/slots", headers=_auth()).status_code == 403, f"{role} should not reach /slots"
+
+
+def test_slots_still_rejects_an_anonymous_caller(client):
+    assert client.get("/slots").status_code == 401
