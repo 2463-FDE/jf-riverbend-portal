@@ -123,5 +123,20 @@ def get_session(token: str) -> dict | None:
     return data
 
 
-def destroy_session(token: str) -> None:
+def destroy_session(token: str) -> bool:
+    """Delete the session and report whether no live session remains.
+
+    Returns True when the key was deleted OR was already absent — both mean
+    the caller has no usable session left, which is the outcome /logout
+    promises. It returns False only when we cannot say that: an empty token,
+    where there was never a key to delete and the caller may well still be
+    holding a valid one it didn't send.
+
+    Redis errors are NOT swallowed. A logout that cannot reach Redis has not
+    ended anything, and the caller must be told rather than shown a
+    signed-out screen over a still-live session.
+    """
+    if not token:
+        return False
     _redis().delete(f"session:{token}")
+    return True

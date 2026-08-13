@@ -71,13 +71,16 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<PortalUser | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const isLogin = pathname === "/login";
 
-  // Hydrate the signed-in user from localStorage. There is intentionally no
-  // real route-guard enforcement here beyond "no token → bounce to /login";
-  // the backend session never expires (teaching debt).
+  // Hydrate the signed-in user from sessionStorage (see lib/session.ts for
+  // why not localStorage). There is no real route guard here beyond "no token
+  // → bounce to /login"; the gateway is what actually enforces expiry, on
+  // both an idle and an absolute TTL.
   useEffect(() => {
     if (isLogin) return;
     if (!getToken()) {
@@ -98,10 +101,22 @@ export default function AppShell({ children }: { children: ReactNode }) {
   }, []);
 
   async function signOut() {
+    // Shared-workstation fix: this used to swallow any failure and clear
+    // local storage regardless, which showed the user a signed-out screen
+    // while their session stayed valid on the server — on a machine someone
+    // else was about to use. Only clear locally once the gateway confirms
+    // the session is actually gone.
+    setSignOutError(null);
+    setSigningOut(true);
     try {
-      await apiFetch("/api/logout", { method: "POST" });
+      const res = await apiFetch("/api/logout", { method: "POST" });
+      if (!res.ok) throw new Error(`logout failed (${res.status})`);
     } catch {
-      /* best-effort; clear locally regardless */
+      setSigningOut(false);
+      setSignOutError(
+        "We could not end your session. You are still signed in — please try again, and tell IT if it keeps failing."
+      );
+      return;
     }
     clearSession();
     router.replace("/login");
@@ -195,9 +210,27 @@ export default function AppShell({ children }: { children: ReactNode }) {
                 </strong>
               </div>
               <div className="rb-usermenu__divider" />
-              <button role="menuitem" type="button" onClick={signOut}>
-                Sign out
+              <button
+                role="menuitem"
+                type="button"
+                onClick={signOut}
+                disabled={signingOut}
+              >
+                {signingOut ? "Signing out…" : "Sign out"}
               </button>
+              {signOutError && (
+                <p
+                  role="alert"
+                  style={{
+                    margin: "6px 10px 8px",
+                    fontSize: "0.78rem",
+                    lineHeight: 1.4,
+                    color: "var(--rb-danger, #b3261e)",
+                  }}
+                >
+                  {signOutError}
+                </p>
+              )}
             </div>
           )}
         </div>
