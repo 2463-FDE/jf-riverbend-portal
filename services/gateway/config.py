@@ -43,10 +43,21 @@ class Settings:
     # once per idle window would live forever, since every read refreshes it.
     # This is a separate absolute cap on total lifetime regardless of
     # activity, enforced at lookup (security.get_session), not just at
-    # creation. Now 12h — one shift, so a handover forces a fresh sign-in
-    # even on a machine that was never idle. Override with
-    # ABSOLUTE_SESSION_TIMEOUT_SECONDS.
-    absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "43200"))
+    # creation. Override with ABSOLUTE_SESSION_TIMEOUT_SECONDS.
+    #
+    # 8h at the client's direction (2026-08-13), down from the 12h first
+    # proposed: they want a fresh sign-in at shift handover, and would rather
+    # anchor the cap to one shift and let the 15-minute idle do the routine
+    # work. Revisit only with data on how often an active clinician actually
+    # hits the cap mid-shift.
+    #
+    # For the record, since the reasoning behind that instruction was based on
+    # a comparison that doesn't hold: the pre-existing 8h figure was the IDLE
+    # timeout, not a maximum. Because every authenticated request refreshed
+    # it, a continuously-used session had no upper bound at all before this
+    # cap existed — so neither 12h nor 8h lengthens anything. Both shorten an
+    # unbounded lifetime. 8h is simply the more conservative of the two.
+    absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "28800"))
 
     @property
     def db_url(self) -> str:
