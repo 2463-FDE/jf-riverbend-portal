@@ -93,6 +93,25 @@ async def lifespan(_app: FastAPI):
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
+    # PR #26 review: config/roles.yaml is loaded lazily on the first
+    # require_permission call, so a deployment that cannot see the file started
+    # cleanly, passed /healthz and /login, and then 500'd every authenticated
+    # route — the failure mode the old per-service Docker build context caused
+    # (the file lives at the repo root, outside services/gateway/). Load it here
+    # so a misconfigured deploy fails loudly at startup instead, matching how
+    # the internal-token check above already behaves.
+    try:
+        roles_config.reload()
+        if not roles_config.roles():
+            raise ValueError("no roles defined")
+    except Exception as e:
+        raise RuntimeError(
+            f"could not load the RBAC config from {roles_config.config_path()!r} "
+            f"({type(e).__name__}: {e}) — refusing to start, because every "
+            f"authorized route would fail. Check that config/roles.yaml is present "
+            f"in the image (see services/gateway/Dockerfile) or set "
+            f"ROLES_CONFIG_PATH to its location."
+        )
     yield
 
 
@@ -511,7 +530,13 @@ def proxy_patient_reconciliation(
 # --------------------------------------------------------------------------- #
 @app.get("/slots")
 def proxy_slots(
-    session: dict = Depends(require_session),
+    # PR #26 review: this was the one proxied route left on require_session
+    # alone, which made the authorization model inconsistent across scheduling.
+    # Gated on appointments.write because that is the permission the roles who
+    # need availability already hold; reading availability arguably deserves a
+    # narrower appointments.read, which the fuller role model introduces — worth
+    # refining then rather than inventing a permission no role has yet.
+    session: dict = Depends(require_permission("appointments.write")),
     provider_id: Optional[int] = None,
     limit: int = Query(50, ge=1, le=200),
 ):

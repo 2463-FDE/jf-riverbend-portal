@@ -1,0 +1,25 @@
+-- 016_users_role_no_default — stop new accounts silently inheriting the
+-- deprecated full-access role (PR #26 review, raised independently by both
+-- reviewers).
+--
+-- `role` was declared `TEXT NOT NULL DEFAULT 'staff'`. `staff` is now the
+-- deprecated legacy role and still carries every sensitive patient-data
+-- permission (config/roles.yaml), so any provisioning path that omitted
+-- `role` quietly created a full-access account — undoing the least-privilege
+-- rollout without erroring.
+--
+-- Dropping the default makes an omitted role fail loudly: the column stays
+-- NOT NULL, so an INSERT without an explicit role now raises instead of
+-- defaulting. Existing rows are untouched — every current account keeps
+-- 'staff' until the roster-driven migration moves it.
+--
+-- Deliberately NOT a CHECK constraint against the known role names: roles are
+-- defined in config/roles.yaml, not in the database, and duplicating that list
+-- here would create two sources of truth that drift. The gateway already fails
+-- closed on a role it does not recognise (roles_config.permissions_for returns
+-- no permissions), so an unknown role grants nothing rather than everything.
+--
+-- Idempotent, like every migration in this directory: DROP DEFAULT on a column
+-- that has none is a no-op, so re-applying is safe.
+
+ALTER TABLE users ALTER COLUMN role DROP DEFAULT;

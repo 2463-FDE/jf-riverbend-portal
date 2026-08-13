@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS users (
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     full_name     TEXT,
-    role          TEXT NOT NULL DEFAULT 'staff',
+    -- No DEFAULT (016_users_role_no_default.sql): 'staff' is the deprecated
+    -- legacy role and still carries every patient-data permission, so an
+    -- INSERT that omitted `role` used to create a full-access account
+    -- silently. It must now be set explicitly, or the insert fails.
+    role          TEXT NOT NULL,
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     last_login_at TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()

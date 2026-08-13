@@ -19,7 +19,10 @@ import os
 
 import yaml
 
-_ROLES_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config", "roles.yaml")
+_ROLES_CONFIG_PATH = os.getenv(
+    "ROLES_CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config", "roles.yaml"),
+)
 
 _config: dict | None = None
 
@@ -33,10 +36,18 @@ def _load() -> dict:
 
 
 def reload() -> None:
-    """Force the next call to re-read the file from disk. Tests only —
-    normal request handling relies on the cached, process-lifetime config."""
+    """Force the next call to re-read the file from disk. Used by the gateway's
+    startup check (so a missing file fails the process rather than the first
+    request) and by tests; normal request handling relies on the cached,
+    process-lifetime config."""
     global _config
     _config = None
+
+
+def config_path() -> str:
+    """Where the config is being read from — for startup diagnostics, so a
+    packaging mistake reports the path it actually looked at."""
+    return os.path.abspath(_ROLES_CONFIG_PATH)
 
 
 def roles() -> dict:
