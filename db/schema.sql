@@ -8,15 +8,24 @@
 -- ---------------------------------------------------------------------------
 -- Authentication
 -- ---------------------------------------------------------------------------
--- Portal + staff logins. Passwords are PBKDF2 (django-style string). Note:
--- there is exactly one role for everyone (see config/roles.yaml) and sessions
--- issued at login never expire (see services/gateway/auth.yaml).
+-- Portal + staff logins. Passwords are PBKDF2 (django-style string).
+-- Sessions now carry both an idle and an absolute Redis TTL (see
+-- services/gateway/security.py) — they no longer live forever. There is no
+-- second factor: TOTP was built, tested, and parked for a complete
+-- next-cycle rollout (see config/roles.yaml).
+-- `role` still holds 'staff' for every existing account; the real
+-- least-privilege roles live in config/roles.yaml and no account has been
+-- migrated onto one yet (that migration is gated on the client's roster).
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     full_name     TEXT,
-    role          TEXT NOT NULL DEFAULT 'staff',   -- single role for everyone
+    -- No DEFAULT (016_users_role_no_default.sql): 'staff' is the deprecated
+    -- legacy role and still carries every patient-data permission, so an
+    -- INSERT that omitted `role` used to create a full-access account
+    -- silently. It must now be set explicitly, or the insert fails.
+    role          TEXT NOT NULL,
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     last_login_at TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()

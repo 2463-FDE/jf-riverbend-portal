@@ -5,3 +5,6 @@ redis==5.2.1
 pydantic==2.10.4
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
+
+# config/roles.yaml loader (roles_config.py) — the RBAC permission source.
+PyYAML==6.0.2

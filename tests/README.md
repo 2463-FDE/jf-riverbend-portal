@@ -24,13 +24,40 @@ repo root on `sys.path` for this.
 - `integration/test_records_flow.py` — login + auth-gating + chart read.
 
 ## Known coverage gaps (deliberate — this is an inherited codebase)
-These are NOT oversights to "fix" in the test suite; they mirror real gaps:
-- **No tests for the scheduling race / double-booking** (`book.py`). The happy
-  path is exercised manually only.
-- **No tests asserting IDOR is prevented** — there's an `xfail` documenting that
-  cross-patient reads currently succeed (they shouldn't).
+These are NOT oversights to "fix" in the test suite; they mirror real gaps.
+Several were true at handoff and have since been closed in later catch-up
+work — corrected below to match current tests, not the handoff snapshot.
+- ~~**No tests for the scheduling race / double-booking** (`book.py`). The
+  happy path is exercised manually only.~~ **Resolved** (Week 5 catch-up,
+  RIV-175) — `integration/test_scheduling_concurrency.py` exercises concurrent
+  booking replay/conflict directly against `book.py`.
+- ~~**No tests asserting IDOR is prevented** — there's an `xfail` documenting
+  that cross-patient reads currently succeed (they shouldn't).~~ **Resolved**
+  (Week 4 catch-up, RIV-201) —
+  `integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`
+  is a real, passing regression test (403 for an ungranted chart), not an
+  xfail.
 - **HL7 allergy/medication extraction is `xfail`** — the parser silently drops
-  AL1/RXA; the test documents the gap rather than hiding it.
-- **No tests for ROI authorization enforcement** — none exists to test.
-- **No tests for input normalization / duplicate-patient prevention.**
-- Security/auth path coverage overall is thin (tracked as RIV-201).
+  AL1/RXA; the test documents the gap rather than hiding it. Still open.
+- **No tests for ROI authorization enforcement** — none exists to test. Still
+  open.
+- **No tests for input normalization / duplicate-patient prevention** —
+  **partially covered now**:
+  `test_registration_user_can_review_the_seeded_duplicate_cluster` in
+  `integration/test_records_flow.py` exercises the reconciliation view over the
+  seeded Maria Gonzalez duplicate cluster, but there is still no test directly
+  exercising `_find_match_candidates`' exact/partial match-blocking logic in
+  `services/intake-service/app.py` itself. Input normalization coverage
+  remains absent.
+- Security/auth path coverage has improved (tracked as RIV-201): IDOR is
+  regression-tested, and `test_gateway_rbac.py` proves each least-privilege
+  role is both denied a permission the legacy flat `staff` role granted and
+  can still reach its own permitted routes. Two real gaps remain: no test
+  exercises a staff account actually migrated off `staff` (none exist yet —
+  that migration is gated on the client's roster), and `test_gateway_rbac.py`
+  covers gateway-route gating only. There is **no** test of role enforcement
+  at the data-query boundary, because that enforcement doesn't exist yet —
+  `records-service` consults no role at all today. That is this cycle's
+  primary RBAC work, and it is where the enforcement test must live.
+- No MFA tests: the TOTP prototype and its tests are parked, unmerged, on
+  `feat/mfa-totp-parked`.

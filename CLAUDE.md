@@ -138,20 +138,91 @@ repo's own `.env` is already tracked in git; do not overwrite or edit it.
 
 ## Known Risks / Debt (current state)
 
-Verified against `ARCHITECTURE.md` §7, the ADRs, and source in this session:
+Verified against `ARCHITECTURE.md` §7, the ADRs, and source in this session. This
+list mixes items still genuinely open with items already closed in later
+catch-up branches — each is labeled. Sequencing for the remaining open items
+lives in the current delivery plan, not in this file; treat anything marked
+open here as open until the code says otherwise.
 
-- Sessions in Redis never expire (`services/gateway/auth.yaml SESSION_TIMEOUT: never`), no MFA, and every account has a single flat `staff` role (`config/roles.yaml`) — no per-action authorization.
-- **IDOR:** `GET /patients/{id}/records` doesn't bind the session to the requested `patient_id`; any authenticated user can walk sequential patient IDs.
-- PHI columns (`ssn`, `dob`, `notes`) are stored as plaintext `TEXT` (`adr/0002`). Confirmed at the code level: `services/intake-service/app.py:65` (`log.info('POST /intake body=%s', req.model_dump_json())`) writes the full intake request body — including SSN/DOB — to `logs/intake-service.log` at INFO, per `services/intake-service/logging_config.py`'s own docstring.
+- ~~Sessions in Redis never expire~~ **Resolved.** `services/gateway/config.py`
+  now enforces both an idle TTL (`session_timeout_seconds`, default 8h,
+  refreshed per request) and an absolute lifetime cap
+  (`absolute_session_timeout_seconds`, default 24h, checked at every lookup
+  regardless of activity) — `auth.yaml`'s `SESSION_TIMEOUT: never` was stale
+  text even before this cap existed.
+- **No MFA. Still open, deliberately deferred to next cycle.** A working TOTP
+  second factor was built and tested, then parked at the client's 2026-08-12
+  direction: they want it as one complete rollout (backup codes,
+  supervisor-verified reset, reset logging, shared-front-desk-login
+  remediation, pilot clinic, two-week prompt-only grace period, dated
+  cutover, shared-workstation validation) rather than a mechanism shipped
+  alone. The prototype lives on `feat/mfa-totp-parked`, **unmerged**, with a
+  planning card; it is incomplete against those requirements. Nothing in the
+  merged tree provides a second factor — `/login` is password-only.
+- ~~Every account has a single flat `staff` role — no per-action
+  authorization~~ **Partially resolved.** `config/roles.yaml` now defines
+  four real, enforced least-privilege roles (`front_desk`, `clinician`,
+  `roi_clerk`, `scheduler` — see `services/gateway/roles_config.py`'s
+  `permissions_for` and `app.py`'s `require_permission` dependency, which
+  gates every proxied route). `staff` is kept as a deprecated legacy role
+  with its original full permission set, and **every existing/seeded account
+  is still on it** — this repo has no real staff-directory/job-function data
+  to decide which of the eventual 1,000 real accounts should move to which
+  specific role, so migrating accounts off `staff` is a separate, explicit
+  follow-up (an "ask the client" gap, not something guessed here).
+- ~~**IDOR:** `GET /patients/{id}/records` doesn't bind the session to the
+  requested `patient_id`~~ **Resolved** (Week 4 catch-up, RIV-201/DEBT D11):
+  chart reads now go through `services/records-service/patient_access_gate.py`
+  against `db/migrations/014_patient_access_grants.sql`; see
+  `tests/integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`
+  (a real, passing 403 assertion, not an xfail) and
+  `docs/analysis/RIV-201-patient-records-IDOR.md`.
+- PHI columns (`ssn`, `dob`, `notes`) are still stored as plaintext `TEXT`
+  (`adr/0002`) — unchanged. The full-request-body PHI logging this section used
+  to cite (`services/intake-service/app.py:65`) no longer exists at that
+  location or in that form: **resolved** (Week 1 catch-up, DEBT D1) —
+  `app.py`'s `_intake_log_summary` now logs only an allowlist
+  (`correlation_id`, `created_via`), never the request body; see that file's
+  module docstring for the full review history.
+  `services/intake-service/logging_config.py`'s docstring still described the
+  old, unremediated behavior and has been corrected in this pass.
 - `README.md` states "All PHI is encrypted and the system is fully HIPAA compliant" — this is contradicted by `adr/0002` and `ARCHITECTURE.md` §7. Treat that claim as unverified, not fact.
-- No authentication between the gateway and internal domain services (gateway trusts them blindly); `docker-compose.yml` also publishes every domain service's port to the host, not just the gateway's — undermining the "gateway is the only entry point" description in `ARCHITECTURE.md` §1.
-- All services share a single Postgres credential (`riverbend_app`) — no per-service least privilege (`adr/0001` names this as deferred work).
-- `.env` is committed to git (not listed in `.gitignore`).
-- The payer eligibility call is synchronous with no timeout, inline on the `/intake` path — causes slow registration (RIV-088) and a full intake freeze on payer outage (RIV-141).
-- Scheduling has a check-then-insert double-booking race with no `UNIQUE` constraint or idempotency key (RIV-175).
-- HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped.
-- ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap); `audit_logs` is mutable request-dump logging, not a tamper-evident access trail — `docs/handover/auditor-questionnaire.md` shows staff were unable to answer a real auditor's request for a disclosure accounting / per-patient access log.
-- No dependency, container image, or secret scanning in CI; images build straight from `main` with no deploy gate visible in this repo.
+- Gateway-to-service authentication is now **partial**: `intake-service` and
+  `records-service` verify a shared `INTERNAL_SERVICE_TOKEN` (fails closed if
+  unset — see `services/gateway/config.py`, `services/records-service/app.py`,
+  `services/intake-service/app.py`), so a caller hitting their published host
+  ports directly can no longer spoof a gateway-forwarded request to those two
+  services. `eligibility-service`, `scheduling-service`, `interop-service`, and
+  `roi-service` have no equivalent check and are still fully trusted blind.
+  `docker-compose.yml` still publishes every domain service's port to the
+  host, not just the gateway's — the "gateway is the only entry point"
+  description in `ARCHITECTURE.md` §1 still overstates reality for those four
+  services.
+- All services share a single Postgres credential (`riverbend_app`) — no per-service least privilege (`adr/0001` names this as deferred work). Still open.
+- `.env` is committed to git (not listed in `.gitignore`). Still true by standing instruction — not touched by this or any other item; flagged separately as a pre-go-live deployment decision.
+- ~~The payer eligibility call is synchronous with no timeout, inline on the
+  `/intake` path — causes slow registration (RIV-088) and a full intake freeze
+  on payer outage (RIV-141).~~ **Resolved** (Week 3 catch-up): `/intake` now
+  enqueues a bounded async eligibility job against `eligibility-service`'s
+  Redis-backed queue instead of calling the payer inline; see
+  `services/intake-service/app.py::_start_eligibility_check` and
+  `adr/0005-eligibility-agent-runtime-and-resilience.md`.
+- ~~Scheduling has a check-then-insert double-booking race with no `UNIQUE`
+  constraint or idempotency key (RIV-175).~~ **Resolved** (Week 5 catch-up):
+  fixed at the database level —
+  `db/migrations/013_appointment_idempotency_and_uniqueness.sql` plus
+  `services/scheduling-service/book.py`'s single-transaction check-and-insert;
+  see `tests/integration/test_scheduling_concurrency.py`.
+- HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped. Still open.
+- ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap); `audit_logs` is mutable request-dump logging, not a tamper-evident access trail — `docs/handover/auditor-questionnaire.md` shows staff were unable to answer a real auditor's request for a disclosure accounting / per-patient access log. Still open.
+- No dependency, container image, or secret scanning in CI; images build straight from `main` with no deploy gate visible in this repo. Still open.
+- Duplicate patients (RIV-160) are **partially** addressed: `/intake` now runs
+  a deterministic (dob, ssn) match-key lookup before creating a patient
+  (`services/intake-service/app.py::_find_match_candidates`, `adr/0004`) —
+  exact matches block silent creation, partial matches flag
+  `possible_duplicate_match` for staff review — but this does not retroactively
+  merge patients created before the fix and there is no staff-confirmation UI
+  yet (backend/API only).
 
 ## Unknowns (do not guess — ask instead)
 

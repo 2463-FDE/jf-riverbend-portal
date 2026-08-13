@@ -31,7 +31,13 @@ services:
       retries: 10
 
   gateway:
-    build: ./services/gateway
+    # Build context is the repo root (not ./services/gateway) so the Dockerfile
+    # can COPY config/roles.yaml — the live RBAC permission source, which lives
+    # outside the service directory. Same pattern as intake-service,
+    # eligibility-service and records-service below.
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
     env_file: .env
     environment:
       # Round-17 review (2026-08-06): fails `docker compose config`/`up`

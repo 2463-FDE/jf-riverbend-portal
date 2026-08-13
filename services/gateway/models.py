@@ -12,7 +12,10 @@ class User(Base):
     username = Column(Text, unique=True, nullable=False)
     password_hash = Column(Text, nullable=False)
     full_name = Column(Text)
-    role = Column(Text, nullable=False, default="staff")   # one role for everyone
+    role = Column(Text, nullable=False, default="staff")   # see config/roles.yaml — "staff" is now a
+    # deprecated legacy role kept only for existing/seeded accounts; real least-privilege roles are
+    # defined there, but no account has been migrated onto one yet (that migration is gated on the
+    # client's staff roster).
     is_active = Column(Boolean, nullable=False, default=True)
     last_login_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -86,27 +86,78 @@ PHI columns (`ssn`, `notes`, …) are stored as plain `TEXT` (see `adr/0002`).
 
 ## 7. Known limitations / tech debt (carried into the handoff)
 
-These are documented honestly so the next team can prioritize. They are **not**
-fixed in this build.
+These are documented honestly so the next team can prioritize. Several were
+still open as of the original handoff; some have since been closed in later
+catch-up work (cited inline below) — this list is corrected to match current
+code, not the original handoff snapshot. Each remaining item is marked open
+here; sequencing lives in the current delivery plan, not in this file.
 
-- **Compliance posture is self-asserted.** PHI columns are plaintext; "audit" is
-  mutable request logging, not a tamper-evident access trail.
-- **PHI in application logs** — intake logs full request bodies at INFO.
-- **Duplicate patients** — self-service intake has no MPI/match key; one person
-  can become several charts (RIV-160).
-- **Slow registration (RIV-088)** — the inline, no-timeout eligibility call
-  blocks `/intake`; a payer outage freezes intake (RIV-141).
-- **Double-booking (RIV-175)** — booking is check-then-insert with no UNIQUE
-  constraint on `slot_id` and no idempotency key.
-- **IDOR on chart reads** — sessions aren't bound to the patient; sequential
-  integer patient IDs are walkable by any authenticated user.
-- **N+1 + full-table scans** in the records read/search paths.
+- **Compliance posture is self-asserted.** PHI columns are plaintext (`adr/0002`,
+  unchanged); "audit" is still mutable request logging, not a tamper-evident
+  access trail. Still open.
+- ~~**PHI in application logs** — intake logs full request bodies at INFO.~~
+  **Resolved.** `services/intake-service/app.py`'s `_intake_log_summary` now
+  logs an allowlist only (`correlation_id`, `created_via`), not the request
+  body; see the D1 review history in that file's module docstring.
+  `logging_config.py`'s docstring described the old behavior and has been
+  corrected in this pass.
+- **Duplicate patients (RIV-160) — partially resolved.** `/intake` now runs a
+  deterministic (dob, ssn) match-key lookup before creating a patient
+  (`services/intake-service/app.py::_find_match_candidates`, `adr/0004`): an
+  exact match blocks silent creation with a 409, a partial match flags
+  `possible_duplicate_match` for staff review. It does not retroactively merge
+  patients created before this fix (the seeded Maria Gonzalez fixture's 3 rows
+  stay 3 rows) and there is no staff-confirmation UI yet (backend/API only).
+- ~~**Slow registration (RIV-088)** — the inline, no-timeout eligibility call
+  blocks `/intake`; a payer outage freezes intake (RIV-141).~~ **Resolved**
+  (Week 3 catch-up). `/intake` enqueues a bounded async eligibility job
+  against `eligibility-service`'s job queue instead of calling the payer
+  inline; see `services/intake-service/app.py::_start_eligibility_check` and
+  `adr/0005-eligibility-agent-runtime-and-resilience.md`.
+- ~~**Double-booking (RIV-175)** — booking is check-then-insert with no UNIQUE
+  constraint on `slot_id` and no idempotency key.~~ **Resolved** (Week 5
+  catch-up). Fixed at the database level:
+  `db/migrations/013_appointment_idempotency_and_uniqueness.sql` plus
+  `services/scheduling-service/book.py`'s single-transaction
+  check-and-insert. See `tests/integration/test_scheduling_concurrency.py`.
+- ~~**IDOR on chart reads** — sessions aren't bound to the patient; sequential
+  integer patient IDs are walkable by any authenticated user.~~ **Resolved**
+  (Week 4 catch-up, RIV-201). Chart reads now go through
+  `services/records-service/patient_access_gate.py` against
+  `db/migrations/014_patient_access_grants.sql`; see
+  `tests/integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`.
+- **N+1 + full-table scans** in the records read/search paths. Still open,
+  deliberately deferred (`docs/analysis/W4-records-N-plus-one.md`, DEBT D8).
+  Needs fixing alongside the missing patient-scoped indexes, not before them.
 - **Brittle HL7 mapping** — only PID/PV1 are mapped; AL1 (allergies) and RXA
-  (medications) are silently dropped.
+  (medications) are silently dropped. Still open.
 - **ROI has no authorization enforcement** — disclosures go out with no recorded
-  45 CFR 164.508 authorization and no accounting trail.
-- **Sessions never expire; single role for everyone; no MFA.**
+  45 CFR 164.508 authorization and no accounting trail. Still open.
+- **Gateway-to-service trust is now partial.** `intake-service` and
+  `records-service` verify a shared `INTERNAL_SERVICE_TOKEN` (fails closed if
+  unset); `eligibility-service`, `scheduling-service`, `interop-service`, and
+  `roi-service` have no equivalent check and are still fully trusted blind.
+  `docker-compose.yml` still publishes every domain service's port to the
+  host, not just the gateway's.
+- ~~Sessions never expire~~ **Resolved.** `services/gateway/config.py` now
+  enforces both an idle TTL (default 8h, refreshed per request) and an
+  absolute lifetime cap (default 24h, checked regardless of activity).
+- **No MFA — still open, deferred to next cycle by client direction
+  (2026-08-12).** A TOTP second factor was built and tested, then parked to
+  be delivered as one complete rollout rather than a bare mechanism. The
+  prototype is on `feat/mfa-totp-parked`, unmerged and incomplete against
+  the agreed scope. `/login` in the merged tree is password-only.
+- ~~Every account has a single flat role with no per-action authorization~~
+  **Partially resolved.** Four real, enforced least-privilege roles now exist
+  (`config/roles.yaml`: `front_desk`, `clinician`, `roi_clerk`, `scheduler`
+  — see `services/gateway/roles_config.py`/`app.py`'s `require_permission`).
+  The legacy `staff` role keeps its original full permission set, and every
+  existing/seeded account is still on it; migrating real accounts to a
+  specific role needs staff-directory/job-function data this repo doesn't
+  have — an open question for the client, not guessed here.
 - **Secrets are committed** (`.env` is tracked); CI has no secret/vuln scan.
+  Both still open. `.env` stays committed per standing instruction and is
+  flagged as a pre-go-live deployment decision, not a code change.
 
 ## 8. Local development
 
