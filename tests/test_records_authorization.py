@@ -65,6 +65,26 @@ def _internal_header():
 created_sessions = []
 
 
+
+class _FakeActorRow:
+    """The (role, is_active) row records-service now reads to enforce the
+    signed permission matrix at the data boundary and to revalidate the actor
+    on every request. `staff` is the legacy full-permission role every real
+    account still carries, so it preserves what these tests were written to
+    exercise: grant-based authorization, not role-based denial."""
+
+    def __init__(self, role="staff", is_active=True):
+        self.role = role
+        self.is_active = is_active
+
+
+class _FakeActorResult:
+    def __init__(self, row):
+        self._row = row
+
+    def one_or_none(self):
+        return self._row
+
 class _FakeGrantResult:
     def __init__(self, found: bool):
         self._found = found
@@ -132,6 +152,13 @@ class _FakeGrantResultOrEmptyScalars(_FakeGrantResult):
 
     def scalars(self):
         return _FakeScalars([])
+
+    def one_or_none(self):
+        # The actor role/is_active lookup, added when permission enforcement
+        # moved into records-service. This fake returns one object for every
+        # execute(), so the lookup lands here too. These tests are about GRANT
+        # authorization, so the actor is an active legacy-`staff` user.
+        return _FakeActorRow()
 
 
 def _fake_get_db():

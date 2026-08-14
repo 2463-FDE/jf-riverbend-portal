@@ -50,9 +50,9 @@ def _seeded_session():
     db = sessionmaker(bind=engine)()
     db.add_all(
         [
-            User(id=FRONTDESK, username="frontdesk", is_active=True),
-            User(id=BILLING, username="billing-clerk", is_active=True),
-            User(id=DISABLED, username="disabled-doc", is_active=False),
+            User(id=FRONTDESK, username="frontdesk", is_active=True, role="staff"),
+            User(id=BILLING, username="billing-clerk", is_active=True, role="staff"),
+            User(id=DISABLED, username="disabled-doc", is_active=False, role="staff"),
             Patient(id=1042, name="Maria Gonzalez"),
             Patient(id=2001, name="Unrelated Patient"),
             Patient(id=1043, name="James O'Brien"),
@@ -122,10 +122,18 @@ def test_actor_with_no_grants_sees_an_empty_roster(ctx):
     assert body["total"] == 0 and body["items"] == []
 
 
-def test_disabled_user_sees_an_empty_roster_despite_a_grant(ctx):
+def test_disabled_user_is_denied_the_roster_outright(ctx):
+    # Behaviour tightened in PR #33: this used to return 200 with an empty
+    # items list, because the grant query's is_active join happened to exclude
+    # the row — fail-closed by accident rather than by design, and an empty
+    # success is indistinguishable from "no patients match". The actor check now
+    # denies a disabled account explicitly, which is both more correct and
+    # consistent with every other route.
     client, _ = ctx
-    body = client.get("/patients", headers=_auth(str(DISABLED), "disabled-doc")).json()
-    assert body["items"] == []  # is_active join excludes the grant
+    resp = client.get("/patients", headers=_auth(str(DISABLED), "disabled-doc"))
+
+    assert resp.status_code == 403
+    assert "items" not in resp.json()  # no data leaks alongside the denial
 
 
 def test_no_actor_returns_empty_and_is_audited(ctx):
@@ -184,3 +192,18 @@ def test_search_results_are_audited(ctx):
     client, db = ctx
     client.get("/records/search", headers=_auth(), params={"q": "penicillin"})
     assert any("records_search returned" in a.message and a.actor == "frontdesk" for a in _audits(db))
+
+
+def test_roster_requires_the_patients_read_permission(monkeypatch):
+    """PR #33 review [high]: this route filtered by active grant only and never
+    checked the caller's role, so an active user holding a grant could list
+    patient names, DOB, gender and MRN with an unknown or downgraded role."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "records-service"))
+    import roles_config
+    roles_config.reload()
+
+    # it_admin holds no patient-scoped permission at all in the signed grid.
+    assert "patients.read" not in roles_config.permissions_for("it_admin")
+    # ...and an unrecognised role holds nothing, fail-closed.
+    assert roles_config.permissions_for("no-such-role") == set()
