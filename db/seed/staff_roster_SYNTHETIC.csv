@@ -1,0 +1,33 @@
+# SYNTHETIC STAFF ROSTER — NOT REAL PERSONNEL DATA.
+#
+# Stands in for the staff directory the client was to supply (name, function,
+# department, clinic, status). Authorised as synthetic for this learning
+# project; the real roster governs before any production migration, and this
+# file must never be presented to the client as their data.
+#
+# Every name here is invented. The nine names that match seeded accounts in
+# db/seed/seed.sql are reused from that already-synthetic demo data so the
+# dry-run mapping has something to reconcile against.
+#
+# Deliberately shaped to exercise every case branches 8 and 9 must handle —
+# see db/seed/README-staff-roster.md for the case-by-case walkthrough.
+#
+# Lines beginning with '#' are comments and are skipped by the reader.
+name,function,department,clinic,status
+Maya Okonkwo,Chief Operating Officer,Administration,Riverbend Main,active
+Rosa Delgado,Patient Registration,Front Office,Riverbend Main,active
+Jin Park,Patient Registration,Front Office,Riverbend East,active
+Priya Raman,Patient Registration,Front Office,Riverbend Main,active
+Marcus Bell,Patient Registration,Front Office,Riverbend Main,active
+Anil Patel,Physician,Internal Medicine,Riverbend Main,active
+Anita Nguyen,Physician,Family Medicine,Riverbend East,active
+Sandra Lee,Physician,Pediatrics,Riverbend South,terminated
+Yusuf Demir,Physician,Internal Medicine,Riverbend South,leave
+Karen Cole,Registered Nurse,Family Medicine,Riverbend East,active
+Aisha Kone,Laboratory Technician,Laboratory,Riverbend Main,active
+Diego Marquez,Laboratory Technician,Laboratory,Riverbend South,active
+Tom Reyes,Billing Specialist,Revenue Cycle,Riverbend Main,active
+Dana White,Release of Information Clerk,Health Information,Riverbend Main,active
+Nadia Osei,Scheduling Coordinator,Front Office,Riverbend East,active
+Owen Fitzgerald,Systems Administrator,Information Technology,Riverbend Main,active
+Grace Liang,Volunteer Coordinator,Community Outreach,Riverbend Main,active
