@@ -271,6 +271,50 @@ def _actor_label(x_actor_name: Optional[str], x_actor_id: Optional[str]) -> str:
     return x_actor_name or x_actor_id or "unknown"
 
 
+def _redact_clinical_fields(db, detail, *, x_actor_id):
+    """Withhold `patients.notes` from roles that may not read clinical notes.
+
+    Client decision (2026-08-14): Front Desk and Billing do not read clinical
+    notes, and this field is served under `patients.read`, which both hold. It
+    is a single free-text column carrying both kinds of content — the seeded
+    data has "PCN allergy noted at front desk." sitting beside "Prefers morning
+    appts." — so there is no way to hand over the scheduling half without the
+    allergy half.
+
+    Fail closed: withhold the whole field unless the role may read clinical
+    notes. Those roles lose the scheduling preferences too, which is a real
+    cost the client accepted rather than leak allergy text to a role the signed
+    grid excludes. Splitting the column into clinical and non-clinical notes is
+    the correct end state and is a funded follow-up, not this cycle.
+
+    Redacts rather than blanks silently: `notes_withheld` tells the caller the
+    field exists and was withheld, so a UI can say so instead of implying the
+    patient has no notes.
+    """
+    if _actor_may_read_clinical_notes(db, x_actor_id):
+        return detail
+    return detail.model_copy(update={"notes": None, "notes_withheld": True})
+
+
+def _actor_may_read_clinical_notes(db, x_actor_id):
+    """True when this actor's role holds records.read. Deliberately a separate,
+    cheap lookup rather than threading the role down from the authorization
+    check: get_patient authorizes on patients.read, so the role it verified is
+    not the one this question needs."""
+    user_id = parse_user_id(x_actor_id)
+    if user_id is None:
+        return False
+    try:
+        row = db.execute(
+            select(User.role, User.is_active).where(User.id == user_id)
+        ).one_or_none()
+    except SQLAlchemyError:
+        return False  # fail closed — an unreadable role withholds the field
+    if row is None or not row.is_active:
+        return False
+    return "records.read" in roles_config.permissions_for(row.role)
+
+
 def _authorize_actor_permission(
     db: Session,
     *,
@@ -439,7 +483,8 @@ def get_patient(
         actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
-    return PatientDetail.model_validate(patient)
+    detail = PatientDetail.model_validate(patient)
+    return _redact_clinical_fields(db, detail, x_actor_id=x_actor_id)
 
 
 @app.get("/patients/{patient_id}/records", response_model=PatientChart)
