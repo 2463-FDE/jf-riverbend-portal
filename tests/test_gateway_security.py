@@ -1,4 +1,6 @@
 """Unit tests for gateway password hashing/verification (no DB, no Redis I/O)."""
+import pytest
+
 from conftest import load_module
 
 security = load_module("services/gateway/security.py", "gateway_security")
@@ -108,6 +110,40 @@ def test_get_session_rejects_and_deletes_a_legacy_session_without_user_id(monkey
     assert security.get_session("legacy") is None
     assert key in fake.deleted        # cleared, forcing a clean re-login
     assert fake.expire_calls == []    # a malformed session's TTL is never extended
+
+
+# --- destroy_session contract (shared-workstation fix) ---------------------
+
+
+def test_destroy_session_deletes_the_key_and_reports_success(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+
+    assert security.destroy_session("tok") is True
+    assert fake.deleted == ["session:tok"]
+
+
+def test_destroy_session_reports_failure_for_an_empty_token(monkeypatch):
+    # No key to delete, and the caller may still hold a valid token it didn't
+    # send — we cannot claim a session was ended.
+    fake = _FakeRedis()
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+
+    assert security.destroy_session("") is False
+    assert fake.deleted == []
+
+
+def test_destroy_session_propagates_a_store_failure_rather_than_swallowing_it(monkeypatch):
+    # A logout that cannot reach Redis has not ended anything. Swallowing this
+    # is what let the UI show a signed-out screen over a live session.
+    class _Broken:
+        def delete(self, _key):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(security, "_redis", lambda: _Broken())
+
+    with pytest.raises(ConnectionError):
+        security.destroy_session("tok")
 
 
 # --- absolute session lifetime cap -----------------------------------------

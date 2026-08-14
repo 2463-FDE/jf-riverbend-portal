@@ -6,9 +6,9 @@
 # config.py's defaults by hand, or delete this file, rather than let it
 # describe behavior the code doesn't have — which it did for a long time,
 # claiming "never expire" while sessions already carried a Redis TTL.
-SESSION_IDLE_TIMEOUT_SECONDS: 28800     # 8h, refreshed on each authenticated request — SESSION_TIMEOUT_SECONDS
-                                        # NOTE: too long for a shared clinical workstation; a shorter
-                                        # value is pending the client's decision.
-SESSION_ABSOLUTE_TIMEOUT_SECONDS: 86400 # 24h cap regardless of activity — ABSOLUTE_SESSION_TIMEOUT_SECONDS
+SESSION_IDLE_TIMEOUT_SECONDS: 900       # 15 min, refreshed on each authenticated request — SESSION_TIMEOUT_SECONDS
+                                        # Proposed to the client for sign-off; 30 min is the alternative.
+SESSION_ABSOLUTE_TIMEOUT_SECONDS: 28800 # 8h (one shift) cap regardless of activity — ABSOLUTE_SESSION_TIMEOUT_SECONDS
+                                        # Client-directed 2026-08-13: fresh sign-in at handover.
 mfa_enabled: false          # password login only — no second factor exists; TOTP is parked (config/roles.yaml)
 password_min_length: 6
