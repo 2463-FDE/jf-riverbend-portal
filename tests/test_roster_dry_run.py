@@ -170,14 +170,16 @@ def test_an_unmappable_function_denies_by_default_and_proposes_nothing():
 
 
 def test_staff_on_leave_are_surfaced_as_an_open_question_not_defaulted():
-    # The client set rules for active and terminated staff and not for leave.
-    # Yusuf Demir has no account, so he lands in the roster-side pass; the
-    # point is that no rule silently decides for him.
+    # PR #32 review [medium] caught this: the previous version of this test only
+    # asserted Yusuf Demir was not in MIGRATE, which passed happily while he
+    # appeared in NO bucket at all — the report silently dropped him. Assert the
+    # bucket he must be in, not merely one he must not be.
     findings = _report()
+    yusuf = [f for f in findings if f.subject == "Yusuf Demir"]
 
-    assert not any(
-        f.subject == "Yusuf Demir" and f.outcome == dry_run.MIGRATE for f in findings
-    )
+    assert len(yusuf) == 1, "on-leave staff must not vanish from the report"
+    assert yusuf[0].outcome == dry_run.HOLD_ON_LEAVE
+    assert yusuf[0].proposed_role is None
 
 
 def test_a_terminated_person_with_no_account_is_not_reported_as_needing_one():
@@ -251,3 +253,61 @@ def test_a_missing_users_insert_yields_no_accounts_rather_than_crashing(tmp_path
     empty.write_text("-- no users here\n")
 
     assert dry_run.read_accounts_from_seed(str(empty)) == []
+
+
+# --- PR #32 review fixes ---------------------------------------------------
+
+
+def test_nothing_is_dropped_covers_roster_rows_too():
+    # The invariant as originally claimed, now actually enforced: EVERY roster
+    # row appears, whatever its status, not just the active ones.
+    roster = dry_run.read_roster(ROSTER_CSV)
+    findings = _report()
+    subjects = {f.subject for f in findings}
+    accounts_by_name = {dry_run.normalise_name(a.full_name) for a in SEEDED}
+
+    for row in roster:
+        matched_to_an_account = dry_run.normalise_name(row.name) in accounts_by_name
+        assert matched_to_an_account or row.name in subjects, (
+            f"{row.name} ({row.status}) appears in no bucket"
+        )
+
+
+def test_a_proposed_role_must_exist_in_the_live_grid():
+    # [high]: this file's mapping table and config/roles.yaml can drift. A role
+    # the grid does not define grants nothing, so proposing it would move staff
+    # into a permissionless role while the report called them migratable.
+    known = dry_run.defined_roles()
+    assert known, "the grid should be readable"
+
+    for f in _report():
+        if f.proposed_role is not None:
+            assert f.proposed_role in known, f"proposed undefined role {f.proposed_role}"
+
+
+def test_a_function_mapping_to_an_undefined_role_is_not_proposed():
+    assert dry_run.role_for_function("Physician", known_roles={"clinician"}) == "clinician"
+    # Same function, a grid that does not define the role -> no proposal.
+    assert dry_run.role_for_function("Physician", known_roles={"front_desk"}) is None
+
+
+def test_an_unreadable_grid_proposes_nothing():
+    # Fail closed: an unvalidated proposal is worse than no proposal.
+    assert dry_run.defined_roles("/nonexistent/roles.yaml") == set()
+    assert dry_run.role_for_function("Physician", known_roles=set()) is None
+
+
+def test_an_unrecognised_status_is_reported_not_filtered_out():
+    roster = [dry_run.RosterRow("Ada Lovelace", "Physician", "Medicine", "Main", "sabbatical")]
+    findings = dry_run.build_report(roster, [], known_roles={"clinician"})
+
+    assert len(findings) == 1
+    assert findings[0].outcome == dry_run.UNKNOWN_STATUS
+    assert "sabbatical" in findings[0].detail
+
+
+def test_a_terminated_person_with_no_account_stays_out_of_needs_account():
+    roster = [dry_run.RosterRow("Gone Person", "Physician", "Medicine", "Main", "terminated")]
+    findings = dry_run.build_report(roster, [], known_roles={"clinician"})
+
+    assert findings == []  # nothing to provision, nothing to disable

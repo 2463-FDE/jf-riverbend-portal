@@ -2460,6 +2460,9 @@ INSERT INTO patient_access_grants (user_id, patient_id) VALUES
  (2, 1330),
  (2, 1588),
  (2, 1601),
+ (3, 1042),
+ (3, 1330),
+ (3, 1588),
  (5, 1043),
  (6, 1330),
  (6, 1601);

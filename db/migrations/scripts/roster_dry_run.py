@@ -56,6 +56,7 @@ DECIDE_NO_OWNER = "decide_no_roster_owner"
 UNMAPPED_FUNCTION = "unmapped_function_deny_by_default"
 HOLD_ON_LEAVE = "hold_on_leave_undecided"
 NEEDS_ACCOUNT = "needs_account"
+UNKNOWN_STATUS = "unknown_roster_status"
 
 
 @dataclass(frozen=True)
@@ -104,8 +105,40 @@ def normalise_name(raw: str) -> str:
     return " ".join(s.lower().split())
 
 
-def role_for_function(function: str) -> Optional[str]:
-    return FUNCTION_TO_ROLE.get(" ".join((function or "").lower().split()))
+def defined_roles(roles_yaml_path=None):
+    """Role names the live config actually defines.
+
+    PR #32 review [high]: FUNCTION_TO_ROLE is a table in this file, and
+    config/roles.yaml is the thing that grants permissions. If they drift, this
+    report can propose a role that does not exist — and because the enforcement
+    layer fails closed on an unknown role, a signed migration would move valid
+    staff into a role with NO permissions while the report called them
+    mechanically migratable. Access loss, presented as the safe column.
+
+    So the mapping is validated against the grid rather than trusted.
+    """
+    if roles_yaml_path is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        roles_yaml_path = os.path.join(here, "..", "..", "..", "config", "roles.yaml")
+    try:
+        import yaml
+
+        with open(roles_yaml_path) as f:
+            return set((yaml.safe_load(f) or {}).get("roles", {}))
+    except Exception:
+        # Cannot read the grid -> cannot validate -> propose nothing. Fail
+        # closed: an unvalidated proposal is worse than no proposal.
+        return set()
+
+
+def role_for_function(function: str, known_roles=None) -> Optional[str]:
+    role = FUNCTION_TO_ROLE.get(" ".join((function or "").lower().split()))
+    if role is None:
+        return None
+    if known_roles is None:
+        known_roles = defined_roles()
+    # A role this file maps to but the grid does not define is not a proposal.
+    return role if role in known_roles else None
 
 
 def read_roster(path):
@@ -125,8 +158,10 @@ def read_roster(path):
     ]
 
 
-def build_report(roster, accounts):
+def build_report(roster, accounts, known_roles=None):
     """Every account and every roster row lands in exactly one bucket."""
+    if known_roles is None:
+        known_roles = defined_roles()
     by_key = {}
     for row in roster:
         by_key.setdefault(normalise_name(row.name), []).append(row)
@@ -208,7 +243,7 @@ def build_report(roster, accounts):
                 )
             )
         else:
-            role = role_for_function(person.function)
+            role = role_for_function(person.function, known_roles)
             if role is None:
                 findings.append(
                     Finding(
@@ -234,9 +269,43 @@ def build_report(roster, accounts):
         if key in matched_keys:
             continue
         for person in people:
-            if person.status != "active":
+            if person.status == "terminated":
+                # Nothing to do: no account, and they have left. Reporting them
+                # as "needs an account" would be actively wrong.
                 continue
-            role = role_for_function(person.function)
+            if person.status == "leave":
+                # PR #32 review [medium]: previously skipped entirely, so an
+                # on-leave person with no account appeared in NO bucket — which
+                # broke this report's own "nothing is dropped" guarantee and
+                # contradicted what the client was told about leave surfacing
+                # as an open question.
+                findings.append(
+                    Finding(
+                        outcome=HOLD_ON_LEAVE,
+                        subject=person.name,
+                        detail=(
+                            f"{person.function}, {person.department}, {person.clinic} — "
+                            f"on leave with no account. No rule was set for leave: "
+                            f"provision on return, or hold? Needs a decision."
+                        ),
+                    )
+                )
+                continue
+            if person.status != "active":
+                # An unrecognised status is reported, never filtered out — the
+                # whole point is that nothing disappears silently.
+                findings.append(
+                    Finding(
+                        outcome=UNKNOWN_STATUS,
+                        subject=person.name,
+                        detail=(
+                            f'unrecognised roster status "{person.status}" — '
+                            f"cannot be actioned until it is defined."
+                        ),
+                    )
+                )
+                continue
+            role = role_for_function(person.function, known_roles)
             findings.append(
                 Finding(
                     outcome=NEEDS_ACCOUNT if role else UNMAPPED_FUNCTION,
@@ -256,7 +325,7 @@ def build_report(roster, accounts):
 
 
 def format_report(findings):
-    order = [MIGRATE, DECIDE_NO_OWNER, DISABLE_DEPARTED, UNMAPPED_FUNCTION, HOLD_ON_LEAVE, NEEDS_ACCOUNT]
+    order = [MIGRATE, DECIDE_NO_OWNER, DISABLE_DEPARTED, UNMAPPED_FUNCTION, HOLD_ON_LEAVE, NEEDS_ACCOUNT, UNKNOWN_STATUS]
     titles = {
         MIGRATE: "MIGRATE — ready, one person, one account, mapped function",
         DECIDE_NO_OWNER: "DECIDE — no identified owner (disable, or split into named accounts)",
@@ -264,6 +333,7 @@ def format_report(findings):
         UNMAPPED_FUNCTION: "DENY BY DEFAULT — function maps to no role",
         HOLD_ON_LEAVE: "OPEN QUESTION — staff on leave, no rule set",
         NEEDS_ACCOUNT: "NEEDS AN ACCOUNT — active staff with none",
+        UNKNOWN_STATUS: "UNRECOGNISED STATUS — cannot be actioned",
     }
     out = [
         "ROSTER DRY-RUN MAPPING",
