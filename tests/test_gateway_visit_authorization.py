@@ -45,9 +45,9 @@ def _fresh_session():
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     db = Session()
-    db.add(User(id=FRONTDESK, username="frontdesk", password_hash="x", is_active=True))
-    db.add(User(id=BILLING, username="billing-clerk", password_hash="x", is_active=True))
-    db.add(User(id=DISABLED, username="disabled-doc", password_hash="x", is_active=False))
+    db.add(User(id=FRONTDESK, username="frontdesk", password_hash="x", is_active=True, role="staff"))
+    db.add(User(id=BILLING, username="billing-clerk", password_hash="x", is_active=True, role="staff"))
+    db.add(User(id=DISABLED, username="disabled-doc", password_hash="x", is_active=False, role="staff"))
     db.add(Appointment(id=501, patient_id=1042))
     db.add(Appointment(id=502, patient_id=2001))  # a real appointment FRONTDESK has no grant for
     db.commit()

@@ -30,19 +30,34 @@ class Settings:
     # (denies everyone) until a real value is set in .env on both services.
     internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
-    # PR #23 review round 2 (2026-08-07): sessions previously never expired
-    # (auth.yaml SESSION_TIMEOUT: never). Sessions now carry a Redis TTL,
-    # refreshed on each authenticated request (idle timeout). Default 8h;
-    # override with SESSION_TIMEOUT_SECONDS.
-    session_timeout_seconds = int(os.getenv("SESSION_TIMEOUT_SECONDS", "28800"))
+    # Idle timeout, refreshed on each authenticated request. Sessions once
+    # never expired at all (PR #23 added this TTL), and then defaulted to
+    # 28800 — 8h, long enough that a shared clinical workstation stayed
+    # signed in across an entire shift, which is what the client raised.
+    # Now 15 minutes: the value proposed to them for sign-off, and they may
+    # come back with 30. Env-driven either way, so settling on a different
+    # number is a config change, not a code change.
+    session_timeout_seconds = int(os.getenv("SESSION_TIMEOUT_SECONDS", "900"))
 
-    # The idle TTL above only lapses an
-    # ABANDONED session — a session used at least once per idle window lives
-    # forever, since each read refreshes it. This is a separate, absolute cap
-    # on total session lifetime regardless of activity, enforced at lookup
-    # (security.get_session), not just at creation. Default 24h; override with
-    # ABSOLUTE_SESSION_TIMEOUT_SECONDS.
-    absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "86400"))
+    # The idle TTL above only lapses an ABANDONED session — one used at least
+    # once per idle window would live forever, since every read refreshes it.
+    # This is a separate absolute cap on total lifetime regardless of
+    # activity, enforced at lookup (security.get_session), not just at
+    # creation. Override with ABSOLUTE_SESSION_TIMEOUT_SECONDS.
+    #
+    # 8h at the client's direction (2026-08-13), down from the 12h first
+    # proposed: they want a fresh sign-in at shift handover, and would rather
+    # anchor the cap to one shift and let the 15-minute idle do the routine
+    # work. Revisit only with data on how often an active clinician actually
+    # hits the cap mid-shift.
+    #
+    # For the record, since the reasoning behind that instruction was based on
+    # a comparison that doesn't hold: the pre-existing 8h figure was the IDLE
+    # timeout, not a maximum. Because every authenticated request refreshed
+    # it, a continuously-used session had no upper bound at all before this
+    # cap existed — so neither 12h nor 8h lengthens anything. Both shorten an
+    # unbounded lifetime. 8h is simply the more conservative of the two.
+    absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "28800"))
 
     @property
     def db_url(self) -> str:

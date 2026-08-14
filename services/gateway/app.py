@@ -231,8 +231,27 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
 @app.post("/logout")
 def logout(authorization: Optional[str] = Header(default=None)):
-    destroy_session(_bearer(authorization))
-    return {"status": "ok"}
+    """End the session server-side and say so definitively.
+
+    Shared-workstation fix: the frontend used to swallow any failure here and
+    clear its own storage anyway, so a logout that never reached Redis showed
+    the user a signed-out screen while their session stayed valid — on a
+    machine the next person was about to use. This route now reports the
+    outcome, and a Redis failure surfaces as 503 instead of a cheerful "ok",
+    so the caller can keep the user on the page and retry rather than
+    pretending.
+    """
+    token = _bearer(authorization)
+    if not token:
+        # Nothing to end. Not an error — a caller with no token is already
+        # in the state logout is meant to produce.
+        return {"status": "ok", "session_ended": False}
+    try:
+        destroy_session(token)
+    except Exception as e:
+        log.error("logout failed to reach the session store (error_type=%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="could not end the session; please retry")
+    return {"status": "ok", "session_ended": True}
 
 
 @app.get("/me")
@@ -544,7 +563,15 @@ def proxy_slots(
 
 
 @app.get("/appointments")
-def proxy_list_appointments(patient_id: int, session: dict = Depends(require_permission("patients.read"))):
+def proxy_list_appointments(
+    patient_id: int,
+    # PR #31 review [high]: this was gated on patients.read, but the signed
+    # matrix makes the two distinct — roi_clerk and lab hold patients.read and
+    # NOT appointments.read, so they could list any patient's appointments,
+    # which the grid says is None for them. Reading appointments needs the
+    # appointments permission.
+    session: dict = Depends(require_permission("appointments.read")),
+):
     return _get("scheduling", "/appointments", params={"patient_id": patient_id})
 
 

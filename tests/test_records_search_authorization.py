@@ -49,8 +49,8 @@ def _fresh_engine_session():
     db = sessionmaker(bind=engine)()
     db.add_all(
         [
-            User(id=FRONTDESK, username="frontdesk", is_active=True),
-            User(id=DRPATEL, username="drpatel", is_active=True),
+            User(id=FRONTDESK, username="frontdesk", is_active=True, role="staff"),
+            User(id=DRPATEL, username="drpatel", is_active=True, role="staff"),
             Patient(id=1042, name="Authorized Patient"),
             Patient(id=2001, name="Unrelated Patient"),
             Record(id=1, encounter_id=1, patient_id=1042, kind="note", body="Penicillin allergy noted."),

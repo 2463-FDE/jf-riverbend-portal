@@ -8,3 +8,7 @@ httpx==0.28.1
 # because this service now imports libs.tracing. See libs/tracing/requirements.txt.
 opentelemetry-api==1.29.0
 opentelemetry-sdk==1.29.0
+
+
+# for bedrock
+# boto3==1.35.90

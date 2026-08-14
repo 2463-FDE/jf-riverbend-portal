@@ -60,15 +60,24 @@ class Record(Base):
 
 
 class User(Base):
-    """Minimal projection of the users table — records-service only needs to
-    confirm the authenticated principal (users.id) is still active before
-    honoring a grant (PR #23 review round 2: a disabled account must not
-    retain chart access via an existing grant/session)."""
+    """Minimal projection of the users table — records-service confirms the
+    authenticated principal (users.id) is still active before honoring a
+    grant (PR #23 review round 2: a disabled account must not retain chart
+    access via an existing grant/session), and reads `role` to enforce the
+    signed permission matrix here rather than trusting that the gateway did.
+
+    `role` is read from the database on purpose, never from a request header.
+    This service's port is published, so a header would be spoofable by any
+    direct caller — and it is also what closes the stale-session gap: the
+    gateway writes the role into Redis once at login, so a downgraded or
+    disabled account would otherwise keep its old role until the session
+    lapsed."""
 
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
     username = Column(Text)
+    role = Column(Text)
     is_active = Column(Boolean, nullable=False, default=True)
 
 

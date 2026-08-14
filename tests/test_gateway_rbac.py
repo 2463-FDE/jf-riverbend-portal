@@ -421,3 +421,42 @@ def test_slots_is_reachable_by_exactly_the_roles_that_book(client, monkeypatch):
 
 def test_slots_still_rejects_an_anonymous_caller(client):
     assert client.get("/slots").status_code == 401
+
+
+# --- /appointments (PR #31 review [high]) -----------------------------------
+#
+# It was gated on patients.read, but the signed matrix makes the two distinct:
+# roi_clerk and lab hold patients.read and NOT appointments.read, so they could
+# list any patient's appointment history by supplying a patient_id. The grid
+# says appointments are None for both.
+
+
+def test_reading_appointments_requires_the_appointments_permission(client, monkeypatch):
+    for role in ("roi_clerk", "lab", "it_admin"):
+        monkeypatch.setattr(app_mod, "get_session", lambda t, r=role: _session_for(r) if t == VALID_TOKEN else None)
+        resp = client.get("/appointments", params={"patient_id": 1042}, headers=_auth())
+        assert resp.status_code == 403, f"{role} should not read appointments"
+        assert "appointments.read" in resp.json()["detail"]
+
+
+def test_roles_that_need_appointments_can_still_read_them(client, monkeypatch):
+    _stub_downstream(monkeypatch, payload={"items": []})
+
+    for role in ("front_desk", "scheduler", "clinician", "billing", "management", "staff"):
+        monkeypatch.setattr(app_mod, "get_session", lambda t, r=role: _session_for(r) if t == VALID_TOKEN else None)
+        resp = client.get("/appointments", params={"patient_id": 1042}, headers=_auth())
+        assert resp.status_code == 200, f"{role} should read appointments"
+
+
+def test_reading_appointments_is_separable_from_booking_them(client, monkeypatch):
+    # The grid distinguishes read from write. Nothing should collapse them.
+    from roles_config import permissions_for
+
+    assert "appointments.read" in permissions_for("management")
+    assert "appointments.write" not in permissions_for("management")
+
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("management") if t == VALID_TOKEN else None)
+    _stub_downstream(monkeypatch, payload={"ok": True})
+
+    assert client.get("/appointments", params={"patient_id": 1}, headers=_auth()).status_code == 200
+    assert client.post("/appointments", json={}, headers=_auth()).status_code == 403
