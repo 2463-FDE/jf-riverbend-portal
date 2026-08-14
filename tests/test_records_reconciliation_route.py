@@ -42,6 +42,26 @@ def _internal_header():
     return {"X-Internal-Token": TEST_TOKEN}
 
 
+
+class _FakeActorRow:
+    """The (role, is_active) row records-service now reads to enforce the
+    signed permission matrix at the data boundary and to revalidate the actor
+    on every request. `staff` is the legacy full-permission role every real
+    account still carries, so it preserves what these tests were written to
+    exercise: grant-based authorization, not role-based denial."""
+
+    def __init__(self, role="staff", is_active=True):
+        self.role = role
+        self.is_active = is_active
+
+
+class _FakeActorResult:
+    def __init__(self, row):
+        self._row = row
+
+    def one_or_none(self):
+        return self._row
+
 class _FakeQueryResult:
     def __init__(self, items):
         self._items = items
@@ -198,6 +218,11 @@ class FakeSession:
             else:
                 matched_ids = [requested_ids] if requested_ids in allowed else []
             return _FakeQueryResult(matched_ids)
+        if entity is app_mod.User:
+            # The actor role/is_active lookup added when permission
+            # enforcement moved into this service. Returns the legacy `staff`
+            # role by default so these grant-focused tests keep testing grants.
+            return _FakeActorResult(_FakeActorRow(*getattr(self, "_actor", ("staff", True))))
         raise AssertionError(f"unexpected query entity: {entity}")
 
 

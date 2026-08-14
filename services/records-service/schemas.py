@@ -43,6 +43,10 @@ class PatientDetail(BaseModel):
     phone: str | None = None
     email: str | None = None
     notes: str | None = None
+    # True when `notes` was withheld because the caller's role may not read
+    # clinical notes (client decision 2026-08-14). Distinct from notes being
+    # genuinely empty: a UI can say "withheld" rather than imply there are none.
+    notes_withheld: bool = False
     created_via: str | None = None
     created_at: datetime | None = None
 

@@ -563,7 +563,15 @@ def proxy_slots(
 
 
 @app.get("/appointments")
-def proxy_list_appointments(patient_id: int, session: dict = Depends(require_permission("patients.read"))):
+def proxy_list_appointments(
+    patient_id: int,
+    # PR #31 review [high]: this was gated on patients.read, but the signed
+    # matrix makes the two distinct — roi_clerk and lab hold patients.read and
+    # NOT appointments.read, so they could list any patient's appointments,
+    # which the grid says is None for them. Reading appointments needs the
+    # appointments permission.
+    session: dict = Depends(require_permission("appointments.read")),
+):
     return _get("scheduling", "/appointments", params={"patient_id": patient_id})
 
 

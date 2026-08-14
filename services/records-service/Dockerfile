@@ -16,5 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY services/records-service/ .
 COPY libs/ ./libs/
 
+# roles_config.py resolves <module dir>/../../config/roles.yaml, so the signed
+# permission matrix must sit two levels above /app/roles_config.py — i.e.
+# /config/roles.yaml. Without it every authorized route would fail at request
+# time; the lifespan check refuses to start instead. ROLES_CONFIG_PATH
+# overrides the location.
+COPY config/roles.yaml /config/roles.yaml
+
 EXPOSE 8073
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8073"]

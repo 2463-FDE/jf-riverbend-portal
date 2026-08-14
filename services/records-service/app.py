@@ -26,6 +26,7 @@ from sqlalchemy import exists, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+import roles_config
 from config import settings
 from db import get_db, get_sessionmaker
 from libs.patient_view_agent import (
@@ -39,7 +40,7 @@ from libs.patient_view_agent import (
     run_patient_view,
 )
 from logging_config import configure
-from models import AuditLog, Encounter, Patient, Record
+from models import AuditLog, Encounter, Patient, Record, User
 from patient_access_gate import (
     SqlPatientAccessGate,
     active_patient_ids_query,
@@ -173,6 +174,17 @@ async def lifespan(_app: FastAPI):
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
+    try:
+        roles_config.reload()
+        if not roles_config.roles():
+            raise ValueError("no roles defined")
+    except Exception as e:
+        raise RuntimeError(
+            f"could not load the RBAC config from {roles_config.config_path()!r} "
+            f"({type(e).__name__}: {e}) — refusing to start, because every "
+            f"authorized route would deny. Check that config/roles.yaml is present "
+            f"in the image (see this service's Dockerfile) or set ROLES_CONFIG_PATH."
+        )
     _check_patient_grant_coverage()
     yield
 
@@ -218,6 +230,21 @@ def list_patients(
         return PatientPage(items=[], total=0, limit=limit, offset=offset)
 
     try:
+        # PR #33 review [high]: this route filtered by active grant only and
+        # never checked the caller's role, so an active user holding a grant
+        # could list patient names, DOB, gender and MRN with an unknown or
+        # downgraded role — a stale-role gap at the very boundary this branch
+        # exists to close. Inside the try because this route reports a store
+        # failure as 503 rather than an empty roster; a genuine denial raises
+        # HTTPException, which is not a SQLAlchemyError, so it still surfaces
+        # as 403.
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission="patients.read",
+            audit_action="list_patients",
+        )
         base = select(Patient).where(Patient.id.in_(active_patient_ids_query(user_id)))
         count_q = (
             select(func.count())
@@ -259,6 +286,122 @@ def _actor_label(x_actor_name: Optional[str], x_actor_id: Optional[str]) -> str:
     return x_actor_name or x_actor_id or "unknown"
 
 
+def _redact_clinical_fields(db, detail, *, x_actor_id):
+    """Withhold `patients.notes` from roles that may not read clinical notes.
+
+    Client decision (2026-08-14): Front Desk and Billing do not read clinical
+    notes, and this field is served under `patients.read`, which both hold. It
+    is a single free-text column carrying both kinds of content — the seeded
+    data has "PCN allergy noted at front desk." sitting beside "Prefers morning
+    appts." — so there is no way to hand over the scheduling half without the
+    allergy half.
+
+    Fail closed: withhold the whole field unless the role may read clinical
+    notes. Those roles lose the scheduling preferences too, which is a real
+    cost the client accepted rather than leak allergy text to a role the signed
+    grid excludes. Splitting the column into clinical and non-clinical notes is
+    the correct end state and is a funded follow-up, not this cycle.
+
+    Redacts rather than blanks silently: `notes_withheld` tells the caller the
+    field exists and was withheld, so a UI can say so instead of implying the
+    patient has no notes.
+    """
+    if _actor_may_read_clinical_notes(db, x_actor_id):
+        return detail
+    return detail.model_copy(update={"notes": None, "notes_withheld": True})
+
+
+def _actor_may_read_clinical_notes(db, x_actor_id):
+    """True when this actor's role holds records.read. Deliberately a separate,
+    cheap lookup rather than threading the role down from the authorization
+    check: get_patient authorizes on patients.read, so the role it verified is
+    not the one this question needs."""
+    user_id = parse_user_id(x_actor_id)
+    if user_id is None:
+        return False
+    try:
+        row = db.execute(
+            select(User.role, User.is_active).where(User.id == user_id)
+        ).one_or_none()
+    except SQLAlchemyError:
+        return False  # fail closed — an unreadable role withholds the field
+    if row is None or not row.is_active:
+        return False
+    return "records.read" in roles_config.permissions_for(row.role)
+
+
+def _authorize_actor_permission(
+    db: Session,
+    *,
+    x_actor_id: Optional[str],
+    x_actor_name: Optional[str] = None,
+    required_permission: str,
+    audit_action: str,
+) -> None:
+    """Enforce the signed permission matrix HERE, at the data boundary.
+
+    The gateway's require_permission is the first layer, not the boundary:
+    this service's port is published (docker-compose.yml), so a direct caller
+    skips it entirely. The client's direction was explicit — permissions are
+    enforced in the query path, not by hiding buttons.
+
+    The role comes from `users.role` in the database, never from a header. A
+    header would be spoofable by exactly the direct caller this exists to
+    stop, and reading the row also revalidates `is_active` and `role` on every
+    request — which closes the stale-session gap raised in PR #26 review: the
+    gateway stamps the role into Redis once at login, so a downgraded or
+    disabled account would otherwise keep its old role until the session
+    lapsed (up to the 8h absolute cap). That matters most for the roster
+    migration, where changing someone's role must take effect now, not after
+    their next sign-in.
+
+    Runs BEFORE the per-patient grant check and touches only the actor, so it
+    creates no patient-existence oracle: the denial is identical whether or
+    not the requested patient exists.
+    """
+    user_id = parse_user_id(x_actor_id)
+    if user_id is None:
+        # Not this function's call. An unparseable/absent actor is already
+        # denied downstream by SqlPatientAccessGate with a structured reason
+        # code and its own audit vocabulary; duplicating it here would replace
+        # a specific denial with a vaguer one. This function judges permission,
+        # not actor validity — so hand off and let the gate speak.
+        return
+
+    try:
+        row = db.execute(
+            select(User.role, User.is_active).where(User.id == user_id)
+        ).one_or_none()
+    except SQLAlchemyError:
+        # Deliberately re-raised rather than turned into a status here. This
+        # service has TWO established contracts for a database failure and they
+        # differ by route: the grant-gated patient routes deny closed with 403
+        # (test_grant_lookup_failure_denies_closed), while the list and search
+        # routes report 503 rather than look like a legitimately empty result
+        # (test_search_db_failure_is_503_not_silently_empty). A single decision
+        # made here would silently override one of them, so the caller decides.
+        log.exception("permission check: authorization store unreadable for actor")
+        raise
+
+    if row is None or not row.is_active:
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message=f"{audit_action} denied: actor unknown or inactive",
+        )
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    if required_permission not in roles_config.permissions_for(row.role):
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message=(
+                f"{audit_action} denied: role lacks {required_permission}"
+            ),
+        )
+        raise HTTPException(status_code=403, detail="not authorized")
+
+
 def _authorize_or_deny(
     db: Session,
     *,
@@ -269,6 +412,7 @@ def _authorize_or_deny(
     action: Action = Action.VIEW_PATIENT_CHART,
     purpose: Purpose = Purpose.TREATMENT,
     audit_action: str = "patient_access",
+    required_permission: str = "records.read",
 ) -> None:
     """Shared by get_patient/get_patient_records/get_patient_view/
     get_patient_reconciliation — runs SqlPatientAccessGate.authorize()
@@ -279,6 +423,30 @@ def _authorize_or_deny(
     param above, which is the authorization request's own action type —
     default "patient_access" keeps every existing call site/test
     unchanged). Always raises on deny; returns normally on allow."""
+    try:
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission=required_permission,
+            audit_action=audit_action,
+        )
+    except SQLAlchemyError:
+        # Fail closed, matching this route family's existing contract: an
+        # authorization store we cannot read denies rather than reporting an
+        # outage the caller might retry past.
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message=f"{audit_action} denied: authorization store unreadable",
+        )
+        # Same 403 AND the same structured body the gate produces for an
+        # unreadable policy store, so callers keep one denial contract rather
+        # than two that differ by which query happened to fail first.
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "policy_error", "correlation_id": x_request_id},
+        )
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -314,7 +482,7 @@ def get_patient(
     patient_access_gate.py.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id)
+    _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id, required_permission="patients.read")
 
     try:
         patient = db.get(Patient, patient_id)
@@ -330,7 +498,8 @@ def get_patient(
         actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
-    return PatientDetail.model_validate(patient)
+    detail = PatientDetail.model_validate(patient)
+    return _redact_clinical_fields(db, detail, x_actor_id=x_actor_id)
 
 
 @app.get("/patients/{patient_id}/records", response_model=PatientChart)
@@ -518,6 +687,24 @@ def get_patient_view(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid purpose '{purpose}'")
 
+    try:
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission="records.read",
+            audit_action="patient_view",
+        )
+    except SQLAlchemyError:
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message="patient_view denied: authorization store unreadable",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "policy_error", "correlation_id": x_request_id},
+        )
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -712,6 +899,18 @@ def search_records(
     if user_id is None:
         _write_audit(db, actor=actor, message="records_search denied: no valid actor")
         return []
+    try:
+        # Same placement reasoning as list_patients above.
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission="records.read",
+            audit_action="records_search",
+        )
+    except SQLAlchemyError:
+        log.exception("records_search: authorization store unreadable")
+        raise HTTPException(status_code=503, detail="database unavailable")
 
     try:
         rows = (
