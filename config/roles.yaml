@@ -1,24 +1,46 @@
-# RBAC configuration.
+# RBAC configuration — the live permission source.
 #
-# This file went from documentation nobody read to a live permission source
-# (services/gateway/roles_config.py -> app.py's require_permission
-# dependency, used per-route below) — replacing "everyone gets the single
-# 'staff' role" with four least-privilege roles for the job functions this
-# system actually has routes for.
+# This file went from documentation nobody read to a real, enforced permission
+# source (services/gateway/roles_config.py -> app.py's require_permission).
+# The role definitions below are the client's signed permission matrix of
+# 2026-08-13, cell for cell. Do not adjust a cell here without a corresponding
+# amendment to that matrix — the grid is the contract, this file is its
+# implementation.
 #
-# `staff` is kept, unchanged (same permissions it always had), as a
-# deprecated legacy role: every account seeded/created before this change is
-# on it, and this repo has no real staff-directory / job-function data to
-# decide which of the eventual 1,000 real accounts should move to which
-# specific role below — that is an "ask the client, don't guess" gap (see
-# CLAUDE.md "Unknowns"), not something this change can resolve, and
-# `db/seed/generate_seed.py`'s demo accounts are deliberately left
-# unreassigned here for the same reason (several, like the COO or IT
-# support accounts, don't map cleanly onto any of the four operational
-# roles below). Migrating real accounts off `staff` is an explicit, separate
-# follow-up. Do not grant `staff` to any NEW account going forward — pick
-# the specific role that matches the account's actual job function.
+# Gateway route gating is only the first layer. The authoritative check belongs
+# at the data-query boundary (records-service, alongside patient_access_gate.py)
+# — several domain services are still reachable directly on published ports with
+# no gateway-trust check at all, so this file alone does not make permissions
+# unbypassable. That is the next branch's work.
+#
+# Permission vocabulary, one pair per data type in the signed matrix:
+#   patients.read/write       patient demographics
+#   records.read/write        clinical notes and chart detail
+#   billing.read/write        insurance and billing
+#   appointments.read/write   appointments and scheduling
+#   consents.read/write       consent capture
+#   disclosures.read          disclosure history (for accounting)
+#   roi.write                 create and fulfil release-of-information requests
+#   accounts.read/write       staff account administration
+#   audit.read                the access/audit log
+#
+# `records.write` does NOT imply `records.read`. The `lab` role deliberately
+# holds write without read (see below), so any enforcement added later must
+# check the two independently rather than treating write as a superset.
+
 roles:
+  # --- deprecated legacy role ----------------------------------------------
+  # Every account created before the role split is still on this, and it keeps
+  # the full patient-data access it always had. Do not assign it to a new
+  # account; pick the specific role that matches the job function.
+  #
+  # It carries the newer finer-grained patient-data permissions
+  # (consents.*, billing.write, appointments.read) because the old flat role
+  # genuinely could do all of those things — withholding them here would
+  # revoke access from every current user the moment a route gates on one.
+  # It does NOT get accounts.* or audit.read: the legacy role never had
+  # account administration or audit access, and the signed matrix's legacy row
+  # shows None for both.
   staff:
     description: >-
       Deprecated legacy role — every account predating the role split.
@@ -29,18 +51,29 @@ roles:
       - records.read        # includes clinical notes
       - records.write
       - billing.read
-      - disclosures.read
+      - billing.write
+      - appointments.read
       - appointments.write
+      - consents.read
+      - consents.write
+      - disclosures.read
       - roi.write
 
+  # --- operational roles, per the signed matrix ----------------------------
+
   front_desk:
-    description: Registration, roster/eligibility lookups, desk scheduling.
+    description: Registration, insurance capture, consent capture, desk scheduling.
+    # No clinical notes — the client's explicit instruction. Front desk
+    # registers and schedules; it does not read the chart.
     permissions:
       - patients.read
       - patients.write
-      - records.read
       - billing.read
+      - billing.write
+      - appointments.read
       - appointments.write
+      - consents.read
+      - consents.write
 
   clinician:
     description: Chart access and clinical documentation.
@@ -48,31 +81,100 @@ roles:
       - patients.read
       - records.read
       - records.write
+      - appointments.read
+      - consents.read
 
-  roi_clerk:
-    description: Release-of-information request intake and fulfillment.
+  nursing_ma:
+    description: Nursing and medical-assistant documentation (vitals, intake).
+    # Identical to `clinician` today, and that is deliberate rather than an
+    # oversight: the client declined to split nursing documentation from
+    # physician notes this cycle (a data-model change), so both roles write to
+    # the same note area. The roles stay separate because the distinction is
+    # real in the audit log and in reporting even while the permissions match,
+    # and because the split — when funded — lands here without a rename.
     permissions:
       - patients.read
+      - records.read
+      - records.write
+      - appointments.read
+      - consents.read
+
+  lab:
+    description: Specimen intake and posting results.
+    # Write without read, deliberately. The client revised their own earlier
+    # answer here: with no separate results category in the schema, granting
+    # "read prior results" would mean granting the whole chart. Delta-check
+    # needs come back as a funded card, not as a widened permission.
+    permissions:
+      - patients.read
+      - records.write
+
+  billing:
+    description: Claims, coverage, and payment.
+    # No clinical notes — the client's explicit instruction, same as front desk.
+    permissions:
+      - patients.read
+      - billing.read
+      - billing.write
+      - appointments.read
+      - consents.read
+
+  roi_clerk:
+    description: Release-of-information request intake and fulfilment.
+    # No clinical notes. Clerks work from the document list — type, date,
+    # encounter; the authorisation defines what is released and the fulfilment
+    # path pulls it, so no note needs reading to release it. disclosures.read
+    # and audit.read are what disclosure accounting actually requires.
+    permissions:
+      - patients.read
+      - consents.read
       - disclosures.read
       - roi.write
+      - audit.read
 
   scheduler:
     description: Appointment booking and slot management.
     permissions:
       - patients.read
+      - appointments.read
       - appointments.write
 
+  it_admin:
+    description: Staff account administration. No patient data of any kind.
+    # The client was explicit: IT/Admin manages accounts and has no chart
+    # read. Note there is no patients.read here either — not demographics,
+    # not notes, nothing patient-scoped.
+    permissions:
+      - accounts.read
+      - accounts.write
+      - audit.read
+
+  management:
+    description: Oversight and reporting. No patient demographics or notes.
+    # A manager who needs an individual chart for a complaint holds a clinical
+    # role for that purpose, and the audit log shows it as one — the client's
+    # words: "I'd rather that be visible than convenient."
+    permissions:
+      - billing.read
+      - appointments.read
+      - disclosures.read
+      - accounts.read
+      - audit.read
+
+# Every existing and seeded account is still on `staff`. Migrating real
+# accounts onto the roles above runs off the client's staff roster, behind an
+# account-by-account dry run they approve first — see the current cycle's plan.
 default_role: staff
 
 # MFA is deliberately absent from this file.
 #
 # A working TOTP second factor was built and tested, then parked at the
-# client's 2026-08-12 direction: they want it delivered as one complete
-# rollout next cycle (backup codes, supervisor-verified reset, reset
-# logging, shared-front-desk-login remediation, pilot clinic, two-week
-# prompt-only grace period, dated cutover, shared-workstation validation)
-# rather than as a mechanism shipped alone. The prototype lives on
-# `feat/mfa-totp-parked`, unmerged, with a planning card.
+# client's direction: they want it delivered as one complete rollout in the
+# next cycle (backup codes, supervisor-verified reset, reset logging,
+# shared-front-desk-login remediation, pilot clinic, two-week prompt-only
+# grace period, dated cutover, shared-workstation validation) rather than as
+# a mechanism shipped alone. The prototype lives on `feat/mfa-totp-parked`,
+# unmerged, with a planning card.
 #
 # Do not re-add an `mfa_required` flag here without that rollout — a flag
 # that nothing enforces is exactly the documentation-pretending-to-be-a-
