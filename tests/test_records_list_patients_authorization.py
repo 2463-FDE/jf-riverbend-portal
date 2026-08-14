@@ -50,9 +50,9 @@ def _seeded_session():
     db = sessionmaker(bind=engine)()
     db.add_all(
         [
-            User(id=FRONTDESK, username="frontdesk", is_active=True),
-            User(id=BILLING, username="billing-clerk", is_active=True),
-            User(id=DISABLED, username="disabled-doc", is_active=False),
+            User(id=FRONTDESK, username="frontdesk", is_active=True, role="staff"),
+            User(id=BILLING, username="billing-clerk", is_active=True, role="staff"),
+            User(id=DISABLED, username="disabled-doc", is_active=False, role="staff"),
             Patient(id=1042, name="Maria Gonzalez"),
             Patient(id=2001, name="Unrelated Patient"),
             Patient(id=1043, name="James O'Brien"),

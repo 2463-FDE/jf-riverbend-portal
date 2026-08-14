@@ -3,3 +3,7 @@ uvicorn[standard]==0.34.0
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 pydantic==2.10.4
+
+# config/roles.yaml loader (roles_config.py) — the signed permission matrix,
+# enforced here at the data boundary rather than only at the gateway.
+PyYAML==6.0.2

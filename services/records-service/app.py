@@ -26,6 +26,7 @@ from sqlalchemy import exists, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+import roles_config
 from config import settings
 from db import get_db, get_sessionmaker
 from libs.patient_view_agent import (
@@ -39,7 +40,7 @@ from libs.patient_view_agent import (
     run_patient_view,
 )
 from logging_config import configure
-from models import AuditLog, Encounter, Patient, Record
+from models import AuditLog, Encounter, Patient, Record, User
 from patient_access_gate import (
     SqlPatientAccessGate,
     active_patient_ids_query,
@@ -173,6 +174,17 @@ async def lifespan(_app: FastAPI):
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
+    try:
+        roles_config.reload()
+        if not roles_config.roles():
+            raise ValueError("no roles defined")
+    except Exception as e:
+        raise RuntimeError(
+            f"could not load the RBAC config from {roles_config.config_path()!r} "
+            f"({type(e).__name__}: {e}) — refusing to start, because every "
+            f"authorized route would deny. Check that config/roles.yaml is present "
+            f"in the image (see this service's Dockerfile) or set ROLES_CONFIG_PATH."
+        )
     _check_patient_grant_coverage()
     yield
 
@@ -211,6 +223,13 @@ def list_patients(
     never a silently empty 200.
     """
     _verify_internal_token(x_internal_token)
+    _authorize_actor_permission(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        required_permission="patients.read",
+        audit_action="list_patients",
+    )
     actor = x_actor_name or x_actor_id or "unknown"
     user_id = parse_user_id(x_actor_id)
     if user_id is None:
@@ -259,6 +278,73 @@ def _actor_label(x_actor_name: Optional[str], x_actor_id: Optional[str]) -> str:
     return x_actor_name or x_actor_id or "unknown"
 
 
+def _authorize_actor_permission(
+    db: Session,
+    *,
+    x_actor_id: Optional[str],
+    x_actor_name: Optional[str] = None,
+    required_permission: str,
+    audit_action: str,
+) -> None:
+    """Enforce the signed permission matrix HERE, at the data boundary.
+
+    The gateway's require_permission is the first layer, not the boundary:
+    this service's port is published (docker-compose.yml), so a direct caller
+    skips it entirely. The client's direction was explicit — permissions are
+    enforced in the query path, not by hiding buttons.
+
+    The role comes from `users.role` in the database, never from a header. A
+    header would be spoofable by exactly the direct caller this exists to
+    stop, and reading the row also revalidates `is_active` and `role` on every
+    request — which closes the stale-session gap raised in PR #26 review: the
+    gateway stamps the role into Redis once at login, so a downgraded or
+    disabled account would otherwise keep its old role until the session
+    lapsed (up to the 8h absolute cap). That matters most for the roster
+    migration, where changing someone's role must take effect now, not after
+    their next sign-in.
+
+    Runs BEFORE the per-patient grant check and touches only the actor, so it
+    creates no patient-existence oracle: the denial is identical whether or
+    not the requested patient exists.
+    """
+    user_id = parse_user_id(x_actor_id)
+    if user_id is None:
+        # Not this function's call. An unparseable/absent actor is already
+        # denied downstream by SqlPatientAccessGate with a structured reason
+        # code and its own audit vocabulary; duplicating it here would replace
+        # a specific denial with a vaguer one. This function judges permission,
+        # not actor validity — so hand off and let the gate speak.
+        return
+
+    try:
+        row = db.execute(
+            select(User.role, User.is_active).where(User.id == user_id)
+        ).one_or_none()
+    except SQLAlchemyError:
+        # A policy store we cannot read is not a permitted request. Fail
+        # closed and say so, rather than degrading into an allow.
+        log.exception("permission check: database error for actor")
+        raise HTTPException(status_code=503, detail="authorization store unavailable")
+
+    if row is None or not row.is_active:
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message=f"{audit_action} denied: actor unknown or inactive",
+        )
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    if required_permission not in roles_config.permissions_for(row.role):
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message=(
+                f"{audit_action} denied: role lacks {required_permission}"
+            ),
+        )
+        raise HTTPException(status_code=403, detail="not authorized")
+
+
 def _authorize_or_deny(
     db: Session,
     *,
@@ -269,6 +355,7 @@ def _authorize_or_deny(
     action: Action = Action.VIEW_PATIENT_CHART,
     purpose: Purpose = Purpose.TREATMENT,
     audit_action: str = "patient_access",
+    required_permission: str = "records.read",
 ) -> None:
     """Shared by get_patient/get_patient_records/get_patient_view/
     get_patient_reconciliation — runs SqlPatientAccessGate.authorize()
@@ -279,6 +366,13 @@ def _authorize_or_deny(
     param above, which is the authorization request's own action type —
     default "patient_access" keeps every existing call site/test
     unchanged). Always raises on deny; returns normally on allow."""
+    _authorize_actor_permission(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        required_permission=required_permission,
+        audit_action=audit_action,
+    )
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -314,7 +408,7 @@ def get_patient(
     patient_access_gate.py.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id)
+    _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id, required_permission="patients.read")
 
     try:
         patient = db.get(Patient, patient_id)
@@ -518,6 +612,13 @@ def get_patient_view(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid purpose '{purpose}'")
 
+    _authorize_actor_permission(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        required_permission=required_permission,
+        audit_action=audit_action,
+    )
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -707,6 +808,13 @@ def search_records(
     now at least bounded by _SEARCH_RESULT_LIMIT.
     """
     _verify_internal_token(x_internal_token)
+    _authorize_actor_permission(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        required_permission="records.read",
+        audit_action="records_search",
+    )
     actor = x_actor_name or x_actor_id or "unknown"
     user_id = parse_user_id(x_actor_id)
     if user_id is None:
