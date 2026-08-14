@@ -356,6 +356,10 @@ emit()
 #   frontdesk registers/handles the Maria Gonzalez charts (1042/1330/1588,
 #     all the SAME person under three unmerged rows — see the module
 #     docstring above) and Aisha Khan (1601, front_desk-registered).
+#   rdelgado is the registration user used in the duplicate-records demo, so
+#     she is assigned the same Maria Gonzalez cluster. Reconciliation checks
+#     every source chart independently; granting only 1042 would correctly
+#     hide 1330/1588 and make the demo look like no duplicate was found.
 #   drpatel is James O'Brien's (1043) physician (encounter 4's provider).
 #   drnguyen also treats Maria Gonzalez's 1330 chart and Aisha Khan (1601)
 #     — encounters 2 and 5's provider — overlapping with frontdesk's grants
@@ -367,10 +371,11 @@ emit()
 # ---------------------------------------------------------------------------
 # PR #23 review round 2 (2026-08-07): grants are keyed on users.id (the stable
 # principal the gateway forwards as X-Actor-Id), never username. Ids from the
-# users INSERT above: frontdesk=2, drpatel=5, drnguyen=6.
+# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6.
 emit("INSERT INTO patient_access_grants (user_id, patient_id) VALUES")
 gwrows = [
     " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
+    " (3, 1042)", " (3, 1330)", " (3, 1588)",                  # rdelgado
     " (5, 1043)",                                             # drpatel
     " (6, 1330)", " (6, 1601)",                               # drnguyen
 ]

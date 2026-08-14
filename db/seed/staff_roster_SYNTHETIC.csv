@@ -1,0 +1,32 @@
+# TRAINING-SIMULATION STAFF ROSTER — the people are fictional by design.
+#
+# This IS the dataset the dry-run mapping and account-migration exercise runs
+# against: name, function, department, clinic, status. Riverbend is a training
+# simulation, so there is no other roster behind this one, and a report built
+# from it is the intended basis for review and sign-off.
+#
+# Names that match seeded accounts in db/seed/seed.sql are reused from that
+# demo data so the mapping has something real to reconcile against.
+#
+# Deliberately shaped to exercise every case branches 8 and 9 must handle —
+# see db/seed/README-staff-roster.md for the case-by-case walkthrough.
+#
+# Lines beginning with '#' are comments and are skipped by the reader.
+name,function,department,clinic,status
+Maya Okonkwo,Chief Operating Officer,Administration,Riverbend Main,active
+Rosa Delgado,Patient Registration,Front Office,Riverbend Main,active
+Jin Park,Patient Registration,Front Office,Riverbend East,active
+Priya Raman,Patient Registration,Front Office,Riverbend Main,active
+Marcus Bell,Patient Registration,Front Office,Riverbend Main,active
+Anil Patel,Physician,Internal Medicine,Riverbend Main,active
+Anita Nguyen,Physician,Family Medicine,Riverbend East,active
+Sandra Lee,Physician,Pediatrics,Riverbend South,terminated
+Yusuf Demir,Physician,Internal Medicine,Riverbend South,leave
+Karen Cole,Registered Nurse,Family Medicine,Riverbend East,active
+Aisha Kone,Laboratory Technician,Laboratory,Riverbend Main,active
+Diego Marquez,Laboratory Technician,Laboratory,Riverbend South,active
+Tom Reyes,Billing Specialist,Revenue Cycle,Riverbend Main,active
+Dana White,Release of Information Clerk,Health Information,Riverbend Main,active
+Nadia Osei,Scheduling Coordinator,Front Office,Riverbend East,active
+Owen Fitzgerald,Systems Administrator,Information Technology,Riverbend Main,active
+Grace Liang,Volunteer Coordinator,Community Outreach,Riverbend Main,active
