@@ -67,6 +67,13 @@ class _FakeGrantResult:
     def first(self):
         return (1,) if self._found else None
 
+    def one_or_none(self):
+        # The actor role/is_active lookup, added when permission enforcement
+        # moved into records-service. This fake returns one object for every
+        # execute(), so the lookup lands here too. These tests are about GRANT
+        # authorization, so the actor is an active legacy-`staff` user.
+        return _FakeActorRow()
+
 
 class FakeSession:
     def __init__(

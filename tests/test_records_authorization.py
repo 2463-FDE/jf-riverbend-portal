@@ -153,6 +153,13 @@ class _FakeGrantResultOrEmptyScalars(_FakeGrantResult):
     def scalars(self):
         return _FakeScalars([])
 
+    def one_or_none(self):
+        # The actor role/is_active lookup, added when permission enforcement
+        # moved into records-service. This fake returns one object for every
+        # execute(), so the lookup lands here too. These tests are about GRANT
+        # authorization, so the actor is an active legacy-`staff` user.
+        return _FakeActorRow()
+
 
 def _fake_get_db():
     session = FakeSession()

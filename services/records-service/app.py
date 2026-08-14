@@ -223,13 +223,6 @@ def list_patients(
     never a silently empty 200.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_actor_permission(
-        db,
-        x_actor_id=x_actor_id,
-        x_actor_name=x_actor_name,
-        required_permission="patients.read",
-        audit_action="list_patients",
-    )
     actor = x_actor_name or x_actor_id or "unknown"
     user_id = parse_user_id(x_actor_id)
     if user_id is None:
@@ -321,10 +314,15 @@ def _authorize_actor_permission(
             select(User.role, User.is_active).where(User.id == user_id)
         ).one_or_none()
     except SQLAlchemyError:
-        # A policy store we cannot read is not a permitted request. Fail
-        # closed and say so, rather than degrading into an allow.
-        log.exception("permission check: database error for actor")
-        raise HTTPException(status_code=503, detail="authorization store unavailable")
+        # Deliberately re-raised rather than turned into a status here. This
+        # service has TWO established contracts for a database failure and they
+        # differ by route: the grant-gated patient routes deny closed with 403
+        # (test_grant_lookup_failure_denies_closed), while the list and search
+        # routes report 503 rather than look like a legitimately empty result
+        # (test_search_db_failure_is_503_not_silently_empty). A single decision
+        # made here would silently override one of them, so the caller decides.
+        log.exception("permission check: authorization store unreadable for actor")
+        raise
 
     if row is None or not row.is_active:
         _write_audit(
@@ -366,13 +364,30 @@ def _authorize_or_deny(
     param above, which is the authorization request's own action type —
     default "patient_access" keeps every existing call site/test
     unchanged). Always raises on deny; returns normally on allow."""
-    _authorize_actor_permission(
-        db,
-        x_actor_id=x_actor_id,
-        x_actor_name=x_actor_name,
-        required_permission=required_permission,
-        audit_action=audit_action,
-    )
+    try:
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission=required_permission,
+            audit_action=audit_action,
+        )
+    except SQLAlchemyError:
+        # Fail closed, matching this route family's existing contract: an
+        # authorization store we cannot read denies rather than reporting an
+        # outage the caller might retry past.
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message=f"{audit_action} denied: authorization store unreadable",
+        )
+        # Same 403 AND the same structured body the gate produces for an
+        # unreadable policy store, so callers keep one denial contract rather
+        # than two that differ by which query happened to fail first.
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "policy_error", "correlation_id": x_request_id},
+        )
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -612,13 +627,24 @@ def get_patient_view(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid purpose '{purpose}'")
 
-    _authorize_actor_permission(
-        db,
-        x_actor_id=x_actor_id,
-        x_actor_name=x_actor_name,
-        required_permission=required_permission,
-        audit_action=audit_action,
-    )
+    try:
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission="records.read",
+            audit_action="patient_view",
+        )
+    except SQLAlchemyError:
+        _write_audit(
+            db,
+            actor=_actor_label(x_actor_name, x_actor_id),
+            message="patient_view denied: authorization store unreadable",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "policy_error", "correlation_id": x_request_id},
+        )
     request = AuthorizationRequest(
         actor_id=x_actor_id or "",
         patient_id=patient_id,
@@ -808,18 +834,23 @@ def search_records(
     now at least bounded by _SEARCH_RESULT_LIMIT.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_actor_permission(
-        db,
-        x_actor_id=x_actor_id,
-        x_actor_name=x_actor_name,
-        required_permission="records.read",
-        audit_action="records_search",
-    )
     actor = x_actor_name or x_actor_id or "unknown"
     user_id = parse_user_id(x_actor_id)
     if user_id is None:
         _write_audit(db, actor=actor, message="records_search denied: no valid actor")
         return []
+    try:
+        # Same placement reasoning as list_patients above.
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission="records.read",
+            audit_action="records_search",
+        )
+    except SQLAlchemyError:
+        log.exception("records_search: authorization store unreadable")
+        raise HTTPException(status_code=503, detail="database unavailable")
 
     try:
         rows = (
