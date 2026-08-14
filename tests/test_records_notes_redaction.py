@@ -94,3 +94,52 @@ def test_withholds_when_there_is_no_actor():
     out = app_mod._redact_clinical_fields(_Db(), _detail(), x_actor_id=None)
 
     assert out.notes is None and out.notes_withheld is True
+
+
+# --- the reviewer's explicit ask (PR #33 review [high]) ---------------------
+#
+# The finding: using broad `records.read` as the notes predicate meant a
+# front_desk actor would pass and receive the raw clinical field. That was true
+# against the four-role grid, where front_desk still held records.read. The
+# signed nine-role grid removes it — so the predicate is now correct AND the
+# grid is what makes it correct. Both halves are pinned here, because if either
+# regresses the field leaks and nothing else would catch it.
+
+
+def test_front_desk_does_not_hold_records_read_in_the_signed_grid():
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "records-service"))
+    import roles_config
+
+    roles_config.reload()
+    assert "records.read" not in roles_config.permissions_for("front_desk")
+    assert "records.read" not in roles_config.permissions_for("billing")
+
+
+def test_a_front_desk_actor_with_a_patient_grant_still_gets_notes_withheld():
+    # The regression test the reviewer asked for by name. A grant gets you the
+    # patient; it does not get you the clinical field.
+    out = app_mod._redact_clinical_fields(_Db(_Row("front_desk")), _detail(), x_actor_id="2")
+
+    assert out.notes is None
+    assert out.notes_withheld is True
+
+
+def test_billing_is_withheld_too():
+    out = app_mod._redact_clinical_fields(_Db(_Row("billing")), _detail(), x_actor_id="2")
+
+    assert out.notes is None and out.notes_withheld is True
+
+
+def test_only_the_clinical_roles_receive_the_field():
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "records-service"))
+    import roles_config
+
+    roles_config.reload()
+    receives = {
+        r for r in ("front_desk", "clinician", "nursing_ma", "lab", "billing",
+                    "roi_clerk", "scheduler", "it_admin", "management")
+        if app_mod._redact_clinical_fields(_Db(_Row(r)), _detail(), x_actor_id="2").notes is not None
+    }
+    assert receives == {"clinician", "nursing_ma"}

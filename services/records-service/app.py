@@ -230,6 +230,21 @@ def list_patients(
         return PatientPage(items=[], total=0, limit=limit, offset=offset)
 
     try:
+        # PR #33 review [high]: this route filtered by active grant only and
+        # never checked the caller's role, so an active user holding a grant
+        # could list patient names, DOB, gender and MRN with an unknown or
+        # downgraded role — a stale-role gap at the very boundary this branch
+        # exists to close. Inside the try because this route reports a store
+        # failure as 503 rather than an empty roster; a genuine denial raises
+        # HTTPException, which is not a SQLAlchemyError, so it still surfaces
+        # as 403.
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission="patients.read",
+            audit_action="list_patients",
+        )
         base = select(Patient).where(Patient.id.in_(active_patient_ids_query(user_id)))
         count_q = (
             select(func.count())
