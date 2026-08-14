@@ -1,9 +1,9 @@
-# Synthetic staff roster — what each row is for
+# Training-simulation staff roster — what each row is for
 
-`staff_roster_SYNTHETIC.csv` stands in for the staff directory the client was
-to supply. **It is invented data, authorised as synthetic for this learning
-project.** The real roster governs before any production migration, and this
-file must never be shown to the client as their own.
+`staff_roster_SYNTHETIC.csv` is the training-simulation staff directory this
+exercise runs against. **The people are fictional by design** — Riverbend is a
+simulation, so there is no other roster behind this one, and a mapping report
+built from it is the intended basis for review and sign-off.
 
 It carries the five columns the client specified — name, function, department,
 clinic, status — and nothing else. No usernames: a real HR export wouldn't

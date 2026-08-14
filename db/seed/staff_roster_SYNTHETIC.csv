@@ -1,13 +1,12 @@
-# SYNTHETIC STAFF ROSTER — NOT REAL PERSONNEL DATA.
+# TRAINING-SIMULATION STAFF ROSTER — the people are fictional by design.
 #
-# Stands in for the staff directory the client was to supply (name, function,
-# department, clinic, status). Authorised as synthetic for this learning
-# project; the real roster governs before any production migration, and this
-# file must never be presented to the client as their data.
+# This IS the dataset the dry-run mapping and account-migration exercise runs
+# against: name, function, department, clinic, status. Riverbend is a training
+# simulation, so there is no other roster behind this one, and a report built
+# from it is the intended basis for review and sign-off.
 #
-# Every name here is invented. The nine names that match seeded accounts in
-# db/seed/seed.sql are reused from that already-synthetic demo data so the
-# dry-run mapping has something to reconcile against.
+# Names that match seeded accounts in db/seed/seed.sql are reused from that
+# demo data so the mapping has something real to reconcile against.
 #
 # Deliberately shaped to exercise every case branches 8 and 9 must handle —
 # see db/seed/README-staff-roster.md for the case-by-case walkthrough.

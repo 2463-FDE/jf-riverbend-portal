@@ -209,3 +209,45 @@ def test_report_lists_every_bucket_even_when_empty():
 
     for title in ("MIGRATE", "DECIDE", "DISABLE", "DENY BY DEFAULT", "OPEN QUESTION", "NEEDS AN ACCOUNT"):
         assert title in text
+
+
+# --- reading accounts without a live database ------------------------------
+#
+# This is a training simulation and the committed seed is the account set the
+# exercise runs against, so the report must not require `make up`.
+
+
+SEED_SQL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "db", "seed", "seed.sql"
+)
+
+
+def test_reads_the_seeded_accounts_from_seed_sql():
+    accounts = dry_run.read_accounts_from_seed(SEED_SQL)
+
+    by_username = {a.username: a for a in accounts}
+    assert len(accounts) == 12
+    assert by_username["drpatel"].full_name == "Dr. Anil Patel"
+    assert by_username["itadmin"].full_name == "Helix Support"
+    # Every seeded account is on the legacy role — the thing the migration exists
+    # to change. If this ever fails, the seed moved ahead of the migration.
+    assert {a.role for a in accounts} == {"staff"}
+    assert all(a.is_active for a in accounts)
+
+
+def test_the_seeded_accounts_produce_the_documented_split():
+    # The end-to-end shape the report is meant to show, with no database.
+    findings = dry_run.build_report(
+        dry_run.read_roster(ROSTER_CSV), dry_run.read_accounts_from_seed(SEED_SQL)
+    )
+
+    assert len(_outcomes(findings, dry_run.MIGRATE)) == 8
+    assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 3   # frontdesk, labtech, itadmin
+    assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 1  # drlee
+
+
+def test_a_missing_users_insert_yields_no_accounts_rather_than_crashing(tmp_path):
+    empty = tmp_path / "seed.sql"
+    empty.write_text("-- no users here\n")
+
+    assert dry_run.read_accounts_from_seed(str(empty)) == []

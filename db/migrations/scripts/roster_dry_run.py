@@ -27,6 +27,7 @@ database; `main()` is the thin IO shell that reads the CSV and the accounts.
 """
 import csv
 import os
+import pathlib
 import re
 import sys
 from typing import Optional
@@ -287,6 +288,31 @@ def format_report(findings):
     return "\n".join(out)
 
 
+_SEED_USER_ROW = re.compile(
+    r"\(\s*\d+\s*,\s*'([^']*)'\s*,\s*'[^']*'\s*,\s*'([^']*)'\s*,\s*'([^']*)'"
+)
+
+
+def read_accounts_from_seed(path):
+    """Read accounts from db/seed/seed.sql instead of a live database.
+
+    This is a training simulation and the committed seed is the account set the
+    exercise runs against, so the report must not require `make up` to produce.
+    Parses the users INSERT only: (id, username, password_hash, full_name, role).
+    is_active is not in that INSERT — it defaults TRUE in the schema, so seeded
+    accounts are active.
+    """
+    text_ = pathlib.Path(path).read_text()
+    start = text_.find("INSERT INTO users")
+    if start < 0:
+        return []
+    block = text_[start : text_.find(";", start)]
+    return [
+        Account(username=u, full_name=fn, role=role, is_active=True)
+        for u, fn, role in _SEED_USER_ROW.findall(block)
+    ]
+
+
 def _load_accounts_from_db():
     import psycopg2
 
@@ -310,15 +336,26 @@ def main(argv):
     default_roster = os.path.join(here, "..", "..", "seed", "staff_roster_SYNTHETIC.csv")
     roster_path = argv[1] if len(argv) > 1 else default_roster
     roster = read_roster(roster_path)
+    seed_path = os.path.join(here, "..", "..", "seed", "seed.sql")
+    source = "the live database"
     try:
         accounts = _load_accounts_from_db()
-    except Exception as e:  # no stack trace: the message may carry a DSN
-        print(f"could not read accounts from the database ({type(e).__name__}).", file=sys.stderr)
-        print("Start the stack (`make up`) or point DB_* at a reachable database.", file=sys.stderr)
+    except Exception as e:  # never print the exception: it can carry a DSN
+        print(
+            f"database unreachable ({type(e).__name__}) — reading the committed seed instead.",
+            file=sys.stderr,
+        )
+        accounts = read_accounts_from_seed(seed_path)
+        source = "db/seed/seed.sql (no live database)"
+    if not accounts:
+        print("no accounts found — nothing to map.", file=sys.stderr)
         return 2
     print(format_report(build_report(roster, accounts)))
-    if os.path.basename(roster_path).find("SYNTHETIC") >= 0:
-        print("\nNOTE: generated from the SYNTHETIC roster. Not for client sign-off.")
+    print(f"\nRoster: {os.path.relpath(roster_path)}   Accounts: {source}")
+    print(
+        "Training-simulation dataset — the people are fictional by design. "
+        "This is the intended basis for review and sign-off."
+    )
     return 0
 
 
