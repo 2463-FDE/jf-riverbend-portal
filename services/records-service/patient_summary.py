@@ -235,6 +235,17 @@ def reference_range_of(reference_range: Optional[str]) -> Optional[str]:
     return text or None
 
 
+def _analyte_key(label: Optional[str]) -> str:
+    """A comparable identity for what was measured.
+
+    Case and spacing vary between feeds ("Total chol" / "total  chol"), so
+    those are normalised away. An absent label is its own key: two unlabelled
+    single values under one title ("6.2%." twice) are the same test recorded
+    twice, which is exactly the case a change is for.
+    """
+    return " ".join((label or "").split()).lower()
+
+
 @dataclass(frozen=True)
 class Change:
     """A difference between two single-valued results of the same test."""
@@ -261,11 +272,20 @@ def compute_change(
     it came from is exactly what the "link to its source" rule forbids, and a
     field left to be filled in later is a field that eventually isn't.
 
-    Returns None — never a guess — when the units differ, when either unit is
-    outside the arithmetic allowlist, or when either value is not a number.
-    Refusing here costs the patient a sentence; getting it wrong states a
-    clinical fact the report never contained.
+    Returns None — never a guess — when the analytes differ, when the units
+    differ, when either unit is outside the arithmetic allowlist, or when
+    either value is not a number. Refusing here costs the patient a sentence;
+    getting it wrong states a clinical fact the report never contained.
     """
+    # Same analyte, or no arithmetic. Callers pair results by record *title*,
+    # and a title is not an analyte: a feed that files "LDL 102 mg/dL" and
+    # "HDL 55 mg/dL" under one shared title would otherwise produce a delta
+    # between two different tests — matching units, identical title, and a
+    # number the lab never reported. Labels are what actually identify the
+    # measurement, so they have to agree before anything is subtracted.
+    if _analyte_key(current.label) != _analyte_key(prior.label):
+        return None
+
     if current.unit != prior.unit:
         return None
     if current.unit not in _UNITS_SAFE_FOR_ARITHMETIC:
@@ -405,6 +425,10 @@ def render_items(rows) -> list[SummaryItem]:
             previous_by_title[row.title] = (row, measurements[0])
 
     # Newest first: the patient opens this to see the latest result, not the
-    # oldest. Ordering is by row order (id) because created_at is nullable.
+    # oldest. Reversed AFTER the changes are computed, so the pairing above
+    # still walks oldest -> newest. Callers must pass rows in chronological
+    # order (see this module's note on ordering in get_patient_summary): a
+    # change is "against the previous result", and that is only true if the
+    # rows arrive in the order the results happened.
     items.reverse()
     return items

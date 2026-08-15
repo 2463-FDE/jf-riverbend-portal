@@ -329,3 +329,66 @@ def test_the_raw_body_is_never_echoed_as_a_field():
     items = ps.render_items([_Row(1, "Note", "Prose here.", kind="note")])
     assert not hasattr(items[0], "body")
     assert "Prose here." not in repr(items[0])
+
+
+# --- review round 1 (#36/#37): analyte identity and chronology --------------
+
+
+def test_a_change_between_two_different_analytes_refuses():
+    """Adversarial review, #36: matching units and a shared title are not
+    enough to make two results the same test.
+
+    A feed that files "LDL 102 mg/dL" and "HDL 55 mg/dL" under one title would
+    otherwise produce a delta between different analytes — same units,
+    identical title, and a number the lab never reported.
+    """
+    ldl = _m("LDL", "102", "mg/dL")
+    hdl = _m("HDL", "55", "mg/dL")
+    assert ps.compute_change(ldl, hdl, prior_record_id=1) is None
+
+
+def test_a_change_refuses_when_only_one_side_is_labelled():
+    """Ambiguous identity is not an identity. If one result names its analyte
+    and the other does not, there is no evidence they are the same test."""
+    assert ps.compute_change(_m("LDL", "102", "mg/dL"), _m(None, "55", "mg/dL"), prior_record_id=1) is None
+    assert ps.compute_change(_m(None, "102", "mg/dL"), _m("LDL", "55", "mg/dL"), prior_record_id=1) is None
+
+
+def test_the_same_analyte_still_computes_across_spelling_variation():
+    """Case and spacing vary between feeds; that must not block a real trend."""
+    change = ps.compute_change(
+        _m("Total chol", "188", "mg/dL"), _m("total  CHOL", "204", "mg/dL"), prior_record_id=9
+    )
+    assert change is not None and change.direction == "down" and change.delta == "16"
+
+
+def test_two_unlabelled_results_of_one_test_still_compute():
+    """The common case: "6.2%." twice under one title is the same test recorded
+    twice, which is exactly what a change is for."""
+    change = ps.compute_change(_m(None, "6.2", "%"), _m(None, "5.8", "%"), prior_record_id=3)
+    assert change is not None and change.direction == "up"
+
+
+def test_a_backfilled_record_does_not_invert_the_trend():
+    """Adversarial review, #37: ids are not chronology.
+
+    A lab imported late carries an older created_at and a LARGER id. Rows are
+    now ordered by created_at, so the renderer must read the genuinely later
+    result as the current one — ordering by id would show the backfilled row
+    as newest and flip the arrow, telling a patient they were improving when
+    their values got worse.
+    """
+    older_but_higher_id = _Row(99, "A1c", "5.8%.", day=1)   # backfilled later
+    newer_but_lower_id = _Row(10, "A1c", "6.2%.", day=5)
+
+    chronological = sorted([older_but_higher_id, newer_but_lower_id], key=lambda r: (r.created_at, r.id))
+    items = _by_id(ps.render_items(chronological))
+
+    # Newest first, by date rather than by id.
+    assert [i.record_id for i in ps.render_items(chronological)] == [10, 99]
+
+    # 5.8 -> 6.2 is a rise, and it is measured against the backfilled record.
+    assert items[10].change is not None
+    assert items[10].change.direction == "up"
+    assert items[10].change.from_record_id == 99
+    assert items[99].change is None
