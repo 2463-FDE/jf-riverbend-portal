@@ -50,7 +50,10 @@ There is no shared Python library yet — services repeat the `config.py` / `db.
 ```bash
 cp .env.example .env   # an .env with working dev credentials is already committed
 make up                # docker compose up everything (Postgres seeds on first boot)
-make seed              # re-load schema + demo data into a running db (optional)
+make seed              # load schema + demo data into an EMPTY db; a fresh
+                       # volume already self-seeds, and this FAILS with
+                       # duplicate-key errors against a populated one —
+                       # to genuinely reload: docker compose down -v && make up
 ```
 
 Portal: http://localhost:3070  ·  Gateway docs: http://localhost:8070/docs

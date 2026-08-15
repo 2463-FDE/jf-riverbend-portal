@@ -15,7 +15,7 @@ ps:            ## service status
 build:         ## build all images
 	docker compose build
 
-seed:          ## load schema + demo data (re-runs against a running db)
+seed:          ## load schema + demo data into an EMPTY db (fresh volumes self-seed)
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/schema.sql
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/seed/seed.sql
 
