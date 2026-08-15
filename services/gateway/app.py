@@ -887,7 +887,12 @@ def _correlation_headers() -> dict:
 
 def _post(service: str, path: str, payload: dict, *, headers: Optional[dict] = None, forward_status: bool = False):
     try:
-        r = httpx.post(f"{SERVICES[service]}{path}", json=payload, headers=headers, timeout=30)
+        r = httpx.post(
+            f"{SERVICES[service]}{path}",
+            json=payload,
+            headers=_internal_headers(headers),
+            timeout=30,
+        )
         data = _safe_json(r)
         if forward_status:
             return JSONResponse(status_code=r.status_code, content=data)
@@ -899,6 +904,26 @@ def _post(service: str, path: str, payload: dict, *, headers: Optional[dict] = N
         return {"error": str(e)}
 
 
+def _internal_headers(headers: Optional[dict] = None) -> dict:
+    """Every outbound call to an internal service carries the shared token.
+
+    Injected here rather than at each call site deliberately. Branch 7 adds
+    token verification to eligibility and scheduling, and those services have
+    a dozen call sites between them — adding the header by hand at each one is
+    exactly how a single route gets missed and 401s in production while every
+    other path works. Centralising it means a new proxy route is covered the
+    moment it is written.
+
+    Call sites that already set X-Internal-Token (the records/intake proxies,
+    which also forward X-Actor-Id) are left as they are: their explicit value
+    wins, because `headers` is applied last.
+    """
+    merged = {"X-Internal-Token": settings.internal_service_token}
+    if headers:
+        merged.update(headers)
+    return merged
+
+
 def _get(
     service: str,
     path: str,
@@ -908,7 +933,12 @@ def _get(
     forward_status: bool = False,
 ):
     try:
-        r = httpx.get(f"{SERVICES[service]}{path}", params=_clean(params), headers=headers, timeout=30)
+        r = httpx.get(
+            f"{SERVICES[service]}{path}",
+            params=_clean(params),
+            headers=_internal_headers(headers),
+            timeout=30,
+        )
         data = _safe_json(r)
         if forward_status:
             return JSONResponse(status_code=r.status_code, content=data)

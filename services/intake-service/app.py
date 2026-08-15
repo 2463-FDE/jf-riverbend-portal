@@ -790,7 +790,17 @@ def _start_eligibility_check(
         resp = httpx.post(
             f"{settings.eligibility_url}/eligibility/jobs",
             json={"insurance_id": ins.member_id, "idempotency_key": idempotency_key},
-            headers={"X-Request-Id": correlation_id},
+            headers={
+                "X-Request-Id": correlation_id,
+                # Branch 7: eligibility-service now verifies its callers, so
+                # this service-to-service enqueue has to prove itself the same
+                # way a gateway call does. Without it the enqueue 401s, intake
+                # falls back to eligibility_status="unknown", and registration
+                # quietly stops producing eligibility jobs at all — a silent
+                # degradation, not a visible failure, which is why it is worth
+                # an integration test rather than trust.
+                "X-Internal-Token": settings.internal_service_token,
+            },
             timeout=settings.eligibility_job_enqueue_timeout_seconds,
         )
         resp.raise_for_status()

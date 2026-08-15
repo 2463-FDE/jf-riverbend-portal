@@ -15,6 +15,11 @@ class Settings:
 
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
+    # Shared secret proving a call came through the gateway. Defaults to
+    # empty and is checked both per-request and at startup — an unset value
+    # must fail closed, never be read as "no check needed".
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
     # Stage 1 resilience (D4 / RIV-088 / RIV-141): bounded + retried + breaker-
     # guarded payer call, plus a Redis-backed last-known-good cache fallback.
     payer_timeout_seconds = float(os.getenv("ELIGIBILITY_PAYER_TIMEOUT_SECONDS", "5"))

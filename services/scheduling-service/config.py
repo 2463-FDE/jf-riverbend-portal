@@ -13,6 +13,11 @@ class Settings:
     db_user = os.getenv("DB_USER", "riverbend_app")
     db_password = os.getenv("DB_PASSWORD", "")
 
+    # Shared secret proving a call came through the gateway. Defaults to
+    # empty and is checked both per-request and at startup — an unset value
+    # must fail closed, never be read as "no check needed".
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
     # pagination guardrails for list endpoints
     default_page_limit = int(os.getenv("DEFAULT_PAGE_LIMIT", "50"))
     max_page_limit = int(os.getenv("MAX_PAGE_LIMIT", "200"))

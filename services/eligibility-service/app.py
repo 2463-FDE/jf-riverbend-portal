@@ -17,11 +17,12 @@ Stage 3 additions:
   * Metadata-only OpenTelemetry spans (libs/tracing) — correlation IDs and
     outcome/status attributes only, never a member ID, prompt, or payload.
 """
+import hmac
 import asyncio
 from typing import Optional
 
 import redis as redis_lib
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
 
 from agent_wiring import bind_visit_context, handle_visit_message
@@ -42,6 +43,46 @@ from worker import run_worker_loop
 
 log = configure(settings.service_name)
 app = FastAPI(title="Riverbend eligibility-service", version="1.4.0")
+
+
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # rejects "changeme" and any other short/example value
+
+
+def _internal_token_is_configured() -> bool:
+    """The same presence/length floor _verify_internal_token enforces per
+    request, checked once at startup so a misconfigured deploy fails loudly
+    instead of serving traffic that 401s every gateway-forwarded call. Mirrors
+    intake-service and records-service."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
+def _verify_internal_token(x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token")) -> None:
+    """Prove this call came through the gateway.
+
+    Cycle branch 7. This service published its port to the host and verified
+    no caller at all, so anything able to reach the host could call it
+    directly and bypass every permission check the gateway applies. The port
+    is no longer published, but that is containment, not authentication — a
+    caller already inside the compose network was still trusted blind.
+
+    Mirrors services/intake-service/app.py::_verify_internal_token exactly:
+    same shared INTERNAL_SERVICE_TOKEN, same fail-closed semantics. An
+    unset/empty configured token, or a human-typed placeholder shorter than
+    _MIN_INTERNAL_TOKEN_LENGTH, is never treated as "no check needed".
+
+    This is transport trust — it proves the call arrived through the gateway.
+    It is NOT per-resource authorization, and this branch does not claim to
+    add that.
+    """
+    configured = settings.internal_service_token
+    if (
+        not configured
+        or len(configured) < _MIN_INTERNAL_TOKEN_LENGTH
+        or not x_internal_token
+        or not hmac.compare_digest(x_internal_token, configured)
+    ):
+        raise HTTPException(status_code=401, detail="missing or invalid internal service token")
 
 _TRACER_NAME = "eligibility-service"
 
@@ -100,7 +141,7 @@ def healthz():
     return {"status": "ok", "service": settings.service_name}
 
 
-@app.get("/eligibility", response_model=EligibilityResponse)
+@app.get("/eligibility", response_model=EligibilityResponse, dependencies=[Depends(_verify_internal_token)])
 async def check_eligibility(
     insurance_id: str = Query(...),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
@@ -140,7 +181,7 @@ async def check_eligibility(
 # --------------------------------------------------------------------------- #
 # Stage 3: async eligibility job lifecycle
 # --------------------------------------------------------------------------- #
-@app.post("/eligibility/jobs", response_model=EligibilityJobResponse, status_code=201)
+@app.post("/eligibility/jobs", response_model=EligibilityJobResponse, status_code=201, dependencies=[Depends(_verify_internal_token)])
 def create_job(
     req: CreateEligibilityJobRequest,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
@@ -167,7 +208,7 @@ def create_job(
     return _job_response(job)
 
 
-@app.get("/eligibility/jobs/{job_id}", response_model=EligibilityJobResponse)
+@app.get("/eligibility/jobs/{job_id}", response_model=EligibilityJobResponse, dependencies=[Depends(_verify_internal_token)])
 def get_job(job_id: str):
     job = _job_store().get(job_id)
     if job is None:
@@ -175,7 +216,7 @@ def get_job(job_id: str):
     return _job_response(job)
 
 
-@app.post("/eligibility/jobs/{job_id}/retry", response_model=EligibilityJobResponse)
+@app.post("/eligibility/jobs/{job_id}/retry", response_model=EligibilityJobResponse, dependencies=[Depends(_verify_internal_token)])
 def retry_job(job_id: str):
     job = _job_store().retry_manually(job_id)
     if job is None:
@@ -207,7 +248,7 @@ def _job_response(job: EligibilityJob) -> EligibilityJobResponse:
 # --------------------------------------------------------------------------- #
 # Stage 3: visit-scoped assistant turns
 # --------------------------------------------------------------------------- #
-@app.post("/visits/{visit_id}/messages", response_model=VisitMessageResponse)
+@app.post("/visits/{visit_id}/messages", response_model=VisitMessageResponse, dependencies=[Depends(_verify_internal_token)])
 def post_visit_message(
     visit_id: str,
     req: VisitMessageRequest,

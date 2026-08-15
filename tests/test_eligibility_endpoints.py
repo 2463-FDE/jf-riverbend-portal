@@ -82,14 +82,23 @@ class _FakeRedis:
         return _FakePipeline(self)
 
 
+# Branch 7: this service now verifies that a call came through the gateway, so
+# the fixture supplies the shared token. Mirrors how the intake/records route
+# tests handle their own guard — transport trust is not what these tests are
+# about, and every one of them would otherwise assert 401.
+TEST_INTERNAL_TOKEN = "t" * 32
+
+
 @pytest.fixture
 def client(monkeypatch):
     fake_redis = _FakeRedis()
     monkeypatch.setattr(app_mod, "_redis", lambda: fake_redis)
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_INTERNAL_TOKEN)
     # Never build a real Bedrock runtime or hit a real worker poll cadence.
     monkeypatch.setenv("ELIGIBILITY_AGENT_RUNTIME", "raw_bedrock")
     monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     with TestClient(app_mod.app) as c:
+        c.headers.update({"X-Internal-Token": TEST_INTERNAL_TOKEN})
         yield c
 
 
@@ -162,7 +171,9 @@ def test_create_job_enqueue_failure_is_a_503_not_an_unhandled_exception(monkeypa
             raise ConnectionError("redis down")
 
     monkeypatch.setattr(app_mod, "_redis", lambda: _RaisingRedis())
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_INTERNAL_TOKEN)
     with TestClient(app_mod.app) as client:
+        client.headers.update({"X-Internal-Token": TEST_INTERNAL_TOKEN})
         resp = client.post("/eligibility/jobs", json={"insurance_id": "MEM1"})
 
     assert resp.status_code == 503

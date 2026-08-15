@@ -7,9 +7,10 @@ fix because book()'s SAVEPOINT-based unique-violation handling needs direct
 control over statement-level error recovery within one transaction that the
 ORM's session/unit-of-work model doesn't offer as directly.
 """
+import hmac
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Header, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -33,12 +34,52 @@ log = configure(settings.service_name)
 app = FastAPI(title="Riverbend scheduling-service")
 
 
+_MIN_INTERNAL_TOKEN_LENGTH = 32  # rejects "changeme" and any other short/example value
+
+
+def _internal_token_is_configured() -> bool:
+    """The same presence/length floor _verify_internal_token enforces per
+    request, checked once at startup so a misconfigured deploy fails loudly
+    instead of serving traffic that 401s every gateway-forwarded call. Mirrors
+    intake-service and records-service."""
+    configured = settings.internal_service_token
+    return bool(configured) and len(configured) >= _MIN_INTERNAL_TOKEN_LENGTH
+
+
+def _verify_internal_token(x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token")) -> None:
+    """Prove this call came through the gateway.
+
+    Cycle branch 7. This service published its port to the host and verified
+    no caller at all, so anything able to reach the host could call it
+    directly and bypass every permission check the gateway applies. The port
+    is no longer published, but that is containment, not authentication — a
+    caller already inside the compose network was still trusted blind.
+
+    Mirrors services/intake-service/app.py::_verify_internal_token exactly:
+    same shared INTERNAL_SERVICE_TOKEN, same fail-closed semantics. An
+    unset/empty configured token, or a human-typed placeholder shorter than
+    _MIN_INTERNAL_TOKEN_LENGTH, is never treated as "no check needed".
+
+    This is transport trust — it proves the call arrived through the gateway.
+    It is NOT per-resource authorization, and this branch does not claim to
+    add that.
+    """
+    configured = settings.internal_service_token
+    if (
+        not configured
+        or len(configured) < _MIN_INTERNAL_TOKEN_LENGTH
+        or not x_internal_token
+        or not hmac.compare_digest(x_internal_token, configured)
+    ):
+        raise HTTPException(status_code=401, detail="missing or invalid internal service token")
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "service": settings.service_name}
 
 
-@app.get("/slots", response_model=SlotListResponse)
+@app.get("/slots", response_model=SlotListResponse, dependencies=[Depends(_verify_internal_token)])
 def list_slots(
     provider_id: Optional[int] = Query(None, gt=0),
     limit: int = Query(settings.default_page_limit, ge=1, le=settings.max_page_limit),
@@ -71,7 +112,7 @@ def list_slots(
     return SlotListResponse(items=items, count=len(items), limit=limit, offset=offset)
 
 
-@app.get("/appointments", response_model=AppointmentListResponse)
+@app.get("/appointments", response_model=AppointmentListResponse, dependencies=[Depends(_verify_internal_token)])
 def list_appointments(
     patient_id: int = Query(..., gt=0),
     db: Session = Depends(get_db),
@@ -93,7 +134,7 @@ def list_appointments(
     return AppointmentListResponse(items=items, count=len(items))
 
 
-@app.post("/appointments", status_code=201, response_model=BookingResponse)
+@app.post("/appointments", status_code=201, response_model=BookingResponse, dependencies=[Depends(_verify_internal_token)])
 def create_appointment(req: BookingRequest):
     """Book a slot for a patient.
 
@@ -149,7 +190,7 @@ def create_appointment(req: BookingRequest):
     return BookingResponse(appointment_id=appointment_id, status="confirmed")
 
 
-@app.post("/appointments/{appointment_id}/cancel", response_model=CancelResponse)
+@app.post("/appointments/{appointment_id}/cancel", response_model=CancelResponse, dependencies=[Depends(_verify_internal_token)])
 def cancel_appointment(appointment_id: int, db: Session = Depends(get_db)):
     """Cancel an appointment. 404 if it does not exist."""
     appt = db.get(Appointment, appointment_id)
