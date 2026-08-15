@@ -51,11 +51,17 @@ Endpoints once up:
 ## First-boot data
 
 On a fresh volume Postgres runs `db/schema.sql` then `db/seed/seed.sql`
-automatically (mounted into `/docker-entrypoint-initdb.d`). To reload demo data
-into an already-running DB:
+automatically (mounted into `/docker-entrypoint-initdb.d`), so a first boot
+needs no seed command at all.
+
+**`make seed` only works against an EMPTY database.** The seed file carries
+explicit ids and no `ON CONFLICT` clauses, so running it against a database
+that already has data fails every insert with a duplicate-key error — and
+those errors scroll past looking like noise while nothing is actually
+reloaded. To genuinely reload, drop the volume:
 
 ```bash
-make seed
+docker compose down -v && make up      # re-seeds from scratch on first boot
 ```
 
 To regenerate the seed file (deterministic):
@@ -245,9 +251,55 @@ re-checks `is_active` per request and `SqlPatientAccessGate` joins it).
 
 ## Demo accounts
 
-All seeded users share password `portal123`, role `staff`. Examples:
-`frontdesk`, `rdelgado`, `drnguyen`, `roiclerk`, `mokonkwo`.
-(Full list: `db/seed/generate_seed.py`.)
+All seeded users share password `portal123`. Twelve carry the deprecated flat
+`staff` role — `frontdesk`, `rdelgado`, `drnguyen`, `roiclerk`, `mokonkwo` and
+so on — because migrating real accounts onto the nine-role grid is separate,
+roster-gated work.
+
+**One exception: `drkim` carries role `clinician`.** It is the only account
+that holds `summary_review.decide`, so it is the only account that can reach
+the review queue. Without it the clinician half of the demo is unreachable by
+anyone. (Full list: `db/seed/generate_seed.py`.)
+
+## Running the patient-portal demo
+
+Three prerequisites, each of which silently breaks the demo if skipped.
+
+**1. `INTERNAL_SERVICE_TOKEN` must be set.** Five services refuse to start
+without it and compose refuses to interpolate — see the top of this file.
+Never commit the value.
+
+**2. The database must be seeded from the CURRENT seed file.** `drkim` and the
+demo A1c trend exist only there. On a fresh volume this is automatic; on an
+existing one, `docker compose down -v && make up`.
+
+**3. Reset between rehearsals — the demo is not repeatable without it.**
+
+```bash
+make demo-reset
+```
+
+Review decisions are durable by design: a rejected record is never re-queued
+and an approved one stays released. So every rehearsal, and every run of the
+integration suite, consumes demo state. After one full run the demo patient
+has an approval, a rejection and one remaining case; after two the review
+queue is empty and the clinician beat cannot be shown. `make demo-reset`
+returns patient 1737 to a clean pre-demo state and re-asserts the reviewer's
+grant. It prints what it restored — anything other than `0 / none / clinician
+/ 2` means the database was not seeded from the current seed file.
+
+### Keep these two OFF the primary demo path
+
+Both are correct behaviour that reads as broken beside the patient summary:
+
+- **`/records` → "Generate AI chart view"** returns a record *count*
+  (`"Patient X's seeded chart has N encounter(s)…"`), not a summary. It is the
+  staff-facing agent path and its composer is a known placeholder; the
+  patient-facing summary is a different, deterministic path. Show it only when
+  deliberately discussing that limitation.
+- **Intake's eligibility result** stays `pending` forever without a payer
+  credential. That is the async design working correctly — the payer is not on
+  the request path any more — but on screen it reads as unfinished.
 
 ## Health checks
 

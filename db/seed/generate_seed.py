@@ -289,6 +289,38 @@ for pid_, encs in enc_by_patient.items():
             else:
                 rrows.append(f" ({rec_id}, {e}, {pid_}, 'note', 'Visit note', {sql_str(random.choice(['Patient stable.','Continue current plan.','Labs reviewed.','Counseled on diet/exercise.','RTC in 6 months.']))}, 'final', NULL, now())")
             rec_id += 1
+# --- demo fixture: a visible A1c trend on the demo patient's chart ----------
+#
+# Every generated lab above is written with created_at = now() and a fixed
+# value per analyte, so a repeated test produces a delta of exactly zero. The
+# patient summary then renders "unchanged 0.0", which proves the arithmetic
+# path works and demonstrates nothing — one of the client's four content rules
+# reduced to a rounding artifact on screen.
+#
+# These two rows give patient 1737 the same analyte at two real dates with
+# different values, so the summary shows "down 1.3" against a March source it
+# links to. Deliberately NOT a random pick: the demo has to look the same at
+# every rehearsal.
+#
+# The chart keeps its multi-value panel (Basic metabolic) alongside these, so
+# the same screen shows both halves of the rule — a single value trends, a
+# panel refuses to.
+DEMO_PATIENT = 1737
+DEMO_A1C_RANGE = "<5.7% normal; 5.7-6.4% prediabetes"
+_demo_encounters = enc_by_patient.get(DEMO_PATIENT, [])
+if len(_demo_encounters) >= 2:
+    _first, _last = _demo_encounters[0], _demo_encounters[-1]
+    rrows.append(
+        f" ({rec_id}, {_first}, {DEMO_PATIENT}, 'lab_result', 'A1c', '7.5%.', "
+        f"'abnormal', {sql_str(DEMO_A1C_RANGE)}, '2026-03-12 09:15:00')"
+    )
+    rec_id += 1
+    rrows.append(
+        f" ({rec_id}, {_last}, {DEMO_PATIENT}, 'lab_result', 'A1c', '6.2%.', "
+        f"'normal', {sql_str(DEMO_A1C_RANGE)}, '2026-08-11 10:05:00')"
+    )
+    rec_id += 1
+
 emit(",\n".join(rrows) + ";")
 emit(f"SELECT setval('records_id_seq', {rec_id-1}, true);")
 emit()
