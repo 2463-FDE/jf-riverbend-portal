@@ -94,8 +94,14 @@ def test_visit_chat_endpoint_requires_auth_and_degrades_safely_when_authenticate
     r = httpx.post(f"{GATEWAY}/visits/integration-visit-1/messages", json={"message": "hi"}, timeout=10)
     assert r.status_code == 401
 
+    # A REAL appointment id. This test predates the visit-authorization gate
+    # (added 2026-08-09), which requires visit_id to resolve to an appointment
+    # the caller holds a grant for — so the original literal
+    # "integration-visit-1" stopped parsing and the test has returned 403 ever
+    # since, reading as a live defect when it was a stale fixture. Appointment
+    # 1 belongs to patient 1042, whom frontdesk holds a grant for.
     r = httpx.post(
-        f"{GATEWAY}/visits/integration-visit-1/messages",
+        f"{GATEWAY}/visits/1/messages",
         json={"message": "am I covered?"},
         headers=_auth_headers(),
         timeout=10,
