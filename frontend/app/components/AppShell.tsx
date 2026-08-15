@@ -47,13 +47,15 @@ const NAV_PATIENT: NavItem[] = [
   { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
 ];
 
-// The review queue is only meaningful to someone who may decide a case, so it
-// is shown to the roles that hold records.write. Same caveat as the patient
-// nav: this is a courtesy, not a control — the gateway and records-service
-// refuse the route regardless of what is drawn here, and every seeded account
-// is still on `staff`, which holds records.write and therefore sees the link
-// today.
-const _MAY_REVIEW = new Set(["clinician", "nursing_ma", "staff"]);
+// Shown only to roles that actually hold summary_review.decide. `staff` was
+// in this list while the gate was records.write; it is not any more, and
+// leaving it would have pointed every legacy account at a link that lands on
+// a 403 — a worse experience than no link, and misleading about who may
+// review.
+//
+// Same caveat as the patient nav: a courtesy, not a control. The gateway and
+// records-service refuse the route regardless of what is drawn here.
+const _MAY_REVIEW = new Set(["clinician", "nursing_ma"]);
 
 const NAV_REVIEW: NavItem = {
   href: "/review-queue",
