@@ -46,6 +46,7 @@ from patient_access_gate import (
     active_patient_ids_query,
     parse_user_id,
 )
+import patient_summary
 from patient_view_repository import SqlChartRepository
 from reconciliation import build_reconciliation_result
 from schemas import (
@@ -55,6 +56,9 @@ from schemas import (
     PatientDetail,
     PatientPage,
     PatientSummary,
+    OwnResultsSummary,
+    SummaryChangeOut,
+    SummaryItemOut,
     ReconciliationResult,
     RecordOut,
     RecordSearchHit,
@@ -936,3 +940,119 @@ def search_records(
         message=f"records_search returned {len(rows)} hit(s) across patients {sorted({r.patient_id for r in rows})}",
     )
     return [RecordSearchHit.model_validate(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# patient-facing summary (S2)
+#
+# Deterministic: this route renders quotes by copying stored text, and there is
+# no model call anywhere beneath it. See patient_summary.py's module docstring
+# for why the summariser agent is deliberately NOT on this path — its whole
+# design rests on record bodies never entering it, and the client's content
+# rules require quoting those bodies verbatim.
+#
+# Authorization is the same gate every other chart read uses. A patient holds
+# exactly one patient_access_grants row (their own), so _authorize_or_deny
+# scopes them without a single patient-specific branch — the client's point
+# that this is one mechanism applied to a different principal.
+# --------------------------------------------------------------------------- #
+@app.get("/patients/{patient_id}/summary", response_model=OwnResultsSummary)
+def get_patient_summary(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """A patient's own results, quoted rather than interpreted.
+
+    Three outcomes per result (client, 2026-08-14): a single value quotes and
+    may carry a change, a panel quotes but never carries a change, and prose
+    from which no clean quote can be taken refuses. A panel is never withheld
+    wholesale — over-refusing was called out by name.
+    """
+    _verify_internal_token(x_internal_token)
+    # required_permission is own_record.read, NOT this helper's records.read
+    # default. A patient holds only own_record.read, so accepting the default
+    # here would deny every patient at the data layer — the gateway would let
+    # them through and this service would 403 them, which is the same dead end
+    # one layer down. The grant check below still runs unchanged, so holding
+    # the permission is necessary and not sufficient: the patient must also
+    # hold a grant for this chart, which is the one grant they have.
+    _authorize_or_deny(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        x_request_id=x_request_id,
+        patient_id=patient_id,
+        required_permission="own_record.read",
+        audit_action="own_results_access",
+    )
+
+    try:
+        rows = (
+            db.execute(
+                select(Record)
+                .where(Record.patient_id == patient_id)
+                # Chronological, NOT by id. render_items computes each change
+                # against the previous result of the same test, and the date
+                # shown to the patient is created_at — so ordering by id would
+                # make the two disagree the moment a record is backfilled. A
+                # lab imported late carries an older created_at and a larger
+                # id; ordered by id it would appear as the newest result and
+                # invert the up/down arrow against a result that actually came
+                # after it. That is a patient reading "improving" when their
+                # values got worse, so chronology has to come from the same
+                # column the date does. id only breaks ties (the seed writes
+                # whole charts within one timestamp).
+                .order_by(Record.created_at.asc(), Record.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+    except SQLAlchemyError:
+        log.exception("patient summary: chart unreadable patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="records temporarily unavailable")
+
+    items = [_to_summary_item_out(item) for item in patient_summary.render_items(rows)]
+
+    _write_audit(
+        db,
+        actor=_actor_label(x_actor_name, x_actor_id),
+        message=f"own_results rendered {len(items)} result(s) for patient {patient_id}",
+    )
+    return OwnResultsSummary(patient_id=patient_id, items=items)
+
+
+def _to_summary_item_out(item) -> SummaryItemOut:
+    """Serialize one rendered result.
+
+    Mapping rather than reusing the dataclass directly keeps patient_summary.py
+    free of any response model: the content rules are testable without FastAPI,
+    and changing the wire format cannot quietly change what a patient is
+    allowed to read.
+    """
+    change = item.change
+    return SummaryItemOut(
+        record_id=item.record_id,
+        title=item.title,
+        date=item.date,
+        shape=item.shape.value,
+        quote=item.quote,
+        reference_range=item.reference_range,
+        change=(
+            SummaryChangeOut(
+                direction=change.direction,
+                delta=change.delta,
+                unit=change.unit,
+                from_value=change.from_value,
+                from_record_id=change.from_record_id,
+                from_date=change.from_date,
+            )
+            if change is not None
+            else None
+        ),
+        refusal_reason=item.refusal_reason,
+        source_record_ids=list(item.source_record_ids),
+    )
