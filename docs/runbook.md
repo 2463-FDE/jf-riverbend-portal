@@ -302,9 +302,22 @@ design. Everything below lives in Redis, in `eligibility-service`
 
 ### Checking a job's status
 ```bash
-curl -s localhost:8072/eligibility/jobs/<job_id> | python3 -m json.tool
-# or, authenticated, through the gateway (what the portal itself uses):
-curl -s localhost:8070/eligibility/jobs/<job_id> -H "Authorization: Bearer <token>"
+# Through the gateway — authenticated, and what the portal itself uses:
+curl -s localhost:8070/eligibility/jobs/<job_id> -H "Authorization: Bearer <token>" \
+  | python3 -m json.tool
+
+# Or directly, from INSIDE the container. eligibility-service no longer
+# publishes 8072 to the host: it verifies no caller identity, so a
+# host-reachable port made the gateway's authorization bypassable for it.
+# See tests/test_compose_port_exposure.py.
+#
+# Note this uses python, not curl — the service images are python:slim and
+# do not ship curl. (A `docker compose exec ... curl` here fails with an
+# OCI "executable file not found", which reads like a container problem and
+# is not one.)
+docker compose exec eligibility-service python -c \
+  "import urllib.request,json,sys; print(json.dumps(json.load(urllib.request.urlopen('http://localhost:8072/eligibility/jobs/'+sys.argv[1])),indent=2))" \
+  <job_id>
 ```
 States: `queued` -> `running` -> `succeeded` (a usable answer — active,
 inactive, or stale) or `failed` -> `retryable` (bounded by
@@ -344,8 +357,12 @@ the same bounded retry-or-dead-letter path. To confirm nothing was dropped
 after a restart:
 ```bash
 docker compose restart eligibility-service
-# wait a few seconds, then re-check any job that was in flight:
-curl -s localhost:8072/eligibility/jobs/<job_id>
+# wait a few seconds, then re-check any job that was in flight. 8072 is not
+# published to the host (see above), so this runs inside the container —
+# and via python, since these images do not ship curl:
+docker compose exec eligibility-service python -c \
+  "import urllib.request,sys; print(urllib.request.urlopen('http://localhost:8072/eligibility/jobs/'+sys.argv[1]).read().decode())" \
+  <job_id>
 ```
 It should still exist and eventually reach a terminal state
 (`succeeded`/`dead_letter`), never silently disappear.
