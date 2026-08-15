@@ -75,20 +75,34 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const isLogin = pathname === "/login";
+  // Routes a person can reach with no account at all.
+  //
+  // /activate is public by necessity: the patient redeeming an invitation
+  // code does not have an account yet — creating one is the entire point of
+  // the page. Before this list existed the shell exempted only /login, so an
+  // unauthenticated patient opening /activate was bounced straight to the
+  // sign-in screen and the patient half of the flow was unreachable in the
+  // running app. Every API-level test passed throughout, because none of them
+  // went through a browser.
+  //
+  // This is not an authorization decision. Nothing sensitive is served on
+  // these routes; /activate's own endpoint is public at the gateway and
+  // returns one identical answer for every failure so it cannot be used to
+  // discover valid codes.
+  const isPublicRoute = pathname === "/login" || pathname === "/activate";
 
   // Hydrate the signed-in user from sessionStorage (see lib/session.ts for
   // why not localStorage). There is no real route guard here beyond "no token
   // → bounce to /login"; the gateway is what actually enforces expiry, on
   // both an idle and an absolute TTL.
   useEffect(() => {
-    if (isLogin) return;
+    if (isPublicRoute) return;
     if (!getToken()) {
       router.replace("/login");
       return;
     }
     setUser(getUser());
-  }, [isLogin, pathname, router]);
+  }, [isPublicRoute, pathname, router]);
 
   useEffect(() => {
     function onClick(e: MouseEvent) {
@@ -123,7 +137,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   }
 
   // The login page renders its own full-bleed layout, no shell.
-  if (isLogin) return <>{children}</>;
+  if (isPublicRoute) return <>{children}</>;
 
   const pageTitle =
     NAV.find((n) => isActive(pathname, n.href))?.label ?? "Patient Portal";

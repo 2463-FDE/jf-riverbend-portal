@@ -75,6 +75,20 @@ function aiViewFor(patientId: number, summary: string): PatientViewResult {
 }
 
 describe("RecordsPage — stale patient panel regression", () => {
+  it("shows a safe existing-patient confirmation with DOB in MM/DD/YY and a masked SSN", async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      jsonResponse(reconciliationFor(1042, "Maria Gonzalez"))
+    );
+
+    render(<RecordsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /check for related records/i }));
+
+    await waitFor(() => expect(screen.getByText(/confirm existing patient information/i)).toBeInTheDocument());
+    expect(screen.getByText(/date of birth:/i).parentElement).toHaveTextContent("01/01/80");
+    expect(screen.getByText(/^ssn:$/i).parentElement).toHaveTextContent("•••-••-9981");
+  });
+
   it("clears an already-loaded reconciliation panel immediately when the Patient ID changes", async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(
       jsonResponse(reconciliationFor(1042, "Maria Gonzalez"))
@@ -131,5 +145,40 @@ describe("RecordsPage — stale patient panel regression", () => {
     // It must never render under patient 2001's heading.
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument();
+  });
+});
+
+describe("portal access from the records screen", () => {
+  // This test exists because of a gap that ten passing component tests did
+  // not catch: PatientInvitation was fully built and covered, but never
+  // mounted in any page. It was unreachable in the running app while its own
+  // suite was green. Testing a component in isolation says nothing about
+  // whether a user can get to it — so this renders the PAGE and looks for it.
+  it("offers portal invitation for the patient currently loaded", () => {
+    render(<RecordsPage />);
+
+    expect(
+      screen.getByRole("button", { name: /issue invitation/i })
+    ).toBeInTheDocument();
+  });
+
+  it("issues against the patient id shown in the field, not a hardcoded one", async () => {
+    // The panel has to follow the patient being looked at. Issuing a chart
+    // credential against the wrong patient is the worst failure this screen
+    // could have.
+    vi.mocked(apiFetch).mockResolvedValue(
+      { ok: true, status: 201, json: async () => ({ code: "ABCD-EFGH-JKMN-PQRS" }) } as Response
+    );
+    render(<RecordsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /issue invitation/i }));
+
+    await waitFor(() =>
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
+        "/api/patients/1737/invitation",
+        expect.objectContaining({ method: "POST" })
+      )
+    );
   });
 });
