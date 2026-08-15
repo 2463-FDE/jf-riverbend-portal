@@ -285,8 +285,18 @@ integration suite, consumes demo state. After one full run the demo patient
 has an approval, a rejection and one remaining case; after two the review
 queue is empty and the clinician beat cannot be shown. `make demo-reset`
 returns patient 1737 to a clean pre-demo state and re-asserts the reviewer's
-grant. It prints what it restored — anything other than `0 / none / clinician
-/ 2` means the database was not seeded from the current seed file.
+grant. It prints what it restored:
+
+```
+reviews=0   portal_account=none   reviewer_grant=active   a1c_results=2
+```
+
+`reviewer_grant` is the one to read. It asserts the *gate's own* predicate —
+the account is active, the grant is unrevoked and unexpired — rather than
+merely that `drkim` exists, because a revoked grant leaves the review queue
+empty while the account looks perfectly fine. `INACTIVE` there, or
+`a1c_results` other than 2, means the database predates the current seed:
+re-seed with `docker compose down -v && make up`.
 
 ### Keep these two OFF the primary demo path
 
