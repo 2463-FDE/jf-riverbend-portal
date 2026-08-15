@@ -14,6 +14,7 @@ import {
   IconBilling,
   IconBell,
   IconLab,
+  IconStethoscope,
 } from "./icons";
 import { clearSession, getUser, getToken, apiFetch } from "../lib/session";
 import type { PortalUser } from "../lib/types";
@@ -46,12 +47,27 @@ const NAV_PATIENT: NavItem[] = [
   { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
 ];
 
+// The review queue is only meaningful to someone who may decide a case, so it
+// is shown to the roles that hold records.write. Same caveat as the patient
+// nav: this is a courtesy, not a control — the gateway and records-service
+// refuse the route regardless of what is drawn here, and every seeded account
+// is still on `staff`, which holds records.write and therefore sees the link
+// today.
+const _MAY_REVIEW = new Set(["clinician", "nursing_ma", "staff"]);
+
+const NAV_REVIEW: NavItem = {
+  href: "/review-queue",
+  label: "Review queue",
+  icon: <IconStethoscope className="rb-nav__icon" />,
+};
+
 // Nothing here is an authorization boundary — that lives in the gateway and
 // the records service. Hiding a link the caller cannot use is a courtesy to
 // them, not a control; a patient typing /records still gets a 403 from the
 // server, which is where it matters.
 function navFor(user: PortalUser | null): NavItem[] {
-  return user?.role === "patient" ? NAV_PATIENT : NAV;
+  if (user?.role === "patient") return NAV_PATIENT;
+  return _MAY_REVIEW.has(user?.role ?? "") ? [...NAV, NAV_REVIEW] : NAV;
 }
 
 function Logo({ className }: { className?: string }) {

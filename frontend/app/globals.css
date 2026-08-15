@@ -1213,3 +1213,29 @@ textarea:focus-visible,
 .rb-results-empty, .rb-results-signed-in { color: #667; }
 .rb-results-signed-in { margin-top: 2rem; font-size: 0.85rem; }
 
+
+/* --- clinician review queue (S3) ----------------------------------------- */
+.rb-review-page { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+.rb-review-intro { color: #444; line-height: 1.55; margin-bottom: 1.5rem; }
+.rb-review-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 1rem; }
+.rb-review { border: 1px solid #d8dde3; border-radius: 8px; padding: 1rem 1.1rem; background: #fff; }
+.rb-review-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.rb-review-title { margin: 0; font-size: 1rem; }
+.rb-review-meta { color: #667; font-size: 0.82rem; }
+
+/* The record's own words, set apart from our wording around them — the same
+   distinction the patient-facing page makes. */
+.rb-review-body {
+  margin: 0.7rem 0 0.4rem; padding: 0.7rem 0.9rem;
+  background: #f7f9fb; border-left: 3px solid #0f7c91;
+  font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap;
+}
+.rb-review-why { font-size: 0.85rem; color: #667; margin: 0.3rem 0 0.8rem; }
+.rb-review-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.rb-review-confirm {
+  margin-top: 0.6rem; padding: 0.75rem 0.9rem;
+  background: #fdf8ec; border: 1px solid #e0c48a; border-radius: 6px; font-size: 0.9rem;
+}
+.rb-review-confirm p { margin: 0 0 0.6rem; }
+.rb-review-done { color: #2a6a3a; font-size: 0.92rem; }
+.rb-review-empty { color: #667; }
