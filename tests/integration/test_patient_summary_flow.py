@@ -243,3 +243,82 @@ def test_a_note_is_refused_rather_than_quoted(patient_a_token):
         assert item["quote"] is None
         assert item["refusal_reason"]
         assert item["change"] is None
+
+
+def test_a_backfilled_lab_does_not_invert_the_patients_trend(patient_a_token):
+    """Adversarial review of #37: record ids are not chronology.
+
+    A lab imported after the fact carries an older `created_at` and a LARGER
+    id. Ordering by id would show that backfilled row as the newest result and
+    compute the trend against the wrong neighbour — a patient reading
+    "improving" when their values actually got worse.
+
+    Inserted through SQL rather than an API because backfilling is exactly
+    what an interface would not let you do; the point is that the read path
+    survives rows that did not arrive in order.
+    """
+    with psycopg2.connect(DB_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM encounters WHERE patient_id = %s ORDER BY id LIMIT 1", (_PATIENT_A,)
+        )
+        encounter_id = cur.fetchone()[0]
+
+        # Two A1c results under a title this patient does not already use, so
+        # this test reads only its own rows. The LOWER value is written first
+        # with the OLDER date; the HIGHER value is genuinely later but gets a
+        # smaller id, and the backfilled older row gets the largest id.
+        cur.execute(
+            """
+            INSERT INTO records (encounter_id, patient_id, kind, title, body, status,
+                                 reference_range, created_at)
+            VALUES (%s,%s,'lab_result','A1c backfill test','6.2%%.','final',
+                    '<5.7%% normal', now() - interval '1 day')
+            RETURNING id
+            """,
+            (encounter_id, _PATIENT_A),
+        )
+        later_result_lower_id = cur.fetchone()[0]
+
+        cur.execute(
+            """
+            INSERT INTO records (encounter_id, patient_id, kind, title, body, status,
+                                 reference_range, created_at)
+            VALUES (%s,%s,'lab_result','A1c backfill test','5.8%%.','final',
+                    '<5.7%% normal', now() - interval '30 days')
+            RETURNING id
+            """,
+            (encounter_id, _PATIENT_A),
+        )
+        earlier_result_higher_id = cur.fetchone()[0]
+        conn.commit()
+
+    assert earlier_result_higher_id > later_result_lower_id, (
+        "the backfilled row must carry the larger id for this test to mean anything"
+    )
+
+    try:
+        r = httpx.get(f"{GATEWAY}/patient/me/summary", headers=_auth(patient_a_token), timeout=10)
+        assert r.status_code == 200, r.text
+        items = {i["record_id"]: i for i in r.json()["items"]}
+
+        current = items[later_result_lower_id]
+        backfilled = items[earlier_result_higher_id]
+
+        # The genuinely later result carries the change, not the backfilled one.
+        assert current["change"] is not None, "the later result should carry the trend"
+        assert backfilled["change"] is None, (
+            "the backfilled older result must not carry a trend against a future result"
+        )
+
+        # 5.8 -> 6.2 is a RISE. Ordering by id would have inverted this.
+        assert current["change"]["direction"] == "up", (
+            "trend inverted — the backfilled row was treated as the newer result"
+        )
+        assert current["change"]["from_record_id"] == earlier_result_higher_id
+    finally:
+        with psycopg2.connect(DB_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM records WHERE id = ANY(%s)",
+                ([later_result_lower_id, earlier_result_higher_id],),
+            )
+            conn.commit()

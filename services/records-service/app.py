@@ -995,7 +995,18 @@ def get_patient_summary(
             db.execute(
                 select(Record)
                 .where(Record.patient_id == patient_id)
-                .order_by(Record.id)
+                # Chronological, NOT by id. render_items computes each change
+                # against the previous result of the same test, and the date
+                # shown to the patient is created_at — so ordering by id would
+                # make the two disagree the moment a record is backfilled. A
+                # lab imported late carries an older created_at and a larger
+                # id; ordered by id it would appear as the newest result and
+                # invert the up/down arrow against a result that actually came
+                # after it. That is a patient reading "improving" when their
+                # values got worse, so chronology has to come from the same
+                # column the date does. id only breaks ties (the seed writes
+                # whole charts within one timestamp).
+                .order_by(Record.created_at.asc(), Record.id.asc())
             )
             .scalars()
             .all()
