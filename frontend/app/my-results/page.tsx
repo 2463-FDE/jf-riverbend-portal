@@ -118,6 +118,13 @@ export default function MyResultsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Clear what is on screen BEFORE asking again. Without this, a reload
+    // that is denied or fails leaves the previous patient's results rendered
+    // underneath the error — clinical values surviving an authorization
+    // failure, which is the worst shape this bug could take on a page whose
+    // whole job is showing lab results. Every failure path below returns
+    // early, so results reappear only when a request actually succeeds.
+    setItems(null);
     try {
       const res = await apiFetch("/api/patient/summary");
       if (res.status === 401 || res.status === 403) {

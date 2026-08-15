@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 // The content rules are enforced server-side, but this page is the last thing
 // between them and a patient — so what is asserted here is that it renders
@@ -150,6 +150,58 @@ describe("a patient reading their own results", () => {
     render(<MyResultsPage />);
 
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.queryByText("2.3 mIU/L.")).not.toBeInTheDocument();
+  });
+});
+
+describe("results do not outlive the authorization that showed them", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // Note on scope, because the fix is deliberately wider than the reachable
+  // bug: review flagged that load() never cleared `items`, so a denied reload
+  // would leave the previous results rendered under the error banner. That
+  // exact sequence is NOT reachable today — load() runs once on mount, and
+  // its only other caller is the "Try again" button, which renders solely
+  // when `error` is already set. There is no control that reloads a page
+  // that succeeded.
+  //
+  // The clear stays anyway. It costs nothing, and the day someone adds a
+  // refresh button or polling, the guarantee is already in place instead of
+  // being rediscovered as a leak of one patient's values past an
+  // authorization failure. What is asserted below is the path that IS
+  // reachable.
+
+  it("shows results only after a retry actually succeeds", async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      { ok: false, status: 503, json: async () => ({}) } as Response
+    );
+    render(<MyResultsPage />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.queryByText("2.3 mIU/L.")).not.toBeInTheDocument();
+
+    vi.mocked(apiFetch).mockResolvedValueOnce(ok([SINGLE]));
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+    expect(await screen.findByText("2.3 mIU/L.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps showing nothing when a retry is denied as well", async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      { ok: false, status: 503, json: async () => ({}) } as Response
+    );
+    render(<MyResultsPage />);
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      { ok: false, status: 403, json: async () => ({}) } as Response
+    );
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/not signed in to a patient account/i)
+    );
     expect(screen.queryByText("2.3 mIU/L.")).not.toBeInTheDocument();
   });
 });
