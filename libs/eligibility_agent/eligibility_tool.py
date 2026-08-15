@@ -58,12 +58,29 @@ _STATUS_NOTES = {
 
 
 class EligibilityToolConfig:
-    def __init__(self, *, eligibility_url: Optional[str] = None, timeout_seconds: Optional[float] = None):
+    def __init__(
+        self,
+        *,
+        eligibility_url: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+        internal_service_token: Optional[str] = None,
+    ):
         self.eligibility_url = eligibility_url or os.getenv("ELIGIBILITY_URL", "http://eligibility-service:8072")
         self.timeout_seconds = (
             timeout_seconds
             if timeout_seconds is not None
             else float(os.getenv("ELIGIBILITY_TOOL_TIMEOUT_SECONDS", "5"))
+        )
+        # Branch 7: eligibility-service verifies its callers now, and this tool
+        # is one of them. Without the token the call 401s, the except below
+        # swallows it, and the assistant reports UNKNOWN coverage — a wrong
+        # answer that looks like a legitimate one, which is worse than an
+        # error. Read from the environment like the URL above so no caller has
+        # to remember to pass it.
+        self.internal_service_token = (
+            internal_service_token
+            if internal_service_token is not None
+            else os.getenv("INTERNAL_SERVICE_TOKEN", "")
         )
 
 
@@ -104,6 +121,7 @@ class CheckEligibilityTool:
                 resp = client.get(
                     f"{self._config.eligibility_url}/eligibility",
                     params={"insurance_id": self._context.insurance_id},
+                    headers={"X-Internal-Token": self._config.internal_service_token},
                 )
             data = resp.json()
             status = EligibilityStatus(data.get("status", "unknown"))

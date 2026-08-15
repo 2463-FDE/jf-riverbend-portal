@@ -108,6 +108,12 @@ services:
       context: .
       dockerfile: services/eligibility-service/Dockerfile
     env_file: .env
+    environment:
+      # Branch 7: this service now verifies that a call came through the
+      # gateway. Deliberately NOT in the committed .env — it is a secret,
+      # and the ${VAR:?...} form makes a missing value stop compose rather
+      # than start a service that 401s every real request.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
     depends_on:
       redis:
         condition: service_started
@@ -143,6 +149,12 @@ services:
   scheduling-service:
     build: ./services/scheduling-service
     env_file: .env
+    environment:
+      # Branch 7: this service now verifies that a call came through the
+      # gateway. Deliberately NOT in the committed .env — it is a secret,
+      # and the ${VAR:?...} form makes a missing value stop compose rather
+      # than start a service that 401s every real request.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
     depends_on:
       postgres:
         condition: service_healthy

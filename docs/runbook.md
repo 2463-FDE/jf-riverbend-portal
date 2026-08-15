@@ -5,28 +5,34 @@ Compose; one stack per clinic region.
 
 ## Required one-time setup: INTERNAL_SERVICE_TOKEN
 
-Round-17 review (2026-08-06, PR #20): `gateway`, `intake-service`, and
-`records-service` all now refuse to start (see each service's `lifespan`
-handler in `app.py`) unless `INTERNAL_SERVICE_TOKEN` in `.env` is set to a
-real random value at least 32 characters long — this is the shared secret
-that proves an intake/patient-view call actually came through the gateway,
-not a direct caller hitting a service's published host port. `.env.example`
+Round-17 review (2026-08-06, PR #20) and cycle branch 7A (2026-08-15):
+`gateway`, `intake-service`, `records-service`, `eligibility-service` and
+`scheduling-service` all now refuse to start unless `INTERNAL_SERVICE_TOKEN`
+is set to a real random value at least 32 characters long — this is the
+shared secret that proves a call actually came through the gateway rather
+than reaching a service directly.
+
+Two distinct failures, both covered: docker-compose uses
+`${INTERNAL_SERVICE_TOKEN:?...}`, so an entirely MISSING value stops compose
+before any container starts; each service additionally checks the value at
+startup, which is what catches one that is present but unusable (a
+placeholder like `changeme`, or anything under the length floor). `.env.example`
 ships this **empty on purpose** (a placeholder like `changeme` would be a
 public, guessable secret every deployment shipped unmodified), so `.env`
 needs it set explicitly before the first `make up`:
 
 ```bash
-# generates a 64-char hex value; set the SAME value on all three services —
-# they already share one .env, so setting it once here is enough
+# generates a 64-char hex value; the SAME value is needed by all five
+# services — they share one .env, so setting it once here is enough
 openssl rand -hex 32
 ```
 
 Put that value in `.env`'s `INTERNAL_SERVICE_TOKEN=` line (see the detailed
-comment above that line in `.env.example` for the full history). Without
-it, the three services now fail fast at container startup with a clear
-`RuntimeError` in `docker compose logs` (rather than starting and sitting
-"unhealthy" until the healthcheck's retry budget runs out) — that log line
-is the signal to come back here.
+comment above that line in `.env.example` for the full history). Without it,
+the five services fail fast at container startup with a clear `RuntimeError`
+in `docker compose logs` (rather than starting and sitting "unhealthy" until
+the healthcheck's retry budget runs out) — that log line is the signal to
+come back here.
 
 ## Start / stop
 

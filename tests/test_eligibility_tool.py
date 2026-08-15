@@ -117,3 +117,50 @@ def test_transport_failure_logs_error_type_only_never_the_exception_text(caplog)
         message = record.getMessage()
         assert secret not in message
         assert "ConnectError" in message
+
+
+# --- branch 7: this tool is one of eligibility-service's callers -------------
+
+
+def test_the_tool_sends_the_internal_service_token(monkeypatch):
+    """Adversarial review of #43. eligibility-service verifies its callers now,
+    and this tool calls it directly — it is neither a gateway proxy nor the
+    intake enqueue, so it was missed when those two were covered.
+
+    The failure it would have caused is the quiet kind: a 401 is swallowed by
+    the tool's own except, and the assistant reports UNKNOWN coverage. A wrong
+    answer that looks like a legitimate one, rather than an error anybody
+    would notice.
+    """
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "t" * 32)
+    captured = {}
+
+    def handler(request):
+        captured["token"] = request.headers.get("X-Internal-Token")
+        return httpx.Response(200, json={"status": "active", "checked_at": None})
+
+    tool = CheckEligibilityTool(_context(insurance_id="M-1"), transport=httpx.MockTransport(handler))
+    tool.invoke({})
+
+    assert captured["token"] == "t" * 32
+
+
+def test_the_token_can_be_passed_explicitly_rather_than_read_from_the_env():
+    """So a caller that manages its own configuration is not forced through a
+    process-wide environment variable."""
+    from libs.eligibility_agent.eligibility_tool import EligibilityToolConfig
+
+    captured = {}
+
+    def handler(request):
+        captured["token"] = request.headers.get("X-Internal-Token")
+        return httpx.Response(200, json={"status": "active", "checked_at": None})
+
+    tool = CheckEligibilityTool(
+        _context(insurance_id="M-1"),
+        transport=httpx.MockTransport(handler),
+        config=EligibilityToolConfig(internal_service_token="explicit-token-value"),
+    )
+    tool.invoke({})
+
+    assert captured["token"] == "explicit-token-value"
