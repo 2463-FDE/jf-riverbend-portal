@@ -280,3 +280,59 @@ def test_a_legacy_staff_account_cannot_reach_the_queue(patient_token):
             timeout=10,
         )
         assert decision.status_code == 403, f"{username} must not decide a case"
+
+
+# --- round 2: the grant boundary and the actor requirement ------------------
+
+
+def test_a_clinician_sees_only_cases_for_patients_they_are_granted(queued_cases):
+    """Round-2 blocker B5. The queue shows withheld clinical note text and
+    offers a control that releases it, so it is a chart-reading surface and
+    belongs behind patient_access_grants like every other one.
+
+    drkim is granted 1737 only. drpatel holds a grant for 1043 and none for
+    1737 — but drpatel is on `staff` and cannot reach the route at all, so the
+    account that proves the scoping is drnguyen, who is also `staff`. The
+    grant boundary itself is therefore asserted here through the one clinical
+    account and the DB, and in the unit tests through the query.
+    """
+    granted = {
+        r[0]
+        for r in _rows(
+            "SELECT g.patient_id FROM patient_access_grants g JOIN users u ON u.id=g.user_id"
+            " WHERE u.username = %s AND g.revoked_at IS NULL",
+            (_CLINICIAN,),
+        )
+    }
+    assert granted, "the reviewing clinician must hold at least one grant"
+
+    listing = httpx.get(
+        f"{GATEWAY}/review-queue", headers=_auth(_token(_CLINICIAN)), timeout=10
+    ).json()["items"]
+
+    for case in listing:
+        assert case["patient_id"] in granted, (
+            f"case for patient {case['patient_id']} listed to a clinician granted only {granted}"
+        )
+
+
+def test_an_ungranted_case_cannot_be_decided_by_id(patient_token, clinician_token):
+    """Listing is not the only door. A reviewer who cannot see a case in their
+    queue must not be able to decide it by guessing or reusing its id."""
+    _summary(patient_token)
+
+    # A pending review for a patient this clinician holds no grant for.
+    other = _rows(
+        "SELECT id FROM patient_summary_reviews WHERE state='pending' AND patient_id <> %s LIMIT 1",
+        (_PATIENT,),
+    )
+    if not other:
+        pytest.skip("no pending review outside the clinician's grants to test with")
+
+    r = httpx.post(
+        f"{GATEWAY}/review-queue/{other[0][0]}/decision",
+        headers=_auth(clinician_token),
+        json={"decision": "approved"},
+        timeout=10,
+    )
+    assert r.status_code == 409, "an ungranted case must not be decidable by id"

@@ -1121,8 +1121,25 @@ def _to_summary_item_out(item) -> SummaryItemOut:
 _REVIEW_PERMISSIONS = ("summary_review.decide", "records.read")
 
 
-def _authorize_reviewer(db, *, x_actor_id, x_actor_name, audit_action):
-    """Require every permission a review decision needs, not just one."""
+def _authorize_reviewer(db, *, x_actor_id, x_actor_name, audit_action) -> int:
+    """Require an identified actor AND every permission a review needs.
+
+    Returns the parsed actor id, so callers cannot forget to establish one.
+
+    The explicit actor check matters because _authorize_actor_permission
+    RETURNS SUCCESSFULLY when X-Actor-Id is missing or unparsable — by design,
+    since its usual callers are grant-gated routes where the access gate then
+    produces a structured denial. These routes have no such gate behind them,
+    so without this a call carrying a valid internal token and no actor would
+    have listed withheld clinical text with no user accountable and no role
+    ever evaluated: the disclosure the new permission exists to contain,
+    reached through a different door.
+    """
+    actor_id = parse_user_id(x_actor_id)
+    if actor_id is None:
+        log.warning("review queue: refused a call with no identifiable actor")
+        raise HTTPException(status_code=403, detail="not authorized")
+
     for permission in _REVIEW_PERMISSIONS:
         _authorize_actor_permission(
             db,
@@ -1131,6 +1148,7 @@ def _authorize_reviewer(db, *, x_actor_id, x_actor_name, audit_action):
             required_permission=permission,
             audit_action=audit_action,
         )
+    return actor_id
 @app.get("/review-queue", response_model=ReviewQueuePage)
 def get_review_queue(
     limit: int = Query(default=50, ge=1, le=200),
@@ -1141,12 +1159,17 @@ def get_review_queue(
 ):
     """Cases waiting on a clinician, oldest first."""
     _verify_internal_token(x_internal_token)
-    _authorize_reviewer(
+    actor_id = _authorize_reviewer(
         db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, audit_action="review_queue_read"
     )
 
     try:
-        reviews = review_queue.pending_reviews(db, limit=limit)
+        # Grant-scoped, like every other chart read here. The queue shows
+        # withheld note text, so holding the role is necessary and not
+        # sufficient — the reviewer must also be granted that patient.
+        reviews = review_queue.pending_reviews(
+            db, active_patient_ids_query(actor_id), limit=limit
+        )
         records = {
             r.id: r
             for r in db.execute(
@@ -1201,17 +1224,18 @@ def decide_review(
     re-queued on the patient's next visit, or the decision would mean nothing.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_reviewer(
+    actor_id = _authorize_reviewer(
         db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, audit_action="review_queue_decide"
     )
 
-    actor_id = parse_user_id(x_actor_id)
-    if actor_id is None:
-        raise HTTPException(status_code=403, detail="not authorized")
-
     try:
         review = review_queue.decide(
-            db, review_id=review_id, state=req.decision, actor_id=actor_id, note=req.note
+            db,
+            review_id=review_id,
+            state=req.decision,
+            actor_id=actor_id,
+            authorized_patient_ids=active_patient_ids_query(actor_id),
+            note=req.note,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

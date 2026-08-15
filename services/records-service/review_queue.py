@@ -102,11 +102,25 @@ def enqueue_refusals(db: Session, patient_id: int, refused: Iterable[tuple]) -> 
     return created
 
 
-def pending_reviews(db: Session, limit: int = 100):
-    """The queue, oldest first — work the backlog, not the newest arrival."""
+def pending_reviews(db: Session, authorized_patient_ids, limit: int = 100):
+    """The queue, oldest first — work the backlog, not the newest arrival.
+
+    Scoped to patients the caller holds an active grant for. This queue shows
+    the full text of withheld clinical notes and offers a control that releases
+    them, which makes it a chart-reading surface: it belongs behind the same
+    patient_access_grants boundary as every other chart read in this service,
+    not merely behind a role check.
+
+    `authorized_patient_ids` is a SELECT (see patient_access_gate.
+    active_patient_ids_query) embedded in the WHERE, so unauthorized rows are
+    never loaded rather than being filtered after their bodies come back.
+    """
     return db.execute(
         select(PatientSummaryReview)
-        .where(PatientSummaryReview.state == PENDING)
+        .where(
+            PatientSummaryReview.state == PENDING,
+            PatientSummaryReview.patient_id.in_(authorized_patient_ids),
+        )
         .order_by(PatientSummaryReview.created_at.asc(), PatientSummaryReview.id.asc())
         .limit(limit)
     ).scalars().all()
@@ -118,10 +132,15 @@ def decide(
     review_id: int,
     state: str,
     actor_id: Optional[int],
+    authorized_patient_ids,
     note: Optional[str] = None,
 ) -> Optional[PatientSummaryReview]:
     """Record an approve/reject decision. Returns the row, or None if it was
     not pending.
+
+    Refuses a review for a patient the actor holds no grant for: it simply
+    matches no row, so an ungranted decider is indistinguishable from a stale
+    one and gets the same 409.
 
     Refuses without an actor: an approval is a named clinician taking
     responsibility for releasing chart content, and an anonymous one would
@@ -151,6 +170,11 @@ def decide(
         .where(
             PatientSummaryReview.id == review_id,
             PatientSummaryReview.state == PENDING,
+            # Same grant boundary as the listing. Without it, a clinician who
+            # could not see a case in their queue could still decide it by id —
+            # releasing a chart they were never granted, which is the exact
+            # shape of the IDOR this service already fixed once (RIV-201).
+            PatientSummaryReview.patient_id.in_(authorized_patient_ids),
         )
         .values(
             state=state,

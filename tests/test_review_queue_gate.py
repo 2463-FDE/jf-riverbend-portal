@@ -141,7 +141,9 @@ def test_a_decision_requires_an_identified_clinician():
     """An anonymous approval would make the accounting worthless — the whole
     point is that a named person took responsibility."""
     with pytest.raises(ValueError, match="identified clinician"):
-        rq.decide(None, review_id=1, state=rq.APPROVED, actor_id=None)
+        rq.decide(
+            None, review_id=1, state=rq.APPROVED, actor_id=None, authorized_patient_ids=[]
+        )
 
 
 @pytest.mark.parametrize("bad", ["pending", "maybe", "", "APPROVED"])
@@ -149,7 +151,7 @@ def test_only_approve_or_reject_are_decisions(bad):
     """`pending` is rejected too: "deciding" something back to pending would
     strip its decider and reopen content that was already ruled on."""
     with pytest.raises(ValueError, match="state must be one of"):
-        rq.decide(None, review_id=1, state=bad, actor_id=7)
+        rq.decide(None, review_id=1, state=bad, actor_id=7, authorized_patient_ids=[])
 
 
 # --- who may decide, per the signed role grid -------------------------------

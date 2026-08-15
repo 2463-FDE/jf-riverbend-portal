@@ -383,6 +383,12 @@ emit()
 #   drnguyen also treats Maria Gonzalez's 1330 chart and Aisha Khan (1601)
 #     — encounters 2 and 5's provider — overlapping with frontdesk's grants
 #     on purpose (multiple staff legitimately need the same chart).
+#   drkim is the S3 review-queue clinician. Granted 1737 ONLY, deliberately:
+#     the queue is grant-scoped like every other chart read, so a blanket
+#     grant would hide exactly the bug the scoping exists to prevent — a
+#     reviewer seeing withheld notes for patients they never treated. 1629
+#     is left ungranted so the "an ungranted clinician sees nothing" test has
+#     a real account to prove it with.
 # frontdesk is deliberately NOT granted 1043 — tests/integration/
 # test_records_flow.py::test_user_cannot_read_other_patients_chart and
 # test_patient_view_flow.py rely on exactly this to prove cross-patient
@@ -390,13 +396,14 @@ emit()
 # ---------------------------------------------------------------------------
 # PR #23 review round 2 (2026-08-07): grants are keyed on users.id (the stable
 # principal the gateway forwards as X-Actor-Id), never username. Ids from the
-# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6.
+# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6, drkim=13.
 emit("INSERT INTO patient_access_grants (user_id, patient_id) VALUES")
 gwrows = [
     " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
     " (3, 1042)", " (3, 1330)", " (3, 1588)",                  # rdelgado
     " (5, 1043)",                                             # drpatel
     " (6, 1330)", " (6, 1601)",                               # drnguyen
+    " (13, 1737)",                                            # drkim (review queue)
 ]
 emit(",\n".join(gwrows) + ";")
 emit()

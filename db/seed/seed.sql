@@ -2466,7 +2466,8 @@ INSERT INTO patient_access_grants (user_id, patient_id) VALUES
  (3, 1588),
  (5, 1043),
  (6, 1330),
- (6, 1601);
+ (6, 1601),
+ (13, 1737);
 
 INSERT INTO roi_requests (patient_id, requested_by, recipient, recipient_type, purpose, date_range_start, date_range_end, status, created_at) VALUES
  (1766, 'billing1', 'County Health', 'provider', 'Insurance claim', '2024-01-01', '2026-06-01', 'pending', '2026-05-24 00:00:00'),
