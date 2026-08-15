@@ -1162,3 +1162,54 @@ textarea:focus-visible,
 .rb-invite__error { margin: 0; font-size: 0.85rem; color: #b3261e; line-height: 1.45; }
 
 .rb-invite__revoked { color: #2a6a3a; font-size: 0.9rem; margin: 0.4rem 0; }
+
+/* --- patient's own results (S2) ------------------------------------------ */
+/* Values are set apart from the surrounding prose deliberately: what the
+   report actually said should be visually distinct from our wording around
+   it, so a patient can tell which words are theirs and which are ours. */
+
+.rb-results-page { max-width: 46rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+.rb-results-intro { color: #444; line-height: 1.55; margin-bottom: 1.5rem; }
+.rb-results-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 1rem; }
+
+.rb-result {
+  border: 1px solid #d8dde3;
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  background: #fff;
+}
+.rb-result-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.rb-result-title { margin: 0; font-size: 1rem; }
+.rb-result-date { color: #667; font-size: 0.875rem; white-space: nowrap; }
+
+/* The report's own words. */
+.rb-result-value {
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+  margin: 0.6rem 0 0.4rem;
+}
+.rb-result-quote { font-variant-numeric: tabular-nums; }
+.rb-result-range, .rb-result-note, .rb-result-change { font-size: 0.9rem; color: #445; margin: 0.3rem 0; }
+.rb-result-source { font-size: 0.8rem; color: #778; margin: 0.5rem 0 0; }
+
+/* Direction is shown with an arrow AND words — colour alone would carry the
+   meaning for sighted users only, and would also imply good/bad, which this
+   feature does not judge. Both arrow colours are deliberately neutral. */
+.rb-result-arrow { font-weight: 700; margin-right: 0.35rem; }
+.rb-result-arrow--up { color: #7a5c00; }
+.rb-result-arrow--down { color: #00566b; }
+.rb-result-arrow--unchanged { color: #667; }
+
+.rb-result-refusal {
+  margin: 0.6rem 0 0;
+  padding: 0.6rem 0.75rem;
+  background: #f4f6f8;
+  border-left: 3px solid #b9c2cc;
+  color: #445;
+  font-size: 0.92rem;
+}
+
+.rb-results-error { border: 1px solid #d9a2a2; background: #fdf4f4; padding: 0.75rem 1rem; border-radius: 6px; }
+.rb-results-empty, .rb-results-signed-in { color: #667; }
+.rb-results-signed-in { margin-top: 2rem; font-size: 0.85rem; }
+

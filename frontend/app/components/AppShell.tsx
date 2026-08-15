@@ -13,6 +13,7 @@ import {
   IconMessages,
   IconBilling,
   IconBell,
+  IconLab,
 } from "./icons";
 import { clearSession, getUser, getToken, apiFetch } from "../lib/session";
 import type { PortalUser } from "../lib/types";
@@ -36,6 +37,22 @@ const NAV_SOON: NavItem[] = [
   { href: "#", label: "Messages", icon: <IconMessages className="rb-nav__icon" />, soon: true },
   { href: "#", label: "Billing", icon: <IconBilling className="rb-nav__icon" />, soon: true },
 ];
+
+// What a patient sees. Every entry in NAV above is a staff route that a
+// patient account is refused — the `patient` role holds no staff permission
+// at all — so showing them that menu would be five links that each fail. The
+// navigation has to reflect the principal, not just the branding.
+const NAV_PATIENT: NavItem[] = [
+  { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
+];
+
+// Nothing here is an authorization boundary — that lives in the gateway and
+// the records service. Hiding a link the caller cannot use is a courtesy to
+// them, not a control; a patient typing /records still gets a 403 from the
+// server, which is where it matters.
+function navFor(user: PortalUser | null): NavItem[] {
+  return user?.role === "patient" ? NAV_PATIENT : NAV;
+}
 
 function Logo({ className }: { className?: string }) {
   // Simple "river bend" mark — a teal rounded square with a flowing wave.
@@ -139,8 +156,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // The login page renders its own full-bleed layout, no shell.
   if (isPublicRoute) return <>{children}</>;
 
+  const nav = navFor(user);
   const pageTitle =
-    NAV.find((n) => isActive(pathname, n.href))?.label ?? "Patient Portal";
+    nav.find((n) => isActive(pathname, n.href))?.label ?? "Patient Portal";
 
   return (
     <div className="rb-shell">
@@ -158,7 +176,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <nav className="rb-nav" aria-label="Primary">
-          {NAV.map((item) => {
+          {nav.map((item) => {
             const active = isActive(pathname, item.href);
             return (
               <Link
@@ -174,7 +192,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           })}
 
           <div className="rb-nav__section">More</div>
-          {NAV_SOON.map((item) => (
+          {(user?.role === "patient" ? [] : NAV_SOON).map((item) => (
             <span
               key={item.label}
               className="rb-nav__item rb-nav__item--disabled"
