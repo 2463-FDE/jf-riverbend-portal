@@ -107,9 +107,7 @@ def test_withholds_when_there_is_no_actor():
 
 
 def test_front_desk_does_not_hold_records_read_in_the_signed_grid():
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "records-service"))
-    import roles_config
+    roles_config = load_module("services/records-service/roles_config.py", "records_roles_config")
 
     roles_config.reload()
     assert "records.read" not in roles_config.permissions_for("front_desk")
@@ -132,9 +130,7 @@ def test_billing_is_withheld_too():
 
 
 def test_only_the_clinical_roles_receive_the_field():
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "records-service"))
-    import roles_config
+    roles_config = load_module("services/records-service/roles_config.py", "records_roles_config")
 
     roles_config.reload()
     receives = {

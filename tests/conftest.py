@@ -25,9 +25,18 @@ def load_module(relpath: str, name: str):
     """Load <REPO_ROOT>/<relpath> as a uniquely-named module."""
     path = os.path.join(REPO_ROOT, relpath)
     service_dir = os.path.dirname(path)
-    # allow the module to import its own siblings (config, etc.)
-    if service_dir not in sys.path:
-        sys.path.insert(0, service_dir)
+    # Allow the module to import its own siblings (config, models, etc.).
+    #
+    # Moved to the FRONT even when already present, not merely appended once.
+    # Every service has its own config.py/models.py/schemas.py (adr/0001, no
+    # shared package), so a plain sibling import resolves by sys.path order. If
+    # a previously-loaded service sat ahead, the module being loaded here would
+    # silently bind to THAT service's models — which is exactly what the
+    # eviction below exists to prevent, and it only works if the ordering
+    # agrees with it.
+    if service_dir in sys.path:
+        sys.path.remove(service_dir)
+    sys.path.insert(0, service_dir)
 
     # The module we're about to exec may do `import config` / `from schemas
     # import ...` etc. to reach its OWN siblings. Those plain imports go
