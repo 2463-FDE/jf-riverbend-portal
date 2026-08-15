@@ -980,16 +980,19 @@ def proxy_own_results_summary(
 # --------------------------------------------------------------------------- #
 # clinician review queue (S3)
 #
-# Gated on records.write — held by clinician and nursing_ma, and the right
-# shape for the action: approving a release writes to what a patient can see.
-# front_desk, billing, roi_clerk, scheduler and it_admin do not hold it, and
-# the patient role holds no staff permission at all, so none of them reach
-# these routes.
+# Gated on records.read AND records.write together, mirroring records-service.
+# `lab` holds records.write WITHOUT records.read by a deliberate client
+# decision (config/roles.yaml), so gating on write alone would have let a lab
+# user read the full text of withheld clinical notes here and release them to
+# a patient — the exact chart access that decision refused to grant.
+# clinician and nursing_ma hold both. The patient role holds no staff
+# permission at all.
 # --------------------------------------------------------------------------- #
 @app.get("/review-queue")
 def proxy_review_queue(
     limit: int = 50,
-    session: dict = Depends(require_permission("records.write")),
+    session: dict = Depends(require_permission("records.read")),
+    _write: dict = Depends(require_permission("records.write")),
 ):
     headers = _correlation_headers()
     headers["X-Actor-Id"] = session.get("user_id") or ""
@@ -1004,7 +1007,8 @@ def proxy_review_queue(
 def proxy_review_decision(
     review_id: int,
     payload: dict,
-    session: dict = Depends(require_permission("records.write")),
+    session: dict = Depends(require_permission("records.read")),
+    _write: dict = Depends(require_permission("records.write")),
 ):
     """Forward a clinician's approve/reject. The decision itself is recorded
     downstream, against the actor this gateway identifies — never against an

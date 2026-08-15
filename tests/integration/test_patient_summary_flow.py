@@ -63,12 +63,18 @@ def _sql(statement: str, params=()) -> None:
 
 
 def _reset_patient_account(patient_id: int) -> None:
-    """Remove any account/invitation left by a previous run.
+    """Remove any account/invitation/review left by a previous run.
 
     Grants are deleted through the account, so the patient is back to having
     no portal access at all — otherwise the second run of this file would be
     reading through state the first run created.
     """
+    # Clinician reviews (S3) are cleared too. An approved review releases
+    # content this file asserts is refused, so a leftover approval — from a
+    # demo, a manual check, or a run interrupted before teardown — makes these
+    # tests fail for a reason that has nothing to do with what they test. Found
+    # exactly that way.
+    _sql("DELETE FROM patient_summary_reviews WHERE patient_id = %s", (patient_id,))
     _sql(
         "DELETE FROM patient_access_grants WHERE user_id IN"
         " (SELECT id FROM users WHERE patient_id = %s)",

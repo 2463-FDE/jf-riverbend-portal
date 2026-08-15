@@ -311,3 +311,43 @@ CREATE INDEX IF NOT EXISTS rag_embeddings_patient_id_idx ON rag_embeddings (pati
 
 CREATE INDEX IF NOT EXISTS rag_embeddings_hnsw_idx
     ON rag_embeddings USING hnsw (embedding vector_cosine_ops);
+
+-- --------------------------------------------------------------------------
+-- patient_summary_reviews — the clinician gate (migration 018)
+--
+-- Kept in sync with db/migrations/018_patient_summary_reviews.sql. This file
+-- is the flattened schema a fresh volume is built from, and records-service
+-- queries this table on every patient summary read — so omitting it here
+-- breaks a fresh `make up` before anyone runs a migration by hand.
+--
+-- DEFAULT DENY: a patient sees refused content only via an explicit
+-- `approved` row. See the migration for the full reasoning.
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS patient_summary_reviews (
+    id          SERIAL PRIMARY KEY,
+    patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    record_id   INTEGER NOT NULL REFERENCES records(id)  ON DELETE CASCADE,
+    state       TEXT NOT NULL DEFAULT 'pending'
+                CHECK (state IN ('pending', 'approved', 'rejected')),
+    reason      TEXT,
+    decided_by  INTEGER REFERENCES users(id),
+    decided_at  TIMESTAMPTZ,
+    decision_note TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- A decided row must name its decider; a pending row must not have one.
+    CONSTRAINT patient_summary_reviews_decision_complete CHECK (
+        (state = 'pending'  AND decided_by IS NULL AND decided_at IS NULL)
+        OR
+        (state <> 'pending' AND decided_by IS NOT NULL AND decided_at IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS patient_summary_reviews_one_pending_per_record
+    ON patient_summary_reviews (record_id) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS patient_summary_reviews_record_state_idx
+    ON patient_summary_reviews (record_id, state);
+CREATE INDEX IF NOT EXISTS patient_summary_reviews_pending_idx
+    ON patient_summary_reviews (state, created_at DESC);
+CREATE INDEX IF NOT EXISTS patient_summary_reviews_patient_idx
+    ON patient_summary_reviews (patient_id);

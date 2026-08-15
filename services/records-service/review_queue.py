@@ -20,7 +20,7 @@ Three rules this module exists to hold:
 """
 from typing import Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
@@ -127,24 +127,38 @@ def decide(
     responsibility for releasing chart content, and an anonymous one would
     make the accounting worthless. Refuses on a non-pending row so a decision
     cannot be silently overwritten by a second click or a stale screen.
+
+    The claim is a single conditional UPDATE ... WHERE state = 'pending'
+    RETURNING, not a SELECT followed by a mutation. Under the read-then-write
+    version, two clinicians opening the same case both saw `pending`, both got
+    a 200, and the last commit won — so a "keep withheld" could silently
+    overwrite a "release to patient" with no conflict reported and no trace of
+    the decision that was lost. Letting the database decide the winner means
+    exactly one caller gets a row back and the other gets None, which the route
+    turns into the 409 the screen already knows how to handle.
+
+    Does not commit. The caller commits the decision and its audit row together
+    — see decide_review, where committing here first left the patient-visible
+    change durable while the request went on to return an error.
     """
     if state not in _DECISIONS:
         raise ValueError(f"state must be one of {sorted(_DECISIONS)}, got {state!r}")
     if actor_id is None:
         raise ValueError("a decision requires an identified clinician")
 
-    review = db.execute(
-        select(PatientSummaryReview).where(
+    claimed = db.execute(
+        update(PatientSummaryReview)
+        .where(
             PatientSummaryReview.id == review_id,
             PatientSummaryReview.state == PENDING,
         )
+        .values(
+            state=state,
+            decided_by=actor_id,
+            decided_at=func.now(),
+            decision_note=note,
+        )
+        .returning(PatientSummaryReview)
+        .execution_options(synchronize_session=False)
     ).scalar_one_or_none()
-    if review is None:
-        return None
-
-    review.state = state
-    review.decided_by = actor_id
-    review.decided_at = func.now()
-    review.decision_note = note
-    db.flush()
-    return review
+    return claimed

@@ -1090,14 +1090,36 @@ def _to_summary_item_out(item) -> SummaryItemOut:
 # --------------------------------------------------------------------------- #
 # clinician review queue (S3)
 #
-# Gated on records.write — the permission a clinician already holds, and the
-# right shape for it: approving a release is a write to what a patient can see,
-# not a read. Deliberately NOT a new permission, which nobody would hold until
-# the grid was amended and re-signed.
+# Gated on records.read AND records.write together. Both are needed, and the
+# reason is a client decision rather than defensive coding: `lab` holds
+# records.write WITHOUT records.read, deliberately — config/roles.yaml records
+# the client revising their own earlier answer, because with no separate
+# results category in the schema, letting lab "read prior results" would mean
+# granting them the whole chart.
+#
+# This queue hands a reviewer the full text of withheld clinical notes and the
+# power to release them to a patient. Gating it on records.write alone would
+# therefore have given `lab` exactly the chart access the client refused to
+# grant, by a side door. Requiring the pair keeps the decision with clinician
+# and nursing_ma, who hold both, and uses the signed grid as it stands rather
+# than inventing a permission nobody has until it is re-signed.
 #
 # These routes are staff-facing. A patient holds only own_record.read and
 # therefore cannot reach either of them.
 # --------------------------------------------------------------------------- #
+_REVIEW_PERMISSIONS = ("records.read", "records.write")
+
+
+def _authorize_reviewer(db, *, x_actor_id, x_actor_name, audit_action):
+    """Require every permission a review decision needs, not just one."""
+    for permission in _REVIEW_PERMISSIONS:
+        _authorize_actor_permission(
+            db,
+            x_actor_id=x_actor_id,
+            x_actor_name=x_actor_name,
+            required_permission=permission,
+            audit_action=audit_action,
+        )
 @app.get("/review-queue", response_model=ReviewQueuePage)
 def get_review_queue(
     limit: int = Query(default=50, ge=1, le=200),
@@ -1108,12 +1130,8 @@ def get_review_queue(
 ):
     """Cases waiting on a clinician, oldest first."""
     _verify_internal_token(x_internal_token)
-    _authorize_actor_permission(
-        db,
-        x_actor_id=x_actor_id,
-        x_actor_name=x_actor_name,
-        required_permission="records.write",
-        audit_action="review_queue_read",
+    _authorize_reviewer(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, audit_action="review_queue_read"
     )
 
     try:
@@ -1172,12 +1190,8 @@ def decide_review(
     re-queued on the patient's next visit, or the decision would mean nothing.
     """
     _verify_internal_token(x_internal_token)
-    _authorize_actor_permission(
-        db,
-        x_actor_id=x_actor_id,
-        x_actor_name=x_actor_name,
-        required_permission="records.write",
-        audit_action="review_queue_decide",
+    _authorize_reviewer(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, audit_action="review_queue_decide"
     )
 
     actor_id = parse_user_id(x_actor_id)
@@ -1197,21 +1211,37 @@ def decide_review(
 
     if review is None:
         # Already decided, or never existed. Same answer for both: a stale
-        # screen should not be able to discover which.
+        # screen should not be able to discover which. Under the previous
+        # read-then-write claim this branch was also unreachable in a race —
+        # both callers succeeded and the later one silently won.
         raise HTTPException(status_code=409, detail="this case is no longer pending")
 
-    db.commit()
-    _write_audit(
-        db,
-        actor=_actor_label(x_actor_name, x_actor_id),
-        message=(
-            f"review {review.id} {review.state} for record {review.record_id} "
-            f"(patient {review.patient_id})"
-        ),
-    )
+    # The decision and its audit row commit together, once. A previous version
+    # committed the decision first and then called _write_audit, which commits
+    # separately and raises 503 on failure — so an audit failure returned an
+    # error to a clinician whose release was already live and visible to the
+    # patient, and the screen told them "Nothing has changed". Both land or
+    # neither does.
+    state, record_id, patient_id = review.state, review.record_id, review.patient_id
+    try:
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=(
+                    f"review {review.id} {state} for record {record_id} "
+                    f"(patient {patient_id})"
+                ),
+            )
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("review queue: decision+audit commit failed review_id=%s", review_id)
+        raise HTTPException(status_code=503, detail="could not record the decision")
+
     return ReviewDecisionOut(
-        id=review.id,
-        record_id=review.record_id,
-        state=review.state,
-        patient_visible=(review.state == review_queue.APPROVED),
+        id=review_id,
+        record_id=record_id,
+        state=state,
+        patient_visible=(state == review_queue.APPROVED),
     )

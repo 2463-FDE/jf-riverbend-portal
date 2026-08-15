@@ -156,15 +156,42 @@ def test_only_approve_or_reject_are_decisions(bad):
 
 rc = load_module("services/gateway/roles_config.py", "roles_review_gate")
 
-_DECIDER_PERMISSION = "records.write"
+# Both are required. See the route comment in records-service: `lab` holds
+# records.write WITHOUT records.read, so either one alone is not a gate.
+_REVIEW_PERMISSIONS = ("records.read", "records.write")
 
 
 @pytest.mark.parametrize("role", ["clinician", "nursing_ma"])
 def test_clinical_roles_may_decide_a_review(role):
-    assert _DECIDER_PERMISSION in rc.permissions_for(role)
+    assert all(p in rc.permissions_for(role) for p in _REVIEW_PERMISSIONS)
 
 
-@pytest.mark.parametrize("role", ["front_desk", "billing", "roi_clerk", "scheduler", "it_admin", "patient"])
+def test_the_lab_role_cannot_reach_the_review_queue():
+    """Adversarial review of #41, B2 — the hole this suite originally had.
+
+    `lab` holds records.write but NOT records.read, and config/roles.yaml
+    records why: the client revised their own earlier answer because, with no
+    separate results category in the schema, letting lab read prior results
+    would mean handing them the whole chart.
+
+    The queue shows the full text of withheld clinical notes and offers a
+    button that releases them to a patient. Gating it on records.write alone
+    therefore granted `lab` exactly the chart access that decision refused —
+    through a side door, and with release power attached.
+
+    The original parametrised list below omitted `lab` entirely, so it read as
+    thorough while leaving the one role that could actually exploit the gap
+    untested. That is the failure this test exists to prevent recurring.
+    """
+    lab = rc.permissions_for("lab")
+    assert "records.write" in lab, "premise: lab does hold write"
+    assert "records.read" not in lab, "premise: lab does NOT hold read"
+    assert not all(p in lab for p in _REVIEW_PERMISSIONS), "so lab must fail the review gate"
+
+
+@pytest.mark.parametrize(
+    "role", ["front_desk", "billing", "roi_clerk", "scheduler", "it_admin", "patient", "lab"]
+)
 def test_non_clinical_roles_may_not_decide_a_review(role):
     """Releasing withheld chart content to a patient is a clinical decision.
 
@@ -176,11 +203,11 @@ def test_non_clinical_roles_may_not_decide_a_review(role):
     migration lands, this expectation becomes demonstrable against real
     accounts — and this test is what says it was always the intent.
     """
-    assert _DECIDER_PERMISSION not in rc.permissions_for(role)
+    assert not all(p in rc.permissions_for(role) for p in _REVIEW_PERMISSIONS)
 
 
 def test_the_deprecated_staff_role_still_carries_it():
     """Recorded, not endorsed. `staff` keeps its original full permissions, so
     every existing account can decide a review today. Pinning it here means the
     day someone narrows `staff`, this test tells them what else changes."""
-    assert _DECIDER_PERMISSION in rc.permissions_for("staff")
+    assert all(p in rc.permissions_for("staff") for p in _REVIEW_PERMISSIONS)
