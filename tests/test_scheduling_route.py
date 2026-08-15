@@ -7,6 +7,7 @@ tests/test_scheduling_book.py) — this file is about the route's contract:
 idempotency_key is required, and book()'s (appointment_id, is_replay) tuple
 maps to the right HTTP response.
 """
+import pytest
 from fastapi.testclient import TestClient
 
 from conftest import load_module
@@ -173,3 +174,27 @@ def test_healthz_does_not_require_the_token(monkeypatch):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_INTERNAL_TOKEN)
 
     assert TestClient(app_mod.app).get("/healthz").status_code == 200
+
+
+def test_the_service_refuses_to_start_with_an_unusable_token(monkeypatch):
+    """Pre-merge review of #43: _internal_token_is_configured existed and
+    nothing called it, so the docstring's promise of a loud startup failure was
+    not kept and this service would have booted clean, passed its healthcheck,
+    and 401'd every request — the healthy-looking outage the round-13/17
+    reviews fixed for gateway, intake and records.
+
+    Compose's ${VAR:?...} catches an entirely missing value before any
+    container starts. It cannot catch one that is present but unusable, which
+    is exactly what this covers.
+    """
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "changeme")
+
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        app_mod._fail_fast_on_an_unusable_token()
+
+
+def test_the_service_starts_with_a_real_token(monkeypatch):
+    """The other direction, so the check cannot be 'fixed' by always raising."""
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", "r" * 32)
+
+    app_mod._fail_fast_on_an_unusable_token()   # must not raise

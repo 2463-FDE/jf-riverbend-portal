@@ -74,6 +74,30 @@ def _verify_internal_token(x_internal_token: Optional[str] = Header(default=None
         raise HTTPException(status_code=401, detail="missing or invalid internal service token")
 
 
+@app.on_event("startup")
+def _fail_fast_on_an_unusable_token() -> None:
+    """Refuse to start rather than serve traffic that 401s everything.
+
+    The docstring on _internal_token_is_configured claimed this happened;
+    nothing called it, so the function was dead code and this service would
+    have started cleanly with a placeholder token and then rejected every
+    request — the exact healthy-looking outage the round-13/17 reviews fixed
+    for gateway, intake-service and records-service.
+
+    Compose's ${INTERNAL_SERVICE_TOKEN:?...} stops an entirely MISSING value
+    before any container starts. It cannot catch a value that is present but
+    unusable — "changeme", or anything under the length floor — which is
+    precisely the case this check exists for.
+    """
+    if not _internal_token_is_configured():
+        raise RuntimeError(
+            f"INTERNAL_SERVICE_TOKEN is not set (or is shorter than "
+            f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
+            f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
+        )
+
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "service": settings.service_name}
