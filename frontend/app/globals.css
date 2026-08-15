@@ -1121,3 +1121,42 @@ textarea:focus-visible,
   margin: 16px 0;
   border: none;
 }
+
+/* --- Patient portal invitation (S1) ------------------------------------- */
+/* The code is shown once and never retrievable, so it is set large, grouped
+   and monospaced: this gets read aloud across a desk and copied onto paper. */
+.rb-invite {
+  border: 1px solid var(--rb-border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--rb-surface);
+}
+.rb-invite__title { margin: 0; font-size: 0.98rem; font-weight: 600; }
+.rb-invite__hint { margin: 0; font-size: 0.85rem; color: var(--rb-muted); line-height: 1.5; }
+.rb-invite__warn {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-left: 3px solid #b3261e;
+  background: rgba(179, 38, 30, 0.06);
+  border-radius: 0 4px 4px 0;
+}
+.rb-invite__code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 14px 16px;
+  border: 1px dashed var(--rb-border);
+  border-radius: 6px;
+  text-align: center;
+  user-select: all;      /* one click selects the whole code */
+  overflow-wrap: anywhere;
+}
+.rb-invite__actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rb-invite__expiry { font-size: 0.82rem; color: var(--rb-muted); }
+.rb-invite__error { margin: 0; font-size: 0.85rem; color: #b3261e; line-height: 1.45; }

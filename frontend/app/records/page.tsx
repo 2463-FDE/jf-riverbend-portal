@@ -24,6 +24,13 @@ const AI_CALLOUT: Record<"escalated" | "refused", string> = {
   refused: "No chart content is shown here. Check the source record directly.",
 };
 
+function formatConfirmationDob(dob: string | null | undefined): string {
+  // Date-only values must not pass through Date: parsing "YYYY-MM-DD" as UTC
+  // can shift the displayed calendar date for staff west of UTC.
+  const match = dob?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? `${match[2]}/${match[3]}/${match[1].slice(-2)}` : dob || "—";
+}
+
 export default function RecordsPage() {
   // The records view loads by a patient id taken straight off the input/URL.
   // The id is a sequential integer and the backend does NOT check ownership
@@ -304,6 +311,25 @@ export default function RecordsPage() {
               </div>
             )}
 
+            {reconciliation.source_records.length > 1 && (() => {
+              const currentRecord = reconciliation.source_records.find((record) => record.is_requested_patient);
+              const ssnSignal = reconciliation.identity_signals.find(
+                (signal) => signal.signal_type === "ssn_exact_match"
+              );
+              return (
+                <div className="rb-alert rb-alert--info" role="status" style={{ marginTop: 10 }}>
+                  <strong>Confirm existing patient information</strong>
+                  <p className="rb-muted" style={{ margin: "6px 0 0" }}>
+                    Verify these details with the patient before making any record decision.
+                  </p>
+                  <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginTop: 8 }}>
+                    <span><strong>Date of birth:</strong> {formatConfirmationDob(currentRecord?.dob)}</span>
+                    <span><strong>SSN:</strong> {ssnSignal?.masked_value ?? "not available"}</span>
+                  </div>
+                </div>
+              );
+            })()}
+
             {reconciliation.source_records.length > 1 && (
               <div className="rb-table-scroll">
                 <table className="rb-table">
@@ -325,7 +351,7 @@ export default function RecordsPage() {
                           </div>
                         </td>
                         <td>{r.name_on_file}</td>
-                        <td>{r.dob ?? "—"}</td>
+                        <td>{formatConfirmationDob(r.dob)}</td>
                         <td>
                           {r.allergies.length === 0
                             ? "none recorded"

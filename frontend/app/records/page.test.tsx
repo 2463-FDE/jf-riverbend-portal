@@ -75,6 +75,20 @@ function aiViewFor(patientId: number, summary: string): PatientViewResult {
 }
 
 describe("RecordsPage — stale patient panel regression", () => {
+  it("shows a safe existing-patient confirmation with DOB in MM/DD/YY and a masked SSN", async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      jsonResponse(reconciliationFor(1042, "Maria Gonzalez"))
+    );
+
+    render(<RecordsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /check for related records/i }));
+
+    await waitFor(() => expect(screen.getByText(/confirm existing patient information/i)).toBeInTheDocument());
+    expect(screen.getByText(/date of birth:/i).parentElement).toHaveTextContent("01/01/80");
+    expect(screen.getByText(/^ssn:$/i).parentElement).toHaveTextContent("•••-••-9981");
+  });
+
   it("clears an already-loaded reconciliation panel immediately when the Patient ID changes", async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(
       jsonResponse(reconciliationFor(1042, "Maria Gonzalez"))
