@@ -245,6 +245,37 @@ class IssueInvitationRequest(BaseModel):
     patient_id: int
 
 
+def _revoke_lapsed_invitations(db: Session, patient_id: int) -> int:
+    """Close out any invitation for this patient whose window has passed.
+
+    This exists because `patient_invitations_one_live_per_patient` cannot see
+    expiry: a partial-index predicate must be IMMUTABLE, so it cannot call
+    now(). Without this, a lapsed code kept its slot in that index forever and
+    the front desk could never issue the patient another one — they were told
+    to "revoke it first" by a 409 about an invitation that had already expired.
+
+    Marking the lapsed row revoked turns a state the index cannot express into
+    one it can. It is not a weakening: the row was already unusable, since
+    invitation_state() rejects an expired code at redemption. This only makes
+    the database agree with what redemption already enforced.
+
+    Deliberately not a background job — a sweep would leave the lockout in
+    place until it next ran, and the only moment the answer matters is the
+    moment someone tries to issue.
+    """
+    lapsed = (
+        db.query(PatientInvitation)
+        .filter(
+            PatientInvitation.patient_id == patient_id,
+            PatientInvitation.activated_at.is_(None),
+            PatientInvitation.revoked_at.is_(None),
+            PatientInvitation.expires_at <= func.now(),
+        )
+        .update({PatientInvitation.revoked_at: func.now()}, synchronize_session=False)
+    )
+    return int(lapsed or 0)
+
+
 @app.post("/patients/{patient_id}/invitation", status_code=201)
 def issue_patient_invitation(
     patient_id: int,
@@ -274,16 +305,28 @@ def issue_patient_invitation(
         expires_at=patient_invitations.default_expiry(),
     )
     try:
+        # One transaction: a lapsed code is closed out and the replacement
+        # inserted together, so no window exists where the patient has neither.
+        lapsed = _revoke_lapsed_invitations(db, patient_id)
         db.add(invitation)
         db.commit()
     except SQLAlchemyError:
         db.rollback()
-        # The one-live-invitation-per-patient index is the likely cause. Do not
-        # echo the database error: it names constraints and columns.
+        # Expired rows were just cleared, so a conflict here means a genuinely
+        # live code is outstanding — the one case where refusing is right. Do
+        # not echo the database error: it names constraints and columns.
         log.warning("invitation issue rejected for patient_id=%s", patient_id)
         raise HTTPException(
             status_code=409,
-            detail="this patient already has a live invitation; revoke it before issuing another",
+            detail=(
+                "this patient already has an unexpired invitation; revoke it "
+                "before issuing another"
+            ),
+        )
+
+    if lapsed:
+        log.info(
+            "revoked %s lapsed invitation(s) before reissue patient_id=%s", lapsed, patient_id
         )
 
     log.info("portal invitation issued patient_id=%s by user_id=%s", patient_id, issuer_id)
@@ -292,6 +335,50 @@ def issue_patient_invitation(
         "code": code,  # shown once, never stored, never retrievable
         "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
     }
+
+
+@app.delete("/patients/{patient_id}/invitation")
+def revoke_patient_invitation(
+    patient_id: int,
+    session: dict = Depends(require_permission("patients.write")),
+    db: Session = Depends(get_db),
+):
+    """Kill an outstanding invitation before anyone redeems it.
+
+    Needed for the case the issue route's 409 points at, and for the ordinary
+    front-desk mistake: a code read aloud to the wrong person, or issued
+    against the wrong patient. Until this existed the only answer was a code
+    that stayed valid for fourteen days with no way to close it.
+
+    Idempotent, and deliberately does not report whether a code was actually
+    outstanding — same permission as issuing, so this leaks nothing to a
+    caller who could issue anyway, but it keeps the response uniform.
+    """
+    revoker_id = parse_user_id(session.get("user_id"))
+    if revoker_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    revoked = (
+        db.query(PatientInvitation)
+        .filter(
+            PatientInvitation.patient_id == patient_id,
+            PatientInvitation.activated_at.is_(None),
+            PatientInvitation.revoked_at.is_(None),
+        )
+        .update({PatientInvitation.revoked_at: func.now()}, synchronize_session=False)
+    )
+    db.commit()
+
+    log.info(
+        "portal invitation revoked patient_id=%s count=%s by user_id=%s",
+        patient_id,
+        revoked,
+        revoker_id,
+    )
+    # Already-activated invitations are untouched: revoking an invitation must
+    # not silently disable a working account. Closing an active account is a
+    # separate action on the account itself.
+    return {"patient_id": patient_id, "revoked": int(revoked or 0)}
 
 
 class ActivateRequest(BaseModel):

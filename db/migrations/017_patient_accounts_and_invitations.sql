@@ -55,10 +55,22 @@ CREATE TABLE IF NOT EXISTS patient_invitations (
 CREATE INDEX IF NOT EXISTS patient_invitations_code_hash_idx
     ON patient_invitations (code_hash);
 
--- At most one LIVE invitation per patient. A second live code for the same
+-- At most one OPEN invitation per patient. A second open code for the same
 -- chart is a second way in, and revoking one would not close the other.
--- Expired, revoked and already-activated rows are excluded, so re-inviting
--- after any of those is fine.
+--
+-- Note what this predicate can and cannot say. A partial-index predicate must
+-- be IMMUTABLE, so it cannot reference now() — "expired" is therefore NOT
+-- expressible here, and an earlier version of this comment wrongly claimed
+-- expired rows were excluded. They are not: an unactivated, unrevoked row
+-- stays in this index forever, so a patient who let their 14-day code lapse
+-- could never be issued another one.
+--
+-- Expiry is closed out in the application instead: issuance revokes any
+-- lapsed row for that patient in the same transaction as the insert (see
+-- services/gateway/app.py::_revoke_lapsed_invitations), which turns "expired"
+-- into the revoked_at state this predicate CAN see. A conflict on this index
+-- therefore means a genuinely live code is outstanding, which is the one case
+-- where refusing is right.
 CREATE UNIQUE INDEX IF NOT EXISTS patient_invitations_one_live_per_patient
     ON patient_invitations (patient_id)
     WHERE activated_at IS NULL AND revoked_at IS NULL;
