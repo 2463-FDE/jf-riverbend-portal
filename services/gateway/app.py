@@ -975,3 +975,48 @@ def proxy_own_results_summary(
         headers=headers,
         forward_status=True,
     )
+
+
+# --------------------------------------------------------------------------- #
+# clinician review queue (S3)
+#
+# Gated on records.write — held by clinician and nursing_ma, and the right
+# shape for the action: approving a release writes to what a patient can see.
+# front_desk, billing, roi_clerk, scheduler and it_admin do not hold it, and
+# the patient role holds no staff permission at all, so none of them reach
+# these routes.
+# --------------------------------------------------------------------------- #
+@app.get("/review-queue")
+def proxy_review_queue(
+    limit: int = 50,
+    session: dict = Depends(require_permission("records.write")),
+):
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records", "/review-queue", params={"limit": limit}, headers=headers, forward_status=True
+    )
+
+
+@app.post("/review-queue/{review_id}/decision")
+def proxy_review_decision(
+    review_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("records.write")),
+):
+    """Forward a clinician's approve/reject. The decision itself is recorded
+    downstream, against the actor this gateway identifies — never against an
+    actor the caller supplied."""
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _post(
+        "records",
+        f"/review-queue/{review_id}/decision",
+        payload,
+        headers=headers,
+        forward_status=True,
+    )

@@ -40,13 +40,14 @@ from libs.patient_view_agent import (
     run_patient_view,
 )
 from logging_config import configure
-from models import AuditLog, Encounter, Patient, Record, User
+from models import AuditLog, Encounter, Patient, PatientSummaryReview, Record, User
 from patient_access_gate import (
     SqlPatientAccessGate,
     active_patient_ids_query,
     parse_user_id,
 )
 import patient_summary
+import review_queue
 from patient_view_repository import SqlChartRepository
 from reconciliation import build_reconciliation_result
 from schemas import (
@@ -57,6 +58,10 @@ from schemas import (
     PatientPage,
     PatientSummary,
     OwnResultsSummary,
+    ReviewDecisionOut,
+    ReviewDecisionRequest,
+    ReviewQueueItem,
+    ReviewQueuePage,
     SummaryChangeOut,
     SummaryItemOut,
     ReconciliationResult,
@@ -1015,7 +1020,30 @@ def get_patient_summary(
         log.exception("patient summary: chart unreadable patient_id=%s", patient_id)
         raise HTTPException(status_code=503, detail="records temporarily unavailable")
 
-    items = [_to_summary_item_out(item) for item in patient_summary.render_items(rows)]
+    # The clinician gate (S3). Content the renderer refuses is shown only when
+    # a named clinician approved that specific record; everything else — no
+    # review, pending, rejected — stays refused. Loading the approved set here
+    # and passing it in keeps render_items pure and keeps the default closed.
+    approved = review_queue.approved_record_ids(db, patient_id)
+    rendered = patient_summary.render_items(rows, approved_record_ids=approved)
+
+    # Anything still refused is queued for a clinician. This is what makes the
+    # queue real rather than decorative: it contains exactly what patients were
+    # not allowed to see. Idempotent, so a refresh queues nothing.
+    try:
+        review_queue.enqueue_refusals(
+            db,
+            patient_id,
+            [(i.record_id, i.refusal_reason and "no clean quote") for i in rendered if i.refusal_reason],
+        )
+        db.commit()
+    except SQLAlchemyError:
+        # Queueing is bookkeeping for staff; it must never take down a
+        # patient's ability to read their own results.
+        db.rollback()
+        log.exception("review queue: could not enqueue refusals patient_id=%s", patient_id)
+
+    items = [_to_summary_item_out(item) for item in rendered]
 
     _write_audit(
         db,
@@ -1054,5 +1082,136 @@ def _to_summary_item_out(item) -> SummaryItemOut:
             else None
         ),
         refusal_reason=item.refusal_reason,
+        released_by_review=item.released_by_review,
         source_record_ids=list(item.source_record_ids),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# clinician review queue (S3)
+#
+# Gated on records.write — the permission a clinician already holds, and the
+# right shape for it: approving a release is a write to what a patient can see,
+# not a read. Deliberately NOT a new permission, which nobody would hold until
+# the grid was amended and re-signed.
+#
+# These routes are staff-facing. A patient holds only own_record.read and
+# therefore cannot reach either of them.
+# --------------------------------------------------------------------------- #
+@app.get("/review-queue", response_model=ReviewQueuePage)
+def get_review_queue(
+    limit: int = Query(default=50, ge=1, le=200),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Cases waiting on a clinician, oldest first."""
+    _verify_internal_token(x_internal_token)
+    _authorize_actor_permission(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        required_permission="records.write",
+        audit_action="review_queue_read",
+    )
+
+    try:
+        reviews = review_queue.pending_reviews(db, limit=limit)
+        records = {
+            r.id: r
+            for r in db.execute(
+                select(Record).where(Record.id.in_([rv.record_id for rv in reviews] or [0]))
+            ).scalars().all()
+        }
+    except SQLAlchemyError:
+        log.exception("review queue: unreadable")
+        raise HTTPException(status_code=503, detail="review queue temporarily unavailable")
+
+    items = []
+    for rv in reviews:
+        rec = records.get(rv.record_id)
+        items.append(
+            ReviewQueueItem(
+                id=rv.id,
+                patient_id=rv.patient_id,
+                record_id=rv.record_id,
+                state=rv.state,
+                reason=rv.reason,
+                created_at=rv.created_at.isoformat() if rv.created_at else None,
+                record_title=rec.title if rec else None,
+                record_kind=rec.kind if rec else None,
+                record_body=rec.body if rec else None,
+                record_date=(
+                    rec.created_at.date().isoformat() if rec and rec.created_at else None
+                ),
+            )
+        )
+
+    _write_audit(
+        db,
+        actor=_actor_label(x_actor_name, x_actor_id),
+        message=f"review_queue listed {len(items)} pending case(s)",
+    )
+    return ReviewQueuePage(items=items)
+
+
+@app.post("/review-queue/{review_id}/decision", response_model=ReviewDecisionOut)
+def decide_review(
+    review_id: int,
+    req: ReviewDecisionRequest,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Approve or reject. This is the decision that changes what a patient sees.
+
+    Approving releases the record's own words to the patient, verbatim.
+    Rejecting leaves the refusal in place permanently — the record is not
+    re-queued on the patient's next visit, or the decision would mean nothing.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_actor_permission(
+        db,
+        x_actor_id=x_actor_id,
+        x_actor_name=x_actor_name,
+        required_permission="records.write",
+        audit_action="review_queue_decide",
+    )
+
+    actor_id = parse_user_id(x_actor_id)
+    if actor_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    try:
+        review = review_queue.decide(
+            db, review_id=review_id, state=req.decision, actor_id=actor_id, note=req.note
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("review queue: decision failed review_id=%s", review_id)
+        raise HTTPException(status_code=503, detail="could not record the decision")
+
+    if review is None:
+        # Already decided, or never existed. Same answer for both: a stale
+        # screen should not be able to discover which.
+        raise HTTPException(status_code=409, detail="this case is no longer pending")
+
+    db.commit()
+    _write_audit(
+        db,
+        actor=_actor_label(x_actor_name, x_actor_id),
+        message=(
+            f"review {review.id} {review.state} for record {review.record_id} "
+            f"(patient {review.patient_id})"
+        ),
+    )
+    return ReviewDecisionOut(
+        id=review.id,
+        record_id=review.record_id,
+        state=review.state,
+        patient_visible=(review.state == review_queue.APPROVED),
     )

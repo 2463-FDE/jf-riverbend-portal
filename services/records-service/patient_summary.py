@@ -350,6 +350,10 @@ class SummaryItem:
     reference_range: Optional[str] = None
     change: Optional[Change] = None
     refusal_reason: Optional[str] = None
+    # True when this content reached the patient because a clinician released
+    # it, not because the renderer could quote it safely on its own. The UI
+    # says so: the patient should know a person made that call.
+    released_by_review: bool = False
     # Every figure shown must be traceable to the row it came from — the
     # client's "a link to its source" requirement, carried in the payload
     # rather than reconstructed by the UI.
@@ -362,8 +366,14 @@ REFUSAL_NO_CLEAN_QUOTE = (
 )
 
 
-def render_items(rows) -> list[SummaryItem]:
+def render_items(rows, approved_record_ids=frozenset()) -> list[SummaryItem]:
     """Turn chart rows into quoted results, newest first.
+
+    `approved_record_ids` is the clinician gate (S3). A result this module
+    refuses to quote is shown ONLY when its record id appears in that set,
+    meaning a named clinician approved its release. The default is an empty
+    set, so every caller that does not pass one gets the refusing behaviour —
+    the gate fails closed by construction rather than by remembering to check.
 
     Lives here rather than in the route module because it is the content rules
     made concrete, and it needs no database, no request and no response model
@@ -384,16 +394,34 @@ def render_items(rows) -> list[SummaryItem]:
         date = row.created_at.date().isoformat() if row.created_at else None
 
         if shape is ResultShape.UNQUOTABLE:
-            items.append(
-                SummaryItem(
-                    record_id=row.id,
-                    title=row.title,
-                    date=date,
-                    shape=shape,
-                    refusal_reason=REFUSAL_NO_CLEAN_QUOTE,
-                    source_record_ids=[row.id],
+            if row.id in approved_record_ids:
+                # Released by a clinician. What the patient sees is still the
+                # report's own words, verbatim — approval is permission to
+                # show existing text, never licence to generate new text, so
+                # the "we never synthesize" rule holds on this path too.
+                items.append(
+                    SummaryItem(
+                        record_id=row.id,
+                        title=row.title,
+                        date=date,
+                        shape=shape,
+                        quote=quote_of(row.body),
+                        reference_range=reference_range_of(row.reference_range),
+                        released_by_review=True,
+                        source_record_ids=[row.id],
+                    )
                 )
-            )
+            else:
+                items.append(
+                    SummaryItem(
+                        record_id=row.id,
+                        title=row.title,
+                        date=date,
+                        shape=shape,
+                        refusal_reason=REFUSAL_NO_CLEAN_QUOTE,
+                        source_record_ids=[row.id],
+                    )
+                )
             continue
 
         measurements = parse_measurements(row.body) or []

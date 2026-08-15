@@ -118,3 +118,25 @@ class AuditLog(Base):
     message = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     deleted_at = Column(TIMESTAMP(timezone=True))
+
+
+class PatientSummaryReview(Base):
+    """The clinician gate over content the summariser refused to show (S3).
+
+    This is an authorization input, not a workflow log. A patient sees refused
+    content only when an `approved` row exists for it — no row, `pending`, and
+    `rejected` all mean not visible. See migration 018 for the constraints that
+    hold that shape at the database level.
+    """
+
+    __tablename__ = "patient_summary_reviews"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, nullable=False)
+    record_id = Column(Integer, nullable=False)
+    state = Column(Text, nullable=False, default="pending")
+    reason = Column(Text)
+    decided_by = Column(Integer)
+    decided_at = Column(TIMESTAMP(timezone=True))
+    decision_note = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
