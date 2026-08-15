@@ -925,3 +925,53 @@ def _safe_json(response: httpx.Response):
         return response.json()
     except ValueError:
         return {"raw": response.text}
+
+
+# --------------------------------------------------------------------------- #
+# the patient's own results (S2)
+#
+# Note the shape of the path: there is no patient_id in it. The chart this
+# returns is derived from the signed-in account's own users.patient_id, so a
+# patient cannot even express a request for someone else's results — the class
+# of bug RIV-201 was, removed by construction rather than by a check.
+#
+# Gated on own_record.read, which only the `patient` role holds. Staff roles do
+# NOT hold it: a clinician reading a chart goes through the staff routes above,
+# where their access is scoped and audited as staff access. Keeping the two
+# apart means "a patient read their own record" and "a clinician read a
+# patient's record" never collapse into the same audit line.
+# --------------------------------------------------------------------------- #
+@app.get("/patient/me/summary")
+def proxy_own_results_summary(
+    session: dict = Depends(require_permission("own_record.read")),
+    db: Session = Depends(get_db),
+):
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("own results: account store unreadable for user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+
+    if patient_id is None:
+        # An account holding own_record.read but linked to no patient is a
+        # misconfiguration, not a patient — refuse rather than fall back to
+        # anything. There is no sensible default chart to show.
+        log.warning("own results: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = str(user_id)
+    headers["X-Actor-Name"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records",
+        f"/patients/{patient_id}/summary",
+        headers=headers,
+        forward_status=True,
+    )

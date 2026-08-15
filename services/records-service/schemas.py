@@ -145,3 +145,45 @@ class ReconciliationResult(BaseModel):
     limitations: list[str]
     escalation: bool
     correlation_id: str
+
+
+# --- patient-facing summary (S2) -------------------------------------------
+#
+# A deliberately narrower shape than RecordOut. The patient's own view carries
+# a *quote* rather than a body: `quote` is the report's own words when one of
+# the three outcomes allows it, and None when the result took the refusal path.
+# The raw `body` field is never echoed here, so a client of this endpoint
+# cannot accidentally render prose the content rules said to withhold.
+
+
+class SummaryChangeOut(BaseModel):
+    direction: str                  # "up" | "down" | "unchanged"
+    delta: str
+    unit: str | None = None
+    from_value: str
+    from_record_id: int             # the report this change was measured against
+    from_date: str | None = None
+
+
+class SummaryItemOut(BaseModel):
+    record_id: int
+    title: str | None = None
+    date: str | None = None
+    shape: str                      # single_value | panel | unquotable
+    quote: str | None = None        # verbatim, or None when refused
+    reference_range: str | None = None   # verbatim, or absent — never synthesized
+    change: SummaryChangeOut | None = None
+    refusal_reason: str | None = None
+    source_record_ids: list[int] = []
+
+
+class OwnResultsSummary(BaseModel):
+    """The patient's own results, quoted.
+
+    Deliberately NOT named PatientSummary: that name is already taken above by
+    the demographics row the /patients list returns, and two models with one
+    name in this file would shadow each other silently.
+    """
+
+    patient_id: int
+    items: list[SummaryItemOut]
