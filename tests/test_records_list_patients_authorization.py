@@ -198,9 +198,7 @@ def test_roster_requires_the_patients_read_permission(monkeypatch):
     """PR #33 review [high]: this route filtered by active grant only and never
     checked the caller's role, so an active user holding a grant could list
     patient names, DOB, gender and MRN with an unknown or downgraded role."""
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "services", "records-service"))
-    import roles_config
+    roles_config = load_module("services/records-service/roles_config.py", "records_roles_config")
     roles_config.reload()
 
     # it_admin holds no patient-scoped permission at all in the signed grid.

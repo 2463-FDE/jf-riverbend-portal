@@ -40,22 +40,26 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
+import patient_invitations
 import roles_config
 from config import settings
 from db import get_db
 from logging_config import configure
-from models import User
-from security import create_session, destroy_session, get_session, verify_password
+from models import PatientAccessGrant, PatientInvitation, User
+from security import create_session, destroy_session, get_session, hash_password, verify_password
 from visit_authorization import find_authorized_appointment, latest_insurance_member_id, parse_user_id
 
 log = configure(settings.service_name)
 
-_MIN_INTERNAL_TOKEN_LENGTH = 32  # matches intake-service/records-service's own floor
+_MIN_INTERNAL_TOKEN_LENGTH = 32
+# Patient-chosen, so it needs a floor. auth.yaml's password_min_length of 6 is
+# the legacy staff value and is too low for a credential to a medical record.
+_MIN_PATIENT_PASSWORD_LENGTH = 12  # matches intake-service/records-service's own floor
 
 
 def _internal_token_is_configured() -> bool:
@@ -227,6 +231,170 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         "mfa": False,
         "user": {"username": user.username, "full_name": user.full_name, "role": user.role},
     }
+
+
+# --------------------------------------------------------------------------- #
+# patient portal invitations (S1)
+#
+# Authorization is NOT extended here. Activation creates a users row plus ONE
+# patient_access_grants row for that patient's own chart, so the same gate that
+# scopes staff scopes the patient — the client's point that this is one
+# mechanism applied to a different principal, not two mechanisms.
+# --------------------------------------------------------------------------- #
+class IssueInvitationRequest(BaseModel):
+    patient_id: int
+
+
+@app.post("/patients/{patient_id}/invitation", status_code=201)
+def issue_patient_invitation(
+    patient_id: int,
+    session: dict = Depends(require_permission("patients.write")),
+    db: Session = Depends(get_db),
+):
+    """Front desk issues a portal invitation while registering the patient.
+
+    Gated on patients.write — the permission the roles that register patients
+    already hold, and the same desk that verifies identity in person. Deliberately
+    not a new permission: inventing one would mean nobody holds it until the
+    grid is amended.
+
+    The code is returned exactly once, in this response, and never stored. If it
+    is lost the invitation is revoked and reissued; there is no path that reads
+    an existing code back, because none should exist.
+    """
+    issuer_id = parse_user_id(session.get("user_id"))
+    if issuer_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    code = patient_invitations.generate_code()
+    invitation = PatientInvitation(
+        patient_id=patient_id,
+        code_hash=patient_invitations.hash_code(code),
+        issued_by=issuer_id,
+        expires_at=patient_invitations.default_expiry(),
+    )
+    try:
+        db.add(invitation)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        # The one-live-invitation-per-patient index is the likely cause. Do not
+        # echo the database error: it names constraints and columns.
+        log.warning("invitation issue rejected for patient_id=%s", patient_id)
+        raise HTTPException(
+            status_code=409,
+            detail="this patient already has a live invitation; revoke it before issuing another",
+        )
+
+    log.info("portal invitation issued patient_id=%s by user_id=%s", patient_id, issuer_id)
+    return {
+        "patient_id": patient_id,
+        "code": code,  # shown once, never stored, never retrievable
+        "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
+    }
+
+
+class ActivateRequest(BaseModel):
+    code: str
+    password: str
+
+
+@app.post("/patient/activate")
+def activate_patient_account(req: ActivateRequest, db: Session = Depends(get_db)):
+    """Redeem an invitation and set a password. Public by necessity — the
+    person redeeming has no account yet.
+
+    Every failure returns the SAME response. Distinguishing "expired" from
+    "unknown" would confirm that a code existed, turning this endpoint into an
+    oracle for guessing them. The specific reason is logged, never returned.
+    """
+    generic = HTTPException(status_code=400, detail="invalid or expired invitation code")
+
+    if len(req.password or "") < _MIN_PATIENT_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"password must be at least {_MIN_PATIENT_PASSWORD_LENGTH} characters",
+        )
+
+    try:
+        invitation = db.execute(
+            select(PatientInvitation).where(
+                PatientInvitation.code_hash == patient_invitations.hash_code(req.code)
+            )
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("activation: invitation lookup failed")
+        raise HTTPException(status_code=503, detail="could not activate right now; please retry")
+
+    reason = patient_invitations.invitation_state(invitation)
+    if reason is not None:
+        log.info("activation refused reason=%s", reason)
+        raise generic
+    if not patient_invitations.codes_match(req.code, invitation.code_hash):
+        # Belt and braces: the lookup already matched on hash, but comparing in
+        # constant time keeps a timing signal out of the path regardless.
+        raise generic
+
+    try:
+        account = _activate_invitation(db, invitation, req.password)
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("activation: could not create the account")
+        raise HTTPException(status_code=503, detail="could not activate right now; please retry")
+
+    log.info("patient account activated user_id=%s patient_id=%s", account.id, invitation.patient_id)
+    return {"status": "activated", "username": account.username}
+
+
+def _activate_invitation(db: Session, invitation, password: str) -> User:
+    """Claim the invitation, create the account, and grant it exactly one chart.
+
+    The claim is written first and the row is only claimed if it is still
+    unclaimed, so two simultaneous redemptions of one code cannot both proceed —
+    the loser sees zero rows updated and is rejected. All of it commits as one
+    transaction: an account without its grant would be a patient who can sign in
+    and see nothing, and a grant without an account is an orphan.
+    """
+    claimed = db.execute(
+        update(PatientInvitation)
+        .where(
+            PatientInvitation.id == invitation.id,
+            PatientInvitation.activated_at.is_(None),
+            PatientInvitation.revoked_at.is_(None),
+        )
+        .values(activated_at=func.now())
+        .returning(PatientInvitation.id)
+    ).scalar_one_or_none()
+    if claimed is None:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="invalid or expired invitation code")
+
+    account = User(
+        username=patient_invitations.username_for_patient(invitation.patient_id),
+        password_hash=hash_password(password),
+        full_name=None,
+        role="patient",
+        patient_id=invitation.patient_id,
+        is_active=True,
+    )
+    db.add(account)
+    db.flush()
+
+    # THE grant. One row, for their own chart, in the same table staff use —
+    # which is what makes every existing scoping query work unchanged.
+    #
+    # Through the ORM rather than raw SQL: the model is right there, and an
+    # INSERT ... ON CONFLICT would have pinned this to Postgres syntax for a
+    # conflict that cannot arise — the account is created two statements above,
+    # so it cannot already hold a grant.
+    db.add(PatientAccessGrant(user_id=account.id, patient_id=invitation.patient_id))
+    db.execute(
+        update(PatientInvitation)
+        .where(PatientInvitation.id == invitation.id)
+        .values(activated_user_id=account.id)
+    )
+    db.commit()
+    return account
 
 
 @app.post("/logout")
