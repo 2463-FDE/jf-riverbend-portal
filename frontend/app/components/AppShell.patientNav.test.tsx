@@ -70,3 +70,18 @@ describe("navigation for a patient account", () => {
     expect(screen.queryByText(/^billing$/i)).not.toBeInTheDocument();
   });
 });
+
+describe("the review queue link", () => {
+  it("is not offered to a patient", async () => {
+    // A patient cannot decide a review — the role holds no staff permission —
+    // so offering the link would be a dead end at best.
+    render(
+      <AppShell>
+        <p>content</p>
+      </AppShell>
+    );
+
+    await screen.findByRole("link", { name: /your results/i });
+    expect(screen.queryByRole("link", { name: /review queue/i })).not.toBeInTheDocument();
+  });
+});
