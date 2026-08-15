@@ -219,7 +219,8 @@ def test_parsing_is_all_or_nothing_across_segments():
 #
 # render_items is pure over rows — no database, no request, no response model —
 # so it is exercised here with fakes. The DB- and HTTP-level behaviour is
-# covered in tests/integration/test_patient_summary_flow.py.
+# covered by the integration suite that ships with the routes, on the branch
+# that adds them (this one deliberately contains no caller).
 
 from datetime import datetime, timezone  # noqa: E402
 
@@ -392,3 +393,119 @@ def test_a_backfilled_record_does_not_invert_the_trend():
     assert items[10].change.direction == "up"
     assert items[10].change.from_record_id == 99
     assert items[99].change is None
+
+
+# --- review round 2 (#36): self-ordering and punctuation in analyte names ---
+
+
+def test_render_items_orders_its_own_input_rather_than_trusting_the_caller():
+    """Adversarial review, PS-ORDER-001.
+
+    The chronological precondition used to be documented and unenforced, and
+    a documented precondition is one nobody checks. Handed newest-first rows,
+    render_items measured each result against the one that came AFTER it and
+    reported the direction backwards — the probe returned "down 0.4" for a
+    value that had risen. That is a patient-visible clinical claim, so the
+    module orders its own input now instead of depending on the query being
+    right.
+    """
+    newest_first = [_Row(2, "A1c", "6.2%.", day=2), _Row(1, "A1c", "5.8%.", day=1)]
+    oldest_first = [_Row(1, "A1c", "5.8%.", day=1), _Row(2, "A1c", "6.2%.", day=2)]
+
+    for rows in (newest_first, oldest_first):
+        items = _by_id(ps.render_items(rows))
+        assert items[2].change is not None
+        assert items[2].change.direction == "up", "5.8 -> 6.2 is a rise in either input order"
+        assert items[2].change.from_record_id == 1
+        assert items[1].change is None
+
+
+def test_ordering_falls_back_to_record_id_within_one_timestamp():
+    """The seed writes whole charts inside a single now(), so ties are the
+    normal case here — the order still has to be stable and reproducible."""
+    rows = [_Row(3, "A1c", "6.2%.", day=1), _Row(1, "A1c", "5.8%.", day=1)]
+    assert [i.record_id for i in ps.render_items(rows)] == [3, 1]
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("LDL-C 102 mg/dL.", SINGLE),            # hyphenated analyte
+        ("25-OH Vitamin D 32 ng/mL.", SINGLE),   # leading digits, three tokens
+        ("BP 120/80 mmHg.", SINGLE),             # paired vitals reading
+        ("Total chol 188, LDL 102, HDL 55.", PANEL),
+    ],
+)
+def test_punctuated_analyte_names_are_not_over_refused(body, expected):
+    """Adversarial review, PS-PARSE-002 — the same over-refusal class the seed
+    corpus caught for lipid panels, reached through punctuation instead of
+    token count. Hyphens and slashes were doing what the old six-character cap
+    used to do, and patients lost quotes the report plainly made."""
+    assert ps.classify(body, kind="lab_result") is expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Follow-up in 3 months.",   # hyphenated prose must not slip the word check
+        "See patient in 2 weeks.",
+        "Seen by Dr 5 times.",
+    ],
+)
+def test_widening_the_label_rule_did_not_let_prose_through(body):
+    """The risk in accepting punctuation: "Follow-up" could have hyphenated
+    its way out of the prose-word list. Punctuation is stripped before that
+    check precisely so it cannot."""
+    assert ps.classify(body, kind="lab_result") is UNQUOTABLE
+
+
+def test_a_paired_reading_quotes_but_never_computes_a_change():
+    """Blood pressure is one result carrying two numbers. Subtracting them, or
+    subtracting one pair from another, would state something no report made —
+    and no special case is needed to prevent it, because a paired value simply
+    is not a number."""
+    current = ps.parse_measurements("BP 120/80 mmHg.")[0]
+    prior = ps.parse_measurements("BP 118/76 mmHg.")[0]
+
+    assert current.value == "120/80"
+    assert current.as_float() is None
+    assert ps.compute_change(current, prior, prior_record_id=1) is None
+    assert ps.quote_of("BP 120/80 mmHg.") == "BP 120/80 mmHg."
+
+
+def test_a_hyphenated_analyte_still_computes_a_real_trend():
+    current = ps.parse_measurements("LDL-C 102 mg/dL.")[0]
+    prior = ps.parse_measurements("LDL-C 118 mg/dL.")[0]
+
+    change = ps.compute_change(current, prior, prior_record_id=4)
+    assert change is not None
+    assert (change.direction, change.delta, change.unit) == ("down", "16", "mg/dL")
+
+
+@pytest.mark.parametrize(
+    "body,expected_value,expected_unit",
+    [
+        ("6.2%.", "6.2", "%"),
+        ("5.8%.", "5.8", "%"),
+        ("2.3 mIU/L.", "2.3", "mIU/L"),
+        ("102 mg/dL.", "102", "mg/dL"),
+        ("LDL-C 102 mg/dL.", "102", "mg/dL"),
+        ("25-OH Vitamin D 32 ng/mL.", "32", "ng/mL"),
+        ("BP 120/80 mmHg.", "120/80", "mmHg"),
+    ],
+)
+def test_the_parsed_number_is_the_whole_number(body, expected_value, expected_unit):
+    """Pins the figure arithmetic actually runs on, not just the shape.
+
+    Widening the label rule to accept digits and punctuation briefly let the
+    label eat the start of the value: "6.2%" parsed as label "6." with value
+    "2". Every shape assertion still passed and the quote stayed verbatim,
+    because the quote is copied from the body — so nothing failed while a
+    computed change would have used 2 instead of 6.2. Classification tests
+    cannot catch that; only asserting the parsed value can.
+    """
+    measurements = ps.parse_measurements(body)
+    assert measurements is not None, f"{body!r} should parse"
+    assert len(measurements) == 1
+    assert measurements[0].value == expected_value
+    assert measurements[0].unit == expected_unit

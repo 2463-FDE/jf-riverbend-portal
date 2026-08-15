@@ -75,9 +75,16 @@ class ResultShape(str, Enum):
 _MEASUREMENT = re.compile(
     r"""
     ^\s*
-    (?P<label>[A-Za-z][A-Za-z0-9 ]*?)?
-    \s*
-    (?P<value>-?\d+(?:\.\d+)?)
+    # The label, when present, MUST be followed by whitespace. Without that
+    # requirement a label containing digits and periods happily eats the
+    # start of the number: "6.2%" parsed as label "6." with value "2", so the
+    # quote stayed right while any computed change used the wrong figure.
+    (?:(?P<label>[A-Za-z0-9][A-Za-z0-9 ()./-]*?)\s+)?
+    # A value is one number, or two joined by a slash for the paired readings
+    # vitals record that way (blood pressure). A paired value is quotable but
+    # never arithmetic: as_float() cannot parse it, so compute_change refuses
+    # without needing a special case.
+    (?P<value>-?\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?)
     \s*
     (?P<unit>%|[A-Za-z][A-Za-z0-9]*(?:/[A-Za-z][A-Za-z0-9]*)?)?
     \s*$
@@ -96,9 +103,11 @@ _PROSE_WORDS = frozenset(
     }
 )
 
-# Real analyte labels are one or two words ("Hgb", "Total chol", "Vitamin D").
-# Three or more is a sentence.
-_MAX_LABEL_TOKENS = 2
+# Real analyte labels run to about three words ("Hgb", "Total chol",
+# "25-OH Vitamin D"). Beyond that it is a sentence. The length cap does most
+# of the work — prose reaches sixteen characters much sooner than an analyte
+# name does — and the prose-word check catches the rest.
+_MAX_LABEL_TOKENS = 3
 _MAX_LABEL_LENGTH = 16
 
 
@@ -118,7 +127,11 @@ def _label_is_analyte_like(label: Optional[str]) -> bool:
     tokens = text.split()
     if not tokens or len(tokens) > _MAX_LABEL_TOKENS:
         return False
-    return not any(token.lower() in _PROSE_WORDS for token in tokens)
+    # Punctuation is stripped before the vocabulary check so "Follow-up in"
+    # cannot slip past by hyphenating its way out of the prose-word list.
+    return not any(
+        token.strip("-./()").lower() in _PROSE_WORDS for token in tokens
+    )
 
 # Units a change may be computed across. An allowlist rather than "any unit"
 # because the failure it prevents is specific: "3 months" parses as a perfectly
@@ -366,7 +379,7 @@ def render_items(rows) -> list[SummaryItem]:
     previous_by_title: dict[str, tuple] = {}
     items: list[SummaryItem] = []
 
-    for row in rows:
+    for row in _chronological(rows):
         shape = classify(row.body, kind=row.kind)
         date = row.created_at.date().isoformat() if row.created_at else None
 
@@ -426,9 +439,31 @@ def render_items(rows) -> list[SummaryItem]:
 
     # Newest first: the patient opens this to see the latest result, not the
     # oldest. Reversed AFTER the changes are computed, so the pairing above
-    # still walks oldest -> newest. Callers must pass rows in chronological
-    # order (see this module's note on ordering in get_patient_summary): a
-    # change is "against the previous result", and that is only true if the
-    # rows arrive in the order the results happened.
+    # still walks oldest -> newest.
     items.reverse()
     return items
+
+
+def _chronological(rows):
+    """Rows oldest-first, whatever order the caller passed them in.
+
+    This used to be a documented precondition rather than an enforced one,
+    and a documented precondition is one nobody checks. Handed newest-first
+    rows, the pairing above measured each result against the one that came
+    AFTER it and reported the direction backwards — a patient reading "down"
+    on a value that rose. The caller in records-service already orders by
+    created_at, but "the query happens to be right" is not a property this
+    module should depend on for a patient-visible clinical claim.
+
+    Ties break on id so repeated results inside one timestamp keep a stable,
+    reproducible order — the seed writes whole charts within a single
+    now(), so ties are the normal case here rather than an edge one.
+    """
+    def key(row):
+        created = getattr(row, "created_at", None)
+        # Rows without a timestamp sort first and keep their relative order;
+        # the column is NOT NULL in the real schema, so this only covers
+        # fixtures.
+        return (created is not None, created, getattr(row, "id", 0))
+
+    return sorted(rows, key=key)
