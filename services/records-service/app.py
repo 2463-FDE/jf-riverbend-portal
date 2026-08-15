@@ -1090,24 +1090,35 @@ def _to_summary_item_out(item) -> SummaryItemOut:
 # --------------------------------------------------------------------------- #
 # clinician review queue (S3)
 #
-# Gated on records.read AND records.write together. Both are needed, and the
-# reason is a client decision rather than defensive coding: `lab` holds
-# records.write WITHOUT records.read, deliberately — config/roles.yaml records
-# the client revising their own earlier answer, because with no separate
-# results category in the schema, letting lab "read prior results" would mean
-# granting them the whole chart.
+# Gated on summary_review.decide AND records.read.
 #
-# This queue hands a reviewer the full text of withheld clinical notes and the
-# power to release them to a patient. Gating it on records.write alone would
-# therefore have given `lab` exactly the chart access the client refused to
-# grant, by a side door. Requiring the pair keeps the decision with clinician
-# and nursing_ma, who hold both, and uses the signed grid as it stands rather
-# than inventing a permission nobody has until it is re-signed.
+# The release action gets its OWN permission rather than reusing records.write,
+# and the reason is worth stating because the first version of this gate got it
+# wrong twice. records.write does not imply clinical read authority: `lab`
+# holds write WITHOUT read by an explicit client decision (config/roles.yaml),
+# so gating on write alone handed a lab tech the full text of withheld clinical
+# notes plus the power to release it. Requiring read as well fixed that — but
+# the deprecated `staff` role holds BOTH, and every seeded account is still on
+# it, so billing, ROI clerks and IT admin could all still release withheld
+# clinical content to a patient.
+#
+# "The grid is right, the account migration is outstanding" is a fair
+# description of RBAC in general, and the wrong call here specifically: this
+# feature INTRODUCES the disclosure capability, so shipping it reachable by
+# twelve non-clinical accounts and deferring containment to a signature-gated
+# migration weeks away is not a trade worth making. summary_review.decide is
+# held only by clinician and nursing_ma, so the gate is closed for every
+# existing account until someone is deliberately given the role.
+#
+# records.read is required alongside it as defence in depth: a reviewer reads
+# chart text on this screen, so the permission for reading charts should be
+# present too, and it stays correct even if the new permission is granted
+# somewhere careless later.
 #
 # These routes are staff-facing. A patient holds only own_record.read and
 # therefore cannot reach either of them.
 # --------------------------------------------------------------------------- #
-_REVIEW_PERMISSIONS = ("records.read", "records.write")
+_REVIEW_PERMISSIONS = ("summary_review.decide", "records.read")
 
 
 def _authorize_reviewer(db, *, x_actor_id, x_actor_name, audit_action):

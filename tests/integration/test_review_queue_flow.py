@@ -31,13 +31,12 @@ DB_DSN = os.getenv(
 _PATIENT = 1737
 _PASSWORD = "portal-patient-passphrase"
 
-# drpatel is a seeded clinician. NOTE: every seeded account is still on the
-# deprecated `staff` role, which retains records.write — so this test proves
-# the route admits a clinician, NOT that it excludes other staff. The role
-# grid's exclusion is asserted separately and cheaply in
-# tests/test_review_queue_gate.py, because it cannot be demonstrated here until
-# the account migration runs.
-_CLINICIAN = "drpatel"
+# drkim is the seed's one account on the `clinician` role. The other twelve
+# are still on the deprecated `staff` role, which does NOT hold
+# summary_review.decide — so unlike an earlier version of this file, the
+# exclusion is now demonstrable here rather than only in the role grid:
+# see test_a_legacy_staff_account_cannot_reach_the_queue below.
+_CLINICIAN = "drkim"
 
 
 def _run(sql, params=()):
@@ -258,3 +257,26 @@ def test_a_patient_cannot_reach_the_review_queue(patient_token):
 
 def test_the_review_queue_refuses_an_unauthenticated_caller():
     assert httpx.get(f"{GATEWAY}/review-queue", timeout=10).status_code in (401, 403)
+
+
+def test_a_legacy_staff_account_cannot_reach_the_queue(patient_token):
+    """Every seeded account except drkim is on the deprecated `staff` role.
+
+    Adversarial review of #40 made the point that mattered: deciding is the
+    release action, so gating it on a permission legacy accounts hold would
+    have let front desk, billing, ROI and IT disclose withheld clinical notes
+    to a patient — today, not after the roster-gated migration. This asserts
+    the containment against real accounts rather than against the grid.
+    """
+    for username in ("frontdesk", "billing1", "roiclerk", "itadmin", "drpatel"):
+        staff = _token(username)
+        listing = httpx.get(f"{GATEWAY}/review-queue", headers=_auth(staff), timeout=10)
+        assert listing.status_code == 403, f"{username} must not list the queue"
+
+        decision = httpx.post(
+            f"{GATEWAY}/review-queue/1/decision",
+            headers=_auth(staff),
+            json={"decision": "approved"},
+            timeout=10,
+        )
+        assert decision.status_code == 403, f"{username} must not decide a case"

@@ -49,8 +49,21 @@ emit("-- 88231; and the PHI-laden audit_logs rows.")
 emit()
 
 # ---------------------------------------------------------------------------
-# users — everyone gets the single 'staff' role (role bloat / no least-privilege)
+# users — the seeded staff still carry the deprecated flat 'staff' role, which
+# is the point: migrating real accounts onto the nine-role grid is a separate,
+# roster-gated piece of work, and this seed is what "before the migration"
+# looks like.
+#
+# One exception, added deliberately: `drkim` carries role='clinician'. The S3
+# review queue is gated on summary_review.decide, which `staff` does NOT hold —
+# correctly, because deciding releases withheld clinical content to a patient
+# and no legacy account should be able to do that. Without a single genuinely
+# clinical account, the feature would be unreachable by anyone and therefore
+# undemonstrable. This is not the account migration; it is one demo account
+# with the role it would obviously be assigned.
 # ---------------------------------------------------------------------------
+_DEFAULT_ROLE = "staff"
+
 USERS = [
     ("mokonkwo",  "Maya Okonkwo (COO)"),
     ("frontdesk", "Front Desk (Riverbend Main)"),
@@ -64,13 +77,19 @@ USERS = [
     ("labtech",   "Lab Intake"),
     ("nurse_kc",  "Karen Cole, RN"),
     ("itadmin",   "Helix Support"),
+    # Reviewer for the S3 queue — see the note above on why this one is not 'staff'.
+    ("drkim",     "Dr. Grace Kim", "clinician"),
 ]
 emit("INSERT INTO users (id, username, password_hash, full_name, role, created_at) VALUES")
 rows = []
-for i, (uname, full) in enumerate(USERS, start=1):
+for i, entry in enumerate(USERS, start=1):
+    uname, full = entry[0], entry[1]
+    role = entry[2] if len(entry) > 2 else _DEFAULT_ROLE
     salt = f"riverbend{i:02d}saltval0"  # fixed -> deterministic output
     h = hash_password(DEMO_PASSWORD, salt)
-    rows.append(f" ({i}, {sql_str(uname)}, {sql_str(h)}, {sql_str(full)}, 'staff', now())")
+    rows.append(
+        f" ({i}, {sql_str(uname)}, {sql_str(h)}, {sql_str(full)}, {sql_str(role)}, now())"
+    )
 emit(",\n".join(rows) + ";")
 emit(f"SELECT setval('users_id_seq', {len(USERS)}, true);")
 emit()

@@ -58,7 +58,11 @@ def test_unknown_function_maps_to_no_role():
 def test_reads_the_roster_skipping_comment_lines():
     roster = dry_run.read_roster(ROSTER_CSV)
 
-    assert len(roster) == 17
+    # 18 since Grace Kim joined the synthetic roster alongside the `drkim`
+    # seed account — without a roster owner she would map to "disable", which
+    # is the correct behaviour for an unmapped account and the wrong outcome
+    # for the demo's only clinical reviewer.
+    assert len(roster) == 18
     assert all(r.name and r.function and r.status for r in roster)
     assert not any(r.name.startswith("#") for r in roster)
 
@@ -228,12 +232,23 @@ def test_reads_the_seeded_accounts_from_seed_sql():
     accounts = dry_run.read_accounts_from_seed(SEED_SQL)
 
     by_username = {a.username: a for a in accounts}
-    assert len(accounts) == 12
+    # 13 since the S3 review queue added `drkim` (role='clinician') to the
+    # seed — the queue is gated on a permission `staff` does not hold, so
+    # without one clinical account the feature is unreachable by anyone.
+    assert len(accounts) == 13
     assert by_username["drpatel"].full_name == "Dr. Anil Patel"
     assert by_username["itadmin"].full_name == "Helix Support"
     # Every seeded account is on the legacy role — the thing the migration exists
     # to change. If this ever fails, the seed moved ahead of the migration.
-    assert {a.role for a in accounts} == {"staff"}
+    # Was {"staff"} alone, and that was the point: it pinned the pre-migration
+    # reality where every account carries the deprecated flat role. That is
+    # still true of the twelve original accounts, and the assertion keeps
+    # saying so — but `drkim` is deliberately `clinician`, because the S3
+    # review queue is gated on a permission `staff` does not hold and the
+    # feature would otherwise be unreachable by anyone. This is one demo
+    # account with an obvious role, not the roster-gated account migration.
+    assert {a.role for a in accounts} == {"staff", "clinician"}
+    assert sum(1 for a in accounts if a.role == "clinician") == 1
     assert all(a.is_active for a in accounts)
 
 
@@ -243,7 +258,7 @@ def test_the_seeded_accounts_produce_the_documented_split():
         dry_run.read_roster(ROSTER_CSV), dry_run.read_accounts_from_seed(SEED_SQL)
     )
 
-    assert len(_outcomes(findings, dry_run.MIGRATE)) == 8
+    assert len(_outcomes(findings, dry_run.MIGRATE)) == 9   # + drkim (Grace Kim)
     assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 3   # frontdesk, labtech, itadmin
     assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 1  # drlee
 

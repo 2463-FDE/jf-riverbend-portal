@@ -156,14 +156,36 @@ def test_only_approve_or_reject_are_decisions(bad):
 
 rc = load_module("services/gateway/roles_config.py", "roles_review_gate")
 
-# Both are required. See the route comment in records-service: `lab` holds
-# records.write WITHOUT records.read, so either one alone is not a gate.
-_REVIEW_PERMISSIONS = ("records.read", "records.write")
+# The release action has its own permission. See the route comment in
+# records-service for why neither records.write nor read+write was a gate:
+# `lab` holds write without read, and the deprecated `staff` role holds both.
+_REVIEW_PERMISSIONS = ("summary_review.decide", "records.read")
 
 
 @pytest.mark.parametrize("role", ["clinician", "nursing_ma"])
 def test_clinical_roles_may_decide_a_review(role):
     assert all(p in rc.permissions_for(role) for p in _REVIEW_PERMISSIONS)
+
+
+def test_the_deprecated_staff_role_cannot_decide_a_review():
+    """Adversarial review of #40 — the finding my first fix did not cover.
+
+    Requiring records.read + records.write kept `lab` out but not `staff`,
+    which holds both — and every seeded account is still on `staff`. So
+    billing, ROI clerks, the IT admin and the front desk could all have
+    released withheld clinical notes to a patient.
+
+    "The grid is right, the migration is outstanding" is a fair description of
+    RBAC in general and the wrong call here: this feature introduces the
+    disclosure capability, so it must not ship reachable by twelve
+    non-clinical accounts while containment waits on a roster signature weeks
+    away. summary_review.decide is held only by clinical roles, so the gate is
+    closed for every existing account.
+    """
+    staff = rc.permissions_for("staff")
+    assert "records.read" in staff and "records.write" in staff, "premise: staff holds both"
+    assert "summary_review.decide" not in staff
+    assert not all(p in staff for p in _REVIEW_PERMISSIONS)
 
 
 def test_the_lab_role_cannot_reach_the_review_queue():
@@ -190,7 +212,9 @@ def test_the_lab_role_cannot_reach_the_review_queue():
 
 
 @pytest.mark.parametrize(
-    "role", ["front_desk", "billing", "roi_clerk", "scheduler", "it_admin", "patient", "lab"]
+    "role",
+    ["front_desk", "billing", "roi_clerk", "scheduler", "it_admin", "patient", "lab", "staff",
+     "management"],
 )
 def test_non_clinical_roles_may_not_decide_a_review(role):
     """Releasing withheld chart content to a patient is a clinical decision.
@@ -206,8 +230,12 @@ def test_non_clinical_roles_may_not_decide_a_review(role):
     assert not all(p in rc.permissions_for(role) for p in _REVIEW_PERMISSIONS)
 
 
-def test_the_deprecated_staff_role_still_carries_it():
-    """Recorded, not endorsed. `staff` keeps its original full permissions, so
-    every existing account can decide a review today. Pinning it here means the
-    day someone narrows `staff`, this test tells them what else changes."""
-    assert all(p in rc.permissions_for("staff") for p in _REVIEW_PERMISSIONS)
+def test_only_clinical_roles_hold_the_release_permission():
+    """The whole grid, in one assertion, so a future grant is deliberate.
+
+    Adding summary_review.decide to any other role means someone chose to let
+    that role disclose withheld clinical content to patients. This test is what
+    makes that a decision rather than an accident.
+    """
+    holders = {r for r in rc.roles() if "summary_review.decide" in rc.permissions_for(r)}
+    assert holders == {"clinician", "nursing_ma"}
