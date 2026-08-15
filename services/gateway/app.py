@@ -975,3 +975,53 @@ def proxy_own_results_summary(
         headers=headers,
         forward_status=True,
     )
+
+
+# --------------------------------------------------------------------------- #
+# clinician review queue (S3)
+#
+# Gated on summary_review.decide AND records.read, mirroring records-service.
+# The release action has its own permission because neither records.write nor
+# the pair read+write excludes the right people: `lab` holds write without
+# read, and the deprecated `staff` role — which every seeded account still
+# uses — holds both. Only clinician and nursing_ma hold
+# summary_review.decide, so this is closed for every existing account rather
+# than waiting on the roster-gated migration. See records-service for the
+# full reasoning.
+# --------------------------------------------------------------------------- #
+@app.get("/review-queue")
+def proxy_review_queue(
+    limit: int = 50,
+    session: dict = Depends(require_permission("summary_review.decide")),
+    _read: dict = Depends(require_permission("records.read")),
+):
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _get(
+        "records", "/review-queue", params={"limit": limit}, headers=headers, forward_status=True
+    )
+
+
+@app.post("/review-queue/{review_id}/decision")
+def proxy_review_decision(
+    review_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("summary_review.decide")),
+    _read: dict = Depends(require_permission("records.read")),
+):
+    """Forward a clinician's approve/reject. The decision itself is recorded
+    downstream, against the actor this gateway identifies — never against an
+    actor the caller supplied."""
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return _post(
+        "records",
+        f"/review-queue/{review_id}/decision",
+        payload,
+        headers=headers,
+        forward_status=True,
+    )

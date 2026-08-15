@@ -174,6 +174,10 @@ class SummaryItemOut(BaseModel):
     reference_range: str | None = None   # verbatim, or absent — never synthesized
     change: SummaryChangeOut | None = None
     refusal_reason: str | None = None
+    # True when a clinician released this content. The patient is told, rather
+    # than shown clinician-released text that looks identical to text the
+    # system could quote on its own.
+    released_by_review: bool = False
     source_record_ids: list[int] = []
 
 
@@ -187,3 +191,42 @@ class OwnResultsSummary(BaseModel):
 
     patient_id: int
     items: list[SummaryItemOut]
+
+
+# --- clinician review queue (S3) -------------------------------------------
+
+
+class ReviewQueueItem(BaseModel):
+    """One case awaiting a clinician.
+
+    Carries the record's own text, so the decision is made against the source
+    rather than a summary of it — approving content you have not read is the
+    failure this screen prevents.
+    """
+
+    id: int
+    patient_id: int
+    record_id: int
+    state: str
+    reason: str | None = None
+    created_at: str | None = None
+    record_title: str | None = None
+    record_kind: str | None = None
+    record_body: str | None = None
+    record_date: str | None = None
+
+
+class ReviewQueuePage(BaseModel):
+    items: list[ReviewQueueItem]
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: str          # "approved" | "rejected"
+    note: str | None = None
+
+
+class ReviewDecisionOut(BaseModel):
+    id: int
+    record_id: int
+    state: str
+    patient_visible: bool  # stated outright so the consequence is never implicit

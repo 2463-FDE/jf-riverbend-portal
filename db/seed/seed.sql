@@ -17,8 +17,9 @@ INSERT INTO users (id, username, password_hash, full_name, role, created_at) VAL
  (9, 'roiclerk', 'pbkdf2_sha256$260000$riverbend09saltval0$E2x4uRjbO3fGyhLOjdhH3x1SKrZ8RPdCbK+IM0ZpN1g=', 'Dana White (ROI Clerk)', 'staff', now()),
  (10, 'labtech', 'pbkdf2_sha256$260000$riverbend10saltval0$foQLZvzL5VE1DicUMngxFRVEoHee5XZqfO2Vkg0Ltkk=', 'Lab Intake', 'staff', now()),
  (11, 'nurse_kc', 'pbkdf2_sha256$260000$riverbend11saltval0$mccK64T/hIlQYtgWgTK7i+DGLH/sftxHqECHgtsexC0=', 'Karen Cole, RN', 'staff', now()),
- (12, 'itadmin', 'pbkdf2_sha256$260000$riverbend12saltval0$IUYsIcUdl0ludp6kkVgRboYSPtmaEoTRZKKT22MqkhI=', 'Helix Support', 'staff', now());
-SELECT setval('users_id_seq', 12, true);
+ (12, 'itadmin', 'pbkdf2_sha256$260000$riverbend12saltval0$IUYsIcUdl0ludp6kkVgRboYSPtmaEoTRZKKT22MqkhI=', 'Helix Support', 'staff', now()),
+ (13, 'drkim', 'pbkdf2_sha256$260000$riverbend13saltval0$mIOQEPIzb5EVs9o6nIa7TWzF2dwPOdNjR+XisQSmyRg=', 'Dr. Grace Kim', 'clinician', now());
+SELECT setval('users_id_seq', 13, true);
 
 INSERT INTO patients (id, mrn, name, dob, ssn, gender, address, phone, email, notes, created_via, created_at) VALUES
  (1042, 'M4471', 'Maria Gonzalez', '1971-03-02', '412-55-9981', 'F', '118 Maple Ave, Beverly Hills, CA 90210', '310-555-0147', 'maria.g@example.com', 'Prefers morning appts.', 'self_service', '2026-06-22 09:14:06'),
@@ -2465,7 +2466,8 @@ INSERT INTO patient_access_grants (user_id, patient_id) VALUES
  (3, 1588),
  (5, 1043),
  (6, 1330),
- (6, 1601);
+ (6, 1601),
+ (13, 1737);
 
 INSERT INTO roi_requests (patient_id, requested_by, recipient, recipient_type, purpose, date_range_start, date_range_end, status, created_at) VALUES
  (1766, 'billing1', 'County Health', 'provider', 'Insurance claim', '2024-01-01', '2026-06-01', 'pending', '2026-05-24 00:00:00'),

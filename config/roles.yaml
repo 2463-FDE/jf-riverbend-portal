@@ -83,6 +83,15 @@ roles:
       - records.write
       - appointments.read
       - consents.read
+      # Releasing content the portal withheld from a patient (S3 review queue).
+      # Its own permission rather than a reuse of records.write, because
+      # records.write does NOT imply clinical read authority here — `lab` holds
+      # write without read by an explicit client decision, and the deprecated
+      # `staff` role holds both. Gating the release action on either of those
+      # would let a lab tech or any legacy account disclose withheld clinical
+      # notes to a patient. Deciding is a clinical judgment, so it gets a
+      # permission only clinical roles hold.
+      - summary_review.decide
 
   nursing_ma:
     description: Nursing and medical-assistant documentation (vitals, intake).
@@ -98,6 +107,7 @@ roles:
       - records.write
       - appointments.read
       - consents.read
+      - summary_review.decide
 
   lab:
     description: Specimen intake and posting results.

@@ -70,11 +70,25 @@ def test_front_desk_permissions_match_the_signed_matrix():
 
 
 def test_clinician_permissions_match_the_signed_matrix():
+    """Pinned to the signed matrix, plus one amendment that needs countersigning.
+
+    `summary_review.decide` was added to clinician (and nursing_ma) for the S3
+    review queue. It is an ADDITION to a grid the client has already signed, so
+    it is called out here rather than folded in quietly: the signed artifact
+    needs re-issuing to show it.
+
+    It is not a widening of chart access — the client already decided that
+    clinicians decide review cases; this is the permission that decision
+    implies. It exists as its own permission because the alternatives were
+    worse: records.write alone let `lab` release withheld notes, and
+    read+write let every legacy `staff` account do the same.
+    """
     from roles_config import permissions_for
 
     assert permissions_for("clinician") == {
         "patients.read", "records.read", "records.write",
         "appointments.read", "consents.read",
+        "summary_review.decide",          # amendment — see docstring
     }
 
 

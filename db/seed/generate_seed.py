@@ -49,8 +49,21 @@ emit("-- 88231; and the PHI-laden audit_logs rows.")
 emit()
 
 # ---------------------------------------------------------------------------
-# users — everyone gets the single 'staff' role (role bloat / no least-privilege)
+# users — the seeded staff still carry the deprecated flat 'staff' role, which
+# is the point: migrating real accounts onto the nine-role grid is a separate,
+# roster-gated piece of work, and this seed is what "before the migration"
+# looks like.
+#
+# One exception, added deliberately: `drkim` carries role='clinician'. The S3
+# review queue is gated on summary_review.decide, which `staff` does NOT hold —
+# correctly, because deciding releases withheld clinical content to a patient
+# and no legacy account should be able to do that. Without a single genuinely
+# clinical account, the feature would be unreachable by anyone and therefore
+# undemonstrable. This is not the account migration; it is one demo account
+# with the role it would obviously be assigned.
 # ---------------------------------------------------------------------------
+_DEFAULT_ROLE = "staff"
+
 USERS = [
     ("mokonkwo",  "Maya Okonkwo (COO)"),
     ("frontdesk", "Front Desk (Riverbend Main)"),
@@ -64,13 +77,19 @@ USERS = [
     ("labtech",   "Lab Intake"),
     ("nurse_kc",  "Karen Cole, RN"),
     ("itadmin",   "Helix Support"),
+    # Reviewer for the S3 queue — see the note above on why this one is not 'staff'.
+    ("drkim",     "Dr. Grace Kim", "clinician"),
 ]
 emit("INSERT INTO users (id, username, password_hash, full_name, role, created_at) VALUES")
 rows = []
-for i, (uname, full) in enumerate(USERS, start=1):
+for i, entry in enumerate(USERS, start=1):
+    uname, full = entry[0], entry[1]
+    role = entry[2] if len(entry) > 2 else _DEFAULT_ROLE
     salt = f"riverbend{i:02d}saltval0"  # fixed -> deterministic output
     h = hash_password(DEMO_PASSWORD, salt)
-    rows.append(f" ({i}, {sql_str(uname)}, {sql_str(h)}, {sql_str(full)}, 'staff', now())")
+    rows.append(
+        f" ({i}, {sql_str(uname)}, {sql_str(h)}, {sql_str(full)}, {sql_str(role)}, now())"
+    )
 emit(",\n".join(rows) + ";")
 emit(f"SELECT setval('users_id_seq', {len(USERS)}, true);")
 emit()
@@ -364,6 +383,12 @@ emit()
 #   drnguyen also treats Maria Gonzalez's 1330 chart and Aisha Khan (1601)
 #     — encounters 2 and 5's provider — overlapping with frontdesk's grants
 #     on purpose (multiple staff legitimately need the same chart).
+#   drkim is the S3 review-queue clinician. Granted 1737 ONLY, deliberately:
+#     the queue is grant-scoped like every other chart read, so a blanket
+#     grant would hide exactly the bug the scoping exists to prevent — a
+#     reviewer seeing withheld notes for patients they never treated. 1629
+#     is left ungranted so the "an ungranted clinician sees nothing" test has
+#     a real account to prove it with.
 # frontdesk is deliberately NOT granted 1043 — tests/integration/
 # test_records_flow.py::test_user_cannot_read_other_patients_chart and
 # test_patient_view_flow.py rely on exactly this to prove cross-patient
@@ -371,13 +396,14 @@ emit()
 # ---------------------------------------------------------------------------
 # PR #23 review round 2 (2026-08-07): grants are keyed on users.id (the stable
 # principal the gateway forwards as X-Actor-Id), never username. Ids from the
-# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6.
+# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6, drkim=13.
 emit("INSERT INTO patient_access_grants (user_id, patient_id) VALUES")
 gwrows = [
     " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
     " (3, 1042)", " (3, 1330)", " (3, 1588)",                  # rdelgado
     " (5, 1043)",                                             # drpatel
     " (6, 1330)", " (6, 1601)",                               # drnguyen
+    " (13, 1737)",                                            # drkim (review queue)
 ]
 emit(",\n".join(gwrows) + ";")
 emit()
