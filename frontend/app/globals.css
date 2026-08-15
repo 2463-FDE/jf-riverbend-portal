@@ -1160,3 +1160,5 @@ textarea:focus-visible,
 .rb-invite__actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .rb-invite__expiry { font-size: 0.82rem; color: var(--rb-muted); }
 .rb-invite__error { margin: 0; font-size: 0.85rem; color: #b3261e; line-height: 1.45; }
+
+.rb-invite__revoked { color: #2a6a3a; font-size: 0.9rem; margin: 0.4rem 0; }

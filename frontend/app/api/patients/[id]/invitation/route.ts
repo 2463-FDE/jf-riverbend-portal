@@ -11,3 +11,17 @@ export async function POST(
   const { id } = await params;
   return proxy(req, `/patients/${id}/invitation`, { method: "POST", body: {} });
 }
+
+// Revoke an outstanding invitation before anyone redeems it.
+//
+// Needed for the case the issue route's 409 points at, and for the ordinary
+// desk mistake: a code read aloud to the wrong person, or issued against the
+// wrong patient. Only unredeemed invitations are affected upstream — revoking
+// an invitation never disables an account a patient is already using.
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  return proxy(req, `/patients/${id}/invitation`, { method: "DELETE" });
+}

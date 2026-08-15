@@ -48,13 +48,18 @@ describe("issuing a patient portal invitation", () => {
 
   it("explains what to do when the patient already has a live invitation", async () => {
     // 409 is the common case at a busy desk. A status code helps nobody.
+    //
+    // The wording says "unexpired", not "active", and the distinction is the
+    // point: an expired invitation used to block reissue too, so "active" was
+    // describing something the system did not actually mean. Now only an
+    // unexpired code refuses, and the message says so.
     vi.mocked(apiFetch).mockResolvedValue(err(409));
 
     render(<PatientInvitation patientId="1042" />);
     fireEvent.click(screen.getByRole("button", { name: /issue invitation/i }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toMatch(/already has an active invitation/i);
+    expect(alert.textContent).toMatch(/already has an unexpired invitation/i);
     expect(alert.textContent).toMatch(/revoke/i);
   });
 
@@ -92,5 +97,58 @@ describe("issuing a patient portal invitation", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /issuing/i })).toBeDisabled());
     resolve(ok({ code: CODE }));
     await screen.findByText(CODE);
+  });
+});
+
+describe("clearing an invitation that is in the way", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("offers a revoke control only after a 409, and not before", async () => {
+    // Revoking is a corrective action. Offering it during ordinary
+    // registration invites someone to cancel a code a patient is holding.
+    vi.mocked(apiFetch).mockResolvedValue(ok({ code: CODE }));
+    render(<PatientInvitation patientId="1042" />);
+
+    expect(screen.queryByRole("button", { name: /revoke/i })).not.toBeInTheDocument();
+  });
+
+  it("offers revoke when the patient already has an unexpired invitation", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(err(409));
+    render(<PatientInvitation patientId="1042" />);
+    fireEvent.click(screen.getByRole("button", { name: /issue invitation/i }));
+
+    expect(await screen.findByRole("button", { name: /revoke existing invitation/i })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/unexpired invitation/i);
+  });
+
+  it("clears the block after revoking so a new code can be issued", async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(err(409));
+    render(<PatientInvitation patientId="1042" />);
+    fireEvent.click(screen.getByRole("button", { name: /issue invitation/i }));
+
+    const revokeButton = await screen.findByRole("button", { name: /revoke existing invitation/i });
+    vi.mocked(apiFetch).mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ revoked: 1 }) } as Response);
+    fireEvent.click(revokeButton);
+
+    await waitFor(() =>
+      expect(screen.getByText(/previous invitation was revoked/i)).toBeInTheDocument()
+    );
+    // The revoke control goes away once there is nothing to revoke.
+    expect(screen.queryByRole("button", { name: /revoke existing/i })).not.toBeInTheDocument();
+  });
+
+  it("does not claim success when revoking fails", async () => {
+    // A desk that believes it cleared the invitation will keep retrying an
+    // issue that cannot succeed.
+    vi.mocked(apiFetch).mockResolvedValueOnce(err(409));
+    render(<PatientInvitation patientId="1042" />);
+    fireEvent.click(screen.getByRole("button", { name: /issue invitation/i }));
+
+    const revokeButton = await screen.findByRole("button", { name: /revoke existing invitation/i });
+    vi.mocked(apiFetch).mockResolvedValueOnce(err(503));
+    fireEvent.click(revokeButton);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/could not revoke/i));
+    expect(screen.queryByText(/previous invitation was revoked/i)).not.toBeInTheDocument();
   });
 });
