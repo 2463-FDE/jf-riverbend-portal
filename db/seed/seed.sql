@@ -1835,8 +1835,10 @@ INSERT INTO records (id, encounter_id, patient_id, kind, title, body, status, re
  (684, 472, 1849, 'note', 'Visit note', 'RTC in 6 months.', 'final', NULL, now()),
  (685, 473, 1850, 'note', 'Visit note', 'Counseled on diet/exercise.', 'final', NULL, now()),
  (686, 474, 1851, 'note', 'Visit note', 'RTC in 6 months.', 'final', NULL, now()),
- (687, 475, 1851, 'lab_result', 'Lipid panel', 'Total chol 188, LDL 102, HDL 55.', 'preliminary', 'LDL <130; HDL >40', now());
-SELECT setval('records_id_seq', 687, true);
+ (687, 475, 1851, 'lab_result', 'Lipid panel', 'Total chol 188, LDL 102, HDL 55.', 'preliminary', 'LDL <130; HDL >40', now()),
+ (688, 262, 1737, 'lab_result', 'A1c', '7.5%.', 'abnormal', '<5.7% normal; 5.7-6.4% prediabetes', '2026-03-12 09:15:00'),
+ (689, 264, 1737, 'lab_result', 'A1c', '6.2%.', 'normal', '<5.7% normal; 5.7-6.4% prediabetes', '2026-08-11 10:05:00');
+SELECT setval('records_id_seq', 689, true);
 
 INSERT INTO appointments (patient_id, slot_id, provider, reason, location, scheduled_for, status, created_at, idempotency_key, reconciled_duplicate_of) VALUES
  (1042, 88231, 'Dr. Patel', 'Follow-up', 'Riverbend Main', '2026-06-26 08:00:00', 'confirmed', '2026-06-22 09:31:04.120', NULL, NULL),
