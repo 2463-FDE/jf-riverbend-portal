@@ -147,3 +147,38 @@ describe("RecordsPage — stale patient panel regression", () => {
     expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument();
   });
 });
+
+describe("portal access from the records screen", () => {
+  // This test exists because of a gap that ten passing component tests did
+  // not catch: PatientInvitation was fully built and covered, but never
+  // mounted in any page. It was unreachable in the running app while its own
+  // suite was green. Testing a component in isolation says nothing about
+  // whether a user can get to it — so this renders the PAGE and looks for it.
+  it("offers portal invitation for the patient currently loaded", () => {
+    render(<RecordsPage />);
+
+    expect(
+      screen.getByRole("button", { name: /issue invitation/i })
+    ).toBeInTheDocument();
+  });
+
+  it("issues against the patient id shown in the field, not a hardcoded one", async () => {
+    // The panel has to follow the patient being looked at. Issuing a chart
+    // credential against the wrong patient is the worst failure this screen
+    // could have.
+    vi.mocked(apiFetch).mockResolvedValue(
+      { ok: true, status: 201, json: async () => ({ code: "ABCD-EFGH-JKMN-PQRS" }) } as Response
+    );
+    render(<RecordsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /issue invitation/i }));
+
+    await waitFor(() =>
+      expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
+        "/api/patients/1737/invitation",
+        expect.objectContaining({ method: "POST" })
+      )
+    );
+  });
+});

@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import Card from "../components/Card";
+import PatientInvitation from "../components/PatientInvitation";
 import StatusBadge, { statusVariant } from "../components/StatusBadge";
 import { IconRecords, IconLab, IconSearch, IconStethoscope } from "../components/icons";
 import { apiFetch } from "../lib/session";
@@ -211,6 +212,15 @@ export default function RecordsPage() {
           {status}
         </div>
       )}
+
+      {/* Portal access for the patient currently loaded above. Placed on this
+          screen because issuing a code is something the desk does WHILE the
+          patient is in front of them and their chart is open — the identity
+          check that justifies handing over chart access is the same one
+          happening at registration. */}
+      <Card>
+        <PatientInvitation patientId={patientId} />
+      </Card>
 
       <Card title="AI-Assisted Chart View" icon={<IconStethoscope />}>
         <p className="rb-muted" style={{ marginTop: 0 }}>
