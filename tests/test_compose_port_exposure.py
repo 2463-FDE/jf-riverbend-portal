@@ -1,16 +1,19 @@
-"""Services that verify no caller identity must not be reachable from the host.
+"""Domain services must not be reachable from the host.
 
-Four services — eligibility, scheduling, interop, roi — perform no
-`INTERNAL_SERVICE_TOKEN` check and no authorization of their own. While their
-ports were published, the gateway's RBAC was bypassable for all four: anything
-that could reach the host could call them directly and supply whatever
-`X-Actor-Id` it liked. `roi-service` is the sharpest case, because
-`/disclosures/{patient_id}` takes only a database session and releases records.
+Originally: four services — eligibility, scheduling, interop, roi — performed
+no `INTERNAL_SERVICE_TOKEN` check at all, so while their ports were published
+the gateway's RBAC was bypassable for every one of them.
 
-Unpublishing those ports is containment, not the fix. The permanent fix is
-token verification plus data-layer authorization in each service (the cycle's
-branch 7). This test exists so the containment cannot be quietly undone in the
-meantime — re-adding a `ports:` entry for any of these four fails here.
+Branch 7A closed that for **eligibility and scheduling**, which now verify the
+shared token. **interop and roi still do not** (7B), and `roi-service` remains
+the sharpest case: `/disclosures/{patient_id}` takes only a database session
+and releases records.
+
+Keeping all four unpublished regardless is deliberate, not leftover. Token
+verification proves a call came through the gateway; it is not per-resource
+authorization, and there is no reason for any domain service to be reachable
+from the host in the first place. Defence in depth costs nothing here, and the
+day a guard regresses this is what stops the port being open as well.
 
 The services keep talking to each other unchanged: compose networking resolves
 `http://roi-service:8076` by service name, which never depended on host
