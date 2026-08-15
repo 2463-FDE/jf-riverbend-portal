@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS users (
     -- INSERT that omitted `role` used to create a full-access account
     -- silently. It must now be set explicitly, or the insert fails.
     role          TEXT NOT NULL,
+    -- NULL for staff accounts; set for a patient's own account (017). A
+    -- patient is authorized by the SAME grant mechanism as staff — one
+    -- patient_access_grants row for their own chart — not a second path.
+    -- The foreign key is attached below, after `patients` is created.
+    patient_id    INTEGER,
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     last_login_at TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -96,6 +101,39 @@ CREATE TABLE IF NOT EXISTS patient_access_grants (
 );
 CREATE INDEX IF NOT EXISTS patient_access_grants_user_id_idx ON patient_access_grants (user_id);
 CREATE INDEX IF NOT EXISTS patient_access_grants_patient_id_idx ON patient_access_grants (patient_id);
+
+-- users.patient_id's foreign key, attached here because `patients` does not
+-- exist yet where the column is declared above.
+ALTER TABLE users ADD CONSTRAINT users_patient_id_fkey
+    FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_patient_id_unique
+    ON users (patient_id) WHERE patient_id IS NOT NULL;
+
+-- Clinic-issued patient portal invitations (017). The code itself is never
+-- stored — only its hash, as with passwords: an invitation code is a
+-- credential for a chart. At most one live invitation per patient, so a second
+-- code cannot quietly become a second way in.
+CREATE TABLE IF NOT EXISTS patient_invitations (
+    id                SERIAL PRIMARY KEY,
+    patient_id        INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    code_hash         TEXT NOT NULL,
+    issued_by         INTEGER NOT NULL REFERENCES users(id),
+    issued_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at        TIMESTAMPTZ NOT NULL,
+    activated_at      TIMESTAMPTZ,
+    revoked_at        TIMESTAMPTZ,
+    activated_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS patient_invitations_code_hash_idx
+    ON patient_invitations (code_hash);
+-- At most one LIVE invitation per patient: a second live code is a second way
+-- in, and revoking one would not close the other.
+CREATE UNIQUE INDEX IF NOT EXISTS patient_invitations_one_live_per_patient
+    ON patient_invitations (patient_id)
+    WHERE activated_at IS NULL AND revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS patient_invitations_patient_id_idx
+    ON patient_invitations (patient_id);
+
 
 CREATE TABLE IF NOT EXISTS insurance_coverages (
     id            SERIAL PRIMARY KEY,

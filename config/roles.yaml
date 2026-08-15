@@ -164,6 +164,22 @@ roles:
 # Every existing and seeded account is still on `staff`. Migrating real
 # accounts onto the roles above runs off the client's staff roster, behind an
 # account-by-account dry run they approve first — see the current cycle's plan.
+  patient:
+    description: >-
+      A patient reading their own record. Not a staff role — it holds NO staff
+      permission, so a patient account cannot reach any staff route even though
+      it authenticates through the same login.
+    # Scoping to their own chart is NOT done here. An activated patient account
+    # holds exactly one patient_access_grants row (for themselves), so the same
+    # gate that scopes staff to their granted patients scopes a patient to
+    # theirs — the client's point that this is one mechanism, not two.
+    #
+    # `own_record.read` is deliberately its own permission rather than reusing
+    # records.read: the patient surface is the summary view with its refusal
+    # path and clinician review, never the raw chart route a clinician uses.
+    permissions:
+      - own_record.read
+
 default_role: staff
 
 # MFA is deliberately absent from this file.
