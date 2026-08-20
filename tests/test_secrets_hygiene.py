@@ -102,3 +102,26 @@ def test_compose_has_no_guessable_password_default():
         "a guessable default password is worse than a failed start — use the "
         "${VAR:?message} form so a missing value stops compose"
     )
+
+
+def test_ci_supplies_every_variable_compose_requires():
+    """A `${VAR:?}` in compose is a build-time dependency, and CI must satisfy it.
+
+    This is the test that would have caught the C2 regression. `.env` was
+    committed, so compose interpolation quietly resolved DB_PASSWORD from the
+    tracked file and CI never had to supply it. Untracking `.env` broke
+    docker-build immediately — correct behaviour, discovered late. Any future
+    `${VAR:?}` added to compose now has to be wired into CI in the same change.
+    """
+    compose = (REPO / "docker-compose.yml").read_text()
+    required = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*):\?", compose))
+    required.discard("VAR")  # the placeholder used in explanatory comments
+
+    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    missing = sorted(v for v in required if v not in workflow)
+
+    assert not missing, (
+        f"docker-compose.yml requires {missing} but .github/workflows/ci.yml never "
+        f"mentions them, so docker-build will fail on interpolation. Add each to the "
+        f"build step's env and its throwaway-value fallback."
+    )
