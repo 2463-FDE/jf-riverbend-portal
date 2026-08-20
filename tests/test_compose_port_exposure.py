@@ -35,12 +35,28 @@ _COMPOSE = pathlib.Path(__file__).resolve().parents[1] / "docker-compose.yml"
 # four verify the internal token, so this list is no longer "the unverified
 # ones" — it is defence in depth. Moving one to _MAY_PUBLISH would need a
 # positive reason to expose it, recorded here.
-_MUST_NOT_PUBLISH = ("eligibility-service", "scheduling-service", "interop-service", "roi-service")
+_MUST_NOT_PUBLISH = (
+    "eligibility-service", "scheduling-service", "interop-service", "roi-service",
+    # 2026-08-20: the client asked for datastore ports unpublished. Redis moved
+    # here because nothing depended on the host port at all — every consumer
+    # resolves redis://redis:6379 by service name.
+    "redis",
+)
 
 # Deliberately reachable: the gateway is the entry point, the frontend is the
 # UI, and intake/records verify the internal token before honouring a forwarded
-# actor. Postgres and Redis are published for local tooling and tests.
-_MAY_PUBLISH = ("gateway", "frontend", "intake-service", "records-service", "postgres", "redis")
+# actor.
+#
+# Postgres is the one remaining exception and it is a KNOWN OPEN ITEM, not a
+# decision. The client asked for datastore ports unpublished; redis moved, and
+# postgres could not in this change because five integration suites connect to
+# `localhost:5432` directly via psycopg2 (test_demo_reset,
+# test_review_queue_flow, test_patient_summary_flow, test_patient_acceptance_e2e,
+# test_patient_invitation_lifecycle). Unpublishing without rerouting them makes
+# all five ERROR — loud rather than silent, but broken. Rerouting them through
+# `docker compose exec -T postgres` is real work and belongs in its own change,
+# so it is not smuggled in here.
+_MAY_PUBLISH = ("gateway", "frontend", "intake-service", "records-service", "postgres")
 
 
 def _services():

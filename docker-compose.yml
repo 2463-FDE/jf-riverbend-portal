@@ -7,7 +7,12 @@ services:
     environment:
       POSTGRES_DB: ${DB_NAME:-riverbend}
       POSTGRES_USER: ${DB_USER:-riverbend_app}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      # No `:-changeme` default. A guessable fallback for the database
+      # password is worse than a failed start: it boots a working stack that
+      # anyone can predict the credentials for, and nothing reports it. Same
+      # `${VAR:?}` shape as INTERNAL_SERVICE_TOKEN below — a missing value
+      # stops compose before any container starts.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — copy .env.example and set a real value; see docs/runbook.md}
     ports:
       - "5432:5432"
     volumes:
@@ -22,8 +27,11 @@ services:
 
   redis:
     image: redis:7
-    ports:
-      - "6379:6379"
+    # Host port unpublished (2026-08-20, client target "datastore ports
+    # unpublished"). Nothing needs it: every consumer resolves
+    # redis://redis:6379 by compose service name, and the healthcheck runs
+    # inside the container. Postgres is a separate case — see the
+    # port-exposure test for why it is still published.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

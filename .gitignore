@@ -9,3 +9,12 @@ dist/
 .venv/
 .cache/
 .codex_tmp/
+
+# Real environment files carry secrets and must never be committed. `.env` WAS
+# tracked until 2026-08-20 and its DB_PASSWORD, PAYER_API_KEY and
+# SESSION_SECRET are still recoverable from git history — history was
+# deliberately not rewritten, so ROTATION is the control here, not deletion.
+# See adr/0007. `.env.example` is the template and stays tracked.
+.env
+.env.*
+!.env.example
