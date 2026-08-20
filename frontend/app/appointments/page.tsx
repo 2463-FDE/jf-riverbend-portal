@@ -11,6 +11,7 @@ import {
   IconPlus,
 } from "../components/icons";
 import EligibilityChat from "../components/EligibilityChat";
+import PatientName from "../components/PatientName";
 import { apiFetch } from "../lib/session";
 import type { Appointment, Slot } from "../lib/types";
 import { fmtDateTime, fmtTimeRange, fmtDate } from "../lib/format";
@@ -19,6 +20,14 @@ const DEFAULT_PATIENT_ID = "1042";
 
 export default function AppointmentsPage() {
   const [patientId, setPatientId] = useState(DEFAULT_PATIENT_ID);
+  // The id whose name is shown beside the input. Deliberately NOT patientId:
+  // loadAppts is a useCallback keyed on patientId inside a useEffect, so the
+  // appointment list already refetches on every keystroke. A name driven the
+  // same way would write one audit row per character typed (records-service
+  // _write_audit runs on every successful get_patient). It starts at the
+  // default id — that matches the list, which does load on mount — and is
+  // updated only by the Load button.
+  const [loadedPatientId, setLoadedPatientId] = useState(DEFAULT_PATIENT_ID);
   const [appts, setAppts] = useState<Appointment[] | null>(null);
   const [slots, setSlots] = useState<Slot[] | null>(null);
   const [reason, setReason] = useState("");
@@ -124,20 +133,35 @@ export default function AppointmentsPage() {
       </div>
 
       <Card>
-        <div className="rb-field" style={{ maxWidth: 280, marginBottom: 0 }}>
+        <div className="rb-field" style={{ marginBottom: 0 }}>
           <label className="rb-field__label" htmlFor="appt-patient">
             Patient ID
           </label>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 560 }}>
             <input
               id="appt-patient"
               className="rb-input"
+              style={{ flex: "0 1 200px" }}
               value={patientId}
-              onChange={(e) => setPatientId(e.target.value)}
+              onChange={(e) => {
+                setPatientId(e.target.value);
+                // Drop the previous patient's name immediately. The list below
+                // is already reloading for the new id; a name left behind
+                // would sit above another patient's appointments.
+                setLoadedPatientId("");
+              }}
             />
-            <button className="rb-btn" onClick={loadAppts} type="button">
+            <button
+              className="rb-btn"
+              onClick={() => {
+                setLoadedPatientId(patientId);
+                loadAppts();
+              }}
+              type="button"
+            >
               Load
             </button>
+            <PatientName patientId={loadedPatientId} />
           </div>
           <span className="rb-field__hint">Demo patient ID defaults to 1042.</span>
         </div>

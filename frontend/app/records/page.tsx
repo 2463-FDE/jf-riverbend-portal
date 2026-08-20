@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import Card from "../components/Card";
 import PatientInvitation from "../components/PatientInvitation";
+import PatientName from "../components/PatientName";
 import StatusBadge, { statusVariant } from "../components/StatusBadge";
 import { IconRecords, IconLab, IconSearch, IconStethoscope } from "../components/icons";
 import { apiFetch } from "../lib/session";
@@ -45,6 +46,10 @@ export default function RecordsPage() {
   const patientIdRef = useRef(patientId);
   patientIdRef.current = patientId;
 
+  // The id whose name is displayed beside the input. Set only by Load, never
+  // by typing: each name lookup writes an audit row server-side.
+  const [loadedPatientId, setLoadedPatientId] = useState("");
+
   const [data, setData] = useState<EncounterBlock[] | null>(null);
   const [selected, setSelected] = useState<EncounterBlock | null>(null);
   const [status, setStatus] = useState("");
@@ -76,6 +81,7 @@ export default function RecordsPage() {
   // the id has already moved on (see patientIdRef checks below).
   function handlePatientIdChange(value: string) {
     setPatientId(value);
+    setLoadedPatientId("");
     setData(null);
     setSelected(null);
     setStatus("");
@@ -142,6 +148,7 @@ export default function RecordsPage() {
     setBusy(true);
     setStatus("");
     setSelected(null);
+    setLoadedPatientId(requestedId);
     try {
       const res = await apiFetch(`/api/records?patient_id=${encodeURIComponent(requestedId)}`);
       const json = await res.json().catch(() => ({}));
@@ -186,14 +193,15 @@ export default function RecordsPage() {
       </div>
 
       <Card>
-        <div className="rb-field" style={{ maxWidth: 360, marginBottom: 0 }}>
+        <div className="rb-field" style={{ marginBottom: 0 }}>
           <label className="rb-field__label" htmlFor="rec-patient">
             Patient ID
           </label>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 640 }}>
             <input
               id="rec-patient"
               className="rb-input"
+              style={{ flex: "0 1 240px" }}
               value={patientId}
               onChange={(e) => handlePatientIdChange(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && load()}
@@ -202,6 +210,7 @@ export default function RecordsPage() {
             <button className="rb-btn rb-btn--primary" onClick={load} disabled={busy} type="button">
               {busy ? "Loading…" : <><IconSearch width={16} height={16} /> Load</>}
             </button>
+            <PatientName patientId={loadedPatientId} />
           </div>
           <span className="rb-field__hint">Demo patient ID defaults to 1042.</span>
         </div>
