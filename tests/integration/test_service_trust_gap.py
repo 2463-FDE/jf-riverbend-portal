@@ -1,6 +1,7 @@
 """Integration tests — require the full stack up (`make up`) on localhost.
 
-Branch 7A: eligibility-service and scheduling-service verify their callers.
+Branches 7A and 7B: all four previously-unverified domain services —
+eligibility, scheduling, interop and roi — verify their callers.
 
 Unpublishing their host ports (#39) was containment — it stopped anything on
 the host reaching them, but anything already inside the compose network was
@@ -26,10 +27,18 @@ pytestmark = pytest.mark.integration
 
 GATEWAY = os.getenv("GATEWAY_URL", "http://localhost:8070")
 
-# Services under test in 7A. interop-service and roi-service are 7B.
+# Every domain service that verifies the shared token, with one guarded route
+# each. interop and roi were added in 7B.
+#
+# roi's entry is /disclosures/1042 deliberately: it releases a patient's records
+# and has no gateway route at all, so before 7B its only reachable caller was an
+# unauthenticated direct one. If any single route in this dict has to keep
+# working, it is that one.
 _GUARDED = {
     "eligibility-service": (8072, "/eligibility?insurance_id=1"),
     "scheduling-service": (8074, "/slots"),
+    "interop-service": (8075, "/hl7/sample"),
+    "roi-service": (8076, "/disclosures/1042"),
 }
 
 
@@ -105,6 +114,31 @@ def test_appointment_listing_still_works_through_the_gateway(staff_token):
 
 def test_eligibility_still_works_through_the_gateway(staff_token):
     r = httpx.get(f"{GATEWAY}/eligibility?insurance_id=1", headers=_auth(staff_token), timeout=25)
+    assert r.status_code == 200 and not _rejected(r), r.text
+
+
+def test_roi_listing_still_works_through_the_gateway(staff_token):
+    """7B. The gateway injects the token in _internal_headers for every
+    outbound call, so this needed no gateway change — which is exactly why it
+    has to be proven rather than assumed.
+
+    _rejected matters more here than status does: proxy_roi_list does not
+    forward the downstream status, so a 401 from roi-service would arrive as a
+    gateway 200 with the refusal in the body. A status-only assertion would
+    call that a pass.
+    """
+    r = httpx.get(f"{GATEWAY}/roi/requests?patient_id=1042", headers=_auth(staff_token), timeout=25)
+    assert r.status_code == 200 and not _rejected(r), r.text
+
+
+def test_hl7_ingest_still_works_through_the_gateway(staff_token):
+    """7B, and a write — the token has to be on the POST helper too."""
+    r = httpx.post(
+        f"{GATEWAY}/hl7/ingest",
+        headers=_auth(staff_token),
+        json={"message": "MSH|^~\\&|HOSP|RIVERBEND|||20260820||ADT^A01|1|P|2.3\rPID|||1042||Alvarez^Maria"},
+        timeout=25,
+    )
     assert r.status_code == 200 and not _rejected(r), r.text
 
 

@@ -4,10 +4,13 @@ Originally: four services — eligibility, scheduling, interop, roi — performe
 no `INTERNAL_SERVICE_TOKEN` check at all, so while their ports were published
 the gateway's RBAC was bypassable for every one of them.
 
-Branch 7A closed that for **eligibility and scheduling**, which now verify the
-shared token. **interop and roi still do not** (7B), and `roi-service` remains
-the sharpest case: `/disclosures/{patient_id}` takes only a database session
-and releases records.
+Branch 7A closed that for eligibility and scheduling; **7B closed it for
+interop and roi**, so all four now verify the shared token. `roi-service` was
+the sharpest case — `/disclosures/{patient_id}` releases records and has no
+gateway route at all, so its only reachable caller was a direct, unauthenticated
+one. It is now guarded like the rest. What remains open there is ROI
+authorization DEPTH (no signed-authorization check), which is deferred scope and
+a different concern from transport trust.
 
 Keeping all four unpublished regardless is deliberate, not leftover. Token
 verification proves a call came through the gateway; it is not per-resource
@@ -28,10 +31,10 @@ yaml = pytest.importorskip("yaml")
 
 _COMPOSE = pathlib.Path(__file__).resolve().parents[1] / "docker-compose.yml"
 
-# Services with no caller verification. Keep this list in step with reality: if
-# one of them gains a real token check and authorization, publishing its port
-# becomes a deliberate decision rather than an oversight, and it can move to
-# _MAY_PUBLISH with that reasoning recorded.
+# Domain services with no reason to be reachable from the host. As of 7B all
+# four verify the internal token, so this list is no longer "the unverified
+# ones" — it is defence in depth. Moving one to _MAY_PUBLISH would need a
+# positive reason to expose it, recorded here.
 _MUST_NOT_PUBLISH = ("eligibility-service", "scheduling-service", "interop-service", "roi-service")
 
 # Deliberately reachable: the gateway is the entry point, the frontend is the
@@ -45,13 +48,14 @@ def _services():
 
 
 @pytest.mark.parametrize("service", _MUST_NOT_PUBLISH)
-def test_a_service_that_verifies_nothing_is_not_published_to_the_host(service):
+def test_a_domain_service_is_not_published_to_the_host(service):
     published = _services()[service].get("ports")
     assert not published, (
-        f"{service} publishes {published} to the host. It performs no caller "
-        f"verification, so a published port makes the gateway's authorization "
-        f"bypassable for it. Remove the ports entry, or close the trust gap in "
-        f"that service first and update this test with the reasoning."
+        f"{service} publishes {published} to the host. Nothing outside the "
+        f"compose network needs to reach a domain service directly, and a "
+        f"published port means a regressed token guard is immediately "
+        f"exploitable from the host rather than contained. Remove the ports "
+        f"entry, or record a positive reason to expose it here."
     )
 
 
