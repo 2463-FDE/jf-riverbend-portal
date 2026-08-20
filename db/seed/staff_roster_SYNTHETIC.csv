@@ -1,33 +1,48 @@
 # TRAINING-SIMULATION STAFF ROSTER — the people are fictional by design.
 #
-# This IS the dataset the dry-run mapping and account-migration exercise runs
-# against: name, function, department, clinic, status. Riverbend is a training
-# simulation, so there is no other roster behind this one, and a report built
-# from it is the intended basis for review and sign-off.
+# PROVENANCE: this is the CLIENT'S roster, received 2026-08-19 and prepared by
+# them 13 Aug 2026 (Riverbend-Staff-Roster-TRAINING-SIMULATION.html), amended
+# 20 Aug 2026 to add Grace Kim. It REPLACES the roster we invented to shape the
+# exercise — that earlier cast (Marcus Bell, Yusuf Demir, Aisha Kone, Diego
+# Marquez, Nadia Osei, Owen Fitzgerald, Grace Liang) is gone. Do not plan
+# against it; see git history if a prior report needs explaining.
 #
-# Names that match seeded accounts in db/seed/seed.sql are reused from that
-# demo data so the mapping has something real to reconcile against.
+# Riverbend is a training simulation, so there is no other roster behind this
+# one, and a report built from it is the intended basis for review and sign-off.
 #
-# Deliberately shaped to exercise every case branches 8 and 9 must handle —
-# see db/seed/README-staff-roster.md for the case-by-case walkthrough.
+# Five columns as before, plus proposed_role: the role the CLIENT proposes for
+# each person. It is a CROSS-CHECK, never the answer — the mapping derives its
+# own proposal and the report flags any disagreement. That catches both a stale
+# FUNCTION_TO_ROLE table and a typo on the client's side.
+#
+# THREE THINGS THIS FILE CANNOT CARRY, all raised with the client 2026-08-20:
+#  1. The shared logins (frontdesk, labtech) and the orphaned itadmin are
+#     ACCOUNT facts, not people. A real HR export carries no usernames, so they
+#     are absent here by design and surface from the account side instead.
+#  2. One front-desk "float staffer" is named nowhere in the client's roster.
+#     Splitting the frontdesk shared login is blocked until they name them.
+#  3. The client's header claims 22 current staff. Twenty are identifiable
+#     below, plus the unnamed float = 21. Three are unaccounted for; asked.
 #
 # Lines beginning with '#' are comments and are skipped by the reader.
-name,function,department,clinic,status
-Maya Okonkwo,Chief Operating Officer,Administration,Riverbend Main,active
-Rosa Delgado,Patient Registration,Front Office,Riverbend Main,active
-Jin Park,Patient Registration,Front Office,Riverbend East,active
-Priya Raman,Patient Registration,Front Office,Riverbend Main,active
-Marcus Bell,Patient Registration,Front Office,Riverbend Main,active
-Anil Patel,Physician,Internal Medicine,Riverbend Main,active
-Grace Kim,Physician,Internal Medicine,Riverbend Main,active
-Anita Nguyen,Physician,Family Medicine,Riverbend East,active
-Sandra Lee,Physician,Pediatrics,Riverbend South,terminated
-Yusuf Demir,Physician,Internal Medicine,Riverbend South,leave
-Karen Cole,Registered Nurse,Family Medicine,Riverbend East,active
-Aisha Kone,Laboratory Technician,Laboratory,Riverbend Main,active
-Diego Marquez,Laboratory Technician,Laboratory,Riverbend South,active
-Tom Reyes,Billing Specialist,Revenue Cycle,Riverbend Main,active
-Dana White,Release of Information Clerk,Health Information,Riverbend Main,active
-Nadia Osei,Scheduling Coordinator,Front Office,Riverbend East,active
-Owen Fitzgerald,Systems Administrator,Information Technology,Riverbend Main,active
-Grace Liang,Volunteer Coordinator,Community Outreach,Riverbend Main,active
+name,function,department,clinic,status,proposed_role
+Maya Okonkwo,Chief Operating Officer,Executive,Network,active,management
+Rosa Delgado,Patient registration,Front Office,Riverbend Main,active,front_desk
+Jin Park,Patient registration,Front Office,Riverbend East,active,front_desk
+Anil Patel MD,Physician family medicine,Clinical,Riverbend Main,active,clinician
+Anita Nguyen MD,Physician internal medicine,Clinical,Riverbend Main,active,clinician
+Sandra Lee MD,Physician pediatrics,Clinical,Riverbend East,active,clinician
+Grace Kim MD,Physician internal medicine,Clinical,Riverbend Main,active,clinician
+Karen Cole RN,Registered nurse,Clinical,Riverbend Main,active,nursing_ma
+Tom Reyes,Billing specialist,Revenue Cycle,Network,active,billing
+Dana White,Release of information clerk,Health Information Mgmt,Network,active,roi_clerk
+Marisol Vega,Scheduler,Front Office,Riverbend East,active,scheduler
+Sofia Marin,Patient registration agency,Front Office,Riverbend East,temp_ends_2026-09-30,front_desk
+Ben Osei,Laboratory technician,Laboratory,Riverbend Main,active,lab
+Priya Raman,Laboratory technician,Laboratory,Riverbend East,active,lab
+Grace Iwu MA,Medical assistant,Clinical,Riverbend East,active,nursing_ma
+Daniel Okafor,IT administrator,Information Technology,Network,active,it_admin
+Thomas Bright,Practice manager,Operations,Network,active,management
+Renee Alvarez,Billing specialist,Revenue Cycle,Riverbend East,active,billing
+Marcus Hale MD,Physician family medicine,Clinical,,departed_2026-05,
+Erin Castillo,Front desk agency,Front Office,,departed_2026-02,

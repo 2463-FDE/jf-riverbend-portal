@@ -1,50 +1,96 @@
 # Training-simulation staff roster — what each row is for
 
-`staff_roster_SYNTHETIC.csv` is the training-simulation staff directory this
-exercise runs against. **The people are fictional by design** — Riverbend is a
-simulation, so there is no other roster behind this one, and a mapping report
-built from it is the intended basis for review and sign-off.
+`staff_roster_SYNTHETIC.csv` is the **client's** staff roster, received
+2026-08-19 (prepared by them 13 Aug 2026, amended 20 Aug to add Grace Kim). The
+people are fictional by design — Riverbend is a simulation, so there is no
+other roster behind this one, and a mapping report built from it is the
+intended basis for review and sign-off.
+
+⚠️ **It replaced a roster we invented.** The earlier cast — Marcus Bell, Yusuf
+Demir, Aisha Kone, Diego Marquez, Nadia Osei, Owen Fitzgerald, Grace Liang —
+was built to exercise every case the migration must handle. The client's roster
+is **realistic rather than comprehensive**: nobody on it is on leave, and every
+function maps to a role. Two cases therefore have no example in the data any
+more, and the tests for them use fixtures instead (see
+`tests/test_roster_dry_run.py`). Do not plan against the old cast; git history
+explains any earlier report.
 
 It carries the five columns the client specified — name, function, department,
-clinic, status — and nothing else. No usernames: a real HR export wouldn't
-carry them, so the mapping has to reconcile roster names against
-`users.full_name`, which is the interesting part and the part that produces
-the "unmatched" column the client signs off on.
+clinic, status — plus `proposed_role`, **their** proposal for each person. That
+column is a cross-check, never the answer: the mapping derives its own role
+from function, validated against `config/roles.yaml`, and the report flags any
+disagreement. That catches a stale `FUNCTION_TO_ROLE` table and a client-side
+typo in the same pass. Silence there means every role the report proposes is
+one the client already wrote down.
+
+No usernames: a real HR export would not carry them, so the mapping has to
+reconcile roster names against `users.full_name`, which is the interesting part
+and the part that produces the column the client signs.
 
 ## Why these rows
 
-The roster is shaped to exercise every case the migration has to handle, so
-the dry run is a real test rather than a happy path. The seeded accounts in
-`db/seed/seed.sql` already contained most of the hard cases; the roster is
-built around them.
+The roster is the client's, so its shape is theirs rather than ours. What each
+case produces:
 
-| Case | Roster side | Account side | Expected dry-run outcome |
+| Case | Roster side | Account side | Dry-run outcome |
 |---|---|---|---|
-| Clean map, one person one account | Maya Okonkwo, Tom Reyes, Dana White, Karen Cole, Anil Patel, Anita Nguyen, Rosa Delgado, Jin Park | `mokonkwo`, `billing1`, `roiclerk`, `nurse_kc`, `drpatel`, `drnguyen`, `rdelgado`, `jpark` | Migrate to `management`, `billing`, `roi_clerk`, `nursing_ma`, `clinician` ×2, `front_desk` ×2 |
-| **Shared login** — several people, one account | Rosa Delgado, Jin Park, Priya Raman, Marcus Bell all do Patient Registration at Front Office | `frontdesk` — full name is "Front Desk (Riverbend Main)", not a person | **Cannot migrate.** Split into named accounts first. This is the MFA prerequisite: a shared login cannot hold a second factor |
-| **Shared login**, second instance | Aisha Kone, Diego Marquez, both Laboratory Technicians | `labtech` — "Lab Intake", not a person | Same: split before migrating |
-| **Account with no owner** | *no row* — nobody in the roster is Helix Support | `itadmin` — "Helix Support" | **Disable, do not migrate.** This is the departed contractor the client named explicitly (Helix Digital Partners authored every ADR) |
-| **Person left, account still live** | Sandra Lee, status `terminated` | `drlee` — "Dr. Sandra Lee" | **Disable, do not migrate.** Distinct from the case above: here we know who it was, and that they've gone |
-| **Person with no account** | Nadia Osei, Scheduling Coordinator | *none* | Nothing to migrate. Report as a roster row needing an account — and note no `scheduler` account exists anywhere today |
-| **Function that maps to no role** | Grace Liang, Volunteer Coordinator, Community Outreach | *none* | **Unmapped.** If such a person ever has an account, deny by default with the supervisor-contact screen |
-| **On leave** | Yusuf Demir, status `leave` | *none* | Genuinely undecided — the client specified `active` and `terminated` handling but not `leave`. Surface as a question rather than guessing |
-| **Real IT/Admin, replacing the contractor** | Owen Fitzgerald, Systems Administrator | *none* | Needs an `it_admin` account created. Note the contrast with `itadmin` above: the function stays, the contractor's account still goes |
+| Clean map, one person one account | Maya Okonkwo, Rosa Delgado, Jin Park, Anil Patel, Anita Nguyen, Sandra Lee, **Grace Kim**, Karen Cole, Tom Reyes, Dana White | `mokonkwo`, `rdelgado`, `jpark`, `drpatel`, `drnguyen`, `drlee`, `drkim`, `nurse_kc`, `billing1`, `roiclerk` | **Migrate** — ten accounts onto their roles |
+| **Shared login** — several people, one account | four front-desk staff share it; only three are named | `frontdesk` — "Front Desk (Riverbend Main)", not a person | **Cannot migrate.** Split into named accounts first. Blocked: the fourth staffer is named nowhere |
+| **Shared login**, second instance | Ben Osei, Priya Raman | `labtech` — "Lab Intake" | Same: split before migrating |
+| **Account with no owner** | *no row* — nobody is Helix Support | `itadmin` | **Disable, do not migrate.** The departed contractor |
+| **Person with no account** | eight people, incl. the first `scheduler` and `it_admin` anywhere | *none* | Report as needing an account, with the role their function maps to |
+| **Temporary placement** | Sofia Marin, `temp_ends_2026-09-30` | *none* | Provision **with an expiry**. Same role as a permanent registrar; the temporary part is the expiry, not a weaker role |
+| **Departed, may still hold an account** | Marcus Hale, Erin Castillo | *none found* | **Departures checked** — reported as no-live-account-found rather than dropped, because the client asked precisely this |
+| **Renames** | Tom Reyes on `billing1`, Dana White on `roiclerk` | generic usernames | Migrate, and rename during migration so the audit log names a human. The rename is a migration step, not a mapping outcome |
 
-## Two things the roster deliberately does not resolve
+### Two cases the client's roster does not contain
 
-**Name matching is imperfect on purpose.** `users.full_name` carries suffixes
-the roster doesn't — `"Maya Okonkwo (COO)"`, `"Karen Cole, RN"`, `"Dr. Anil
-Patel"`. The mapping has to normalise before it can match, and every
-non-match must land in the report rather than being silently dropped. A
-migration that quietly skips an account it couldn't parse is the failure this
-whole dry run exists to prevent.
+**On leave** and **function maps to no role** have no example in this data. Both
+rules still exist and are still enforced — they are covered by fixtures in
+`tests/test_roster_dry_run.py` rather than by rows here. If the client's
+deny-by-default copy needs a live demonstration, it now comes from accounts
+that are not on the roster at all, which is their own stated rule.
 
-**`leave` has no defined handling.** The client set the rule for active and
-terminated staff. Yusuf Demir exists so that gap shows up in the report and
-gets asked about, instead of being decided here.
+### Three things the roster cannot answer
+
+Raised with the client 2026-08-20, unresolved at the time of writing:
+
+1. **The fourth front-desk staffer is unnamed.** Splitting `frontdesk` into
+   named accounts is blocked until they name them.
+2. **The header count does not reconcile.** Twenty people are identifiable,
+   plus the unnamed float; the client's header says 22.
+3. **Scale.** They describe "on the order of a thousand accounts" on the
+   `staff` role. The seeded database has 13, so the report demonstrates the
+   mechanism, not the volume.
+
+## Name matching is the hard part, and it bit us
+
+`users.full_name` carries decoration the roster does not, in both directions:
+`"Maya Okonkwo (COO)"`, `"Karen Cole, RN"`, `"Dr. Anil Patel"` on the account
+side; `"Anil Patel MD"`, `"Grace Iwu MA"` on the client's side. The mapping
+normalises both before comparing, and every non-match lands in the report
+rather than being silently dropped — a migration that quietly skips an account
+it could not parse is the failure this dry run exists to prevent.
+
+⚠️ **The comma mattered.** `normalise_name` stripped `", RN"` but not a bare
+`" MD"`. The client writes credentials without a comma, so **five of the six
+clinical accounts** — `drkim`, `drpatel`, `drnguyen`, `drlee`, `nurse_kc` —
+matched nobody and were reported as having no identified owner. The report
+would have recommended disabling four working clinicians, in its *safe* column.
+Fixed 2026-08-20 with an anchored, enumerated credential list, so a real
+surname like "Bright" or "Reyes" is never mistaken for a credential.
+
+The lesson worth keeping: on this report a false "no owner" is more dangerous
+than a false "migrate", because it reads as the cautious answer.
 
 ## Regenerating or extending
 
-Edit the CSV directly — it represents a file that arrives from outside the
-system, so there is no generator. If you add a row, add its case to the table
-above, and keep the `# SYNTHETIC` header intact.
+Edit the CSV directly — it arrives from outside the system, so there is no
+generator. Keep the provenance header intact: it records that these rows are
+the client's rather than ours, which is what makes the report signable.
+
+If the client sends a revision, replace the rows and update the case table
+above. Do **not** adjust `FUNCTION_TO_ROLE` to make a row map without checking
+`config/roles.yaml` first — `role_for_function` validates against the grid and
+returns nothing for a role the grid does not define, deliberately: a proposal
+the enforcement layer would fail closed on is worse than no proposal.

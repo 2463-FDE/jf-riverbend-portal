@@ -58,19 +58,59 @@ def test_unknown_function_maps_to_no_role():
 def test_reads_the_roster_skipping_comment_lines():
     roster = dry_run.read_roster(ROSTER_CSV)
 
-    # 18 since Grace Kim joined the synthetic roster alongside the `drkim`
-    # seed account — without a roster owner she would map to "disable", which
-    # is the correct behaviour for an unmapped account and the wrong outcome
-    # for the demo's only clinical reviewer.
-    assert len(roster) == 18
+    # 20 rows: the CLIENT's roster (received 2026-08-19), which replaced the
+    # one we invented. 18 current staff plus 2 departures they asked us to
+    # check for live accounts. The shared logins and the orphaned itadmin are
+    # deliberately absent — they are account facts, not people.
+    assert len(roster) == 20
     assert all(r.name and r.function and r.status for r in roster)
     assert not any(r.name.startswith("#") for r in roster)
 
 
-def test_roster_carries_only_the_five_columns_the_client_specified():
+def test_roster_carries_the_client_columns_plus_the_cross_check():
     row = dry_run.read_roster(ROSTER_CSV)[0]
 
-    assert set(vars(row)) == {"name", "function", "department", "clinic", "status"}
+    # The client's five, plus proposed_role (their proposal, used only to
+    # cross-check ours) and two fields derived at read time from their dated
+    # status vocabulary. Pinned so a stray column cannot appear unnoticed.
+    assert set(vars(row)) == {
+        "name", "function", "department", "clinic", "status",
+        "raw_status", "expires_on", "client_proposed_role",
+    }
+
+
+def test_the_clients_dated_statuses_are_normalised_but_never_guessed():
+    # Their roster writes departed_2026-05 and temp_ends_2026-09-30; this
+    # mapper's decision logic is built on three plain statuses. Normalising at
+    # read time keeps the branches unchanged — but an unrecognised value must
+    # pass through untouched so it still lands in UNKNOWN_STATUS. Coercing an
+    # unparseable status to "active" would migrate somebody on a typo.
+    assert dry_run.normalise_status("departed_2026-05") == ("terminated", None)
+    assert dry_run.normalise_status("temp_ends_2026-09-30") == ("active", "2026-09-30")
+    assert dry_run.normalise_status("secondment?") == ("secondment?", None)
+    assert dry_run.normalise_status("") == ("", None)
+
+
+def test_bare_credentials_are_stripped_so_clinicians_match_their_accounts():
+    # The bug this fixes was the whole blocker: the client writes "Anil Patel
+    # MD" while users.full_name holds "Dr. Anil Patel". Without stripping a
+    # comma-less credential, five of six clinical accounts matched nobody and
+    # the report recommended disabling four working clinicians.
+    for account_name, roster_name in [
+        ("Dr. Grace Kim", "Grace Kim MD"),
+        ("Dr. Sandra Lee", "Sandra Lee MD"),
+        ("Dr. Anil Patel", "Anil Patel MD"),
+        ("Karen Cole, RN", "Karen Cole RN"),
+    ]:
+        assert dry_run.normalise_name(account_name) == dry_run.normalise_name(roster_name)
+
+
+def test_stripping_credentials_does_not_eat_a_real_surname():
+    # "Bright" and "Reyes" are not credentials. An unanchored "drop the last
+    # word" rule would have merged unrelated people.
+    assert dry_run.normalise_name("Thomas Bright") == "thomas bright"
+    assert dry_run.normalise_name("Tom Reyes") == "tom reyes"
+    assert dry_run.normalise_name("Renee Alvarez") == "renee alvarez"
 
 
 # --- the buckets, against the real seeded account set ----------------------
@@ -140,37 +180,89 @@ def test_the_no_owner_finding_offers_context_without_guessing_a_role():
     # exactly the active staff who have no account of their own, since those
     # are the only people a shared login could be split into.
     assert any("Priya Raman" in c for c in frontdesk.context)
-    assert any("Owen Fitzgerald" in c for c in frontdesk.context)
+    assert any("Daniel Okafor" in c for c in frontdesk.context)
     # Staff who already hold their own account are not offered as candidates.
     assert not any("Rosa Delgado" in c for c in frontdesk.context)
     assert not any("Maya Okonkwo" in c for c in frontdesk.context)
 
 
-def test_a_terminated_persons_account_is_disabled_not_migrated():
-    findings = _report()
+# The next three cases are driven by FIXTURES, not by the shipped roster.
+#
+# They used to read the real file, which worked only because the roster we
+# invented was built to contain every case. The client's roster is realistic
+# instead of comprehensive: nobody on it is on leave, and every function maps
+# to a role. Coupling this logic to the data meant a roster update broke tests
+# that were never about the data — so the rules are tested directly and the
+# file is tested separately, above.
 
-    assert _subject_outcome(findings, "drlee") == dry_run.DISABLE_DEPARTED
-    assert next(f for f in findings if f.subject == "drlee").proposed_role is None
+
+def test_a_terminated_persons_account_is_disabled_not_migrated():
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Riverbend Main", "terminated")]
+    accounts = [Account("abyron", "Dr. Ada Byron", "staff", True)]
+
+    findings = dry_run.build_report(roster, accounts, known_roles={"clinician"})
+
+    assert _subject_outcome(findings, "abyron") == dry_run.DISABLE_DEPARTED
+    assert next(f for f in findings if f.subject == "abyron").proposed_role is None
+
+
+def test_a_departure_the_client_asked_about_is_reported_not_dropped():
+    # The client listed three departures and said why: "I do not know whether
+    # these still have live accounts... I would rather they surface in your dry
+    # run than in an audit." Until 2026-08-20 a departed person with no account
+    # was skipped entirely, so the report answered nothing about them.
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "", "terminated",
+                        raw_status="departed_2026-05")]
+
+    findings = dry_run.build_report(roster, [Account("someone_else", "Other Person", "staff", True)],
+                                    known_roles={"clinician"})
+    ada = [f for f in findings if f.subject == "Ada Byron"]
+
+    assert len(ada) == 1, "a departure must not vanish from the report"
+    assert ada[0].outcome == dry_run.DEPARTED_CHECKED
+    assert ada[0].proposed_role is None
+    # The report quotes what the roster actually said, not the normalised form:
+    # "departed_2026-05" tells an operator more than "terminated".
+    assert "departed_2026-05" in ada[0].detail
+    # And it admits the limit of a name-based check rather than implying
+    # certainty the data cannot support.
+    assert "username variant" in ada[0].detail
+    assert not _outcomes(findings, dry_run.NEEDS_ACCOUNT)
 
 
 def test_active_staff_without_an_account_are_reported():
     findings = _report()
     needs = {f.subject: f.proposed_role for f in _outcomes(findings, dry_run.NEEDS_ACCOUNT)}
 
-    # No scheduler or it_admin account exists anywhere today.
-    assert needs["Nadia Osei"] == "scheduler"
-    assert needs["Owen Fitzgerald"] == "it_admin"
-    # People behind the shared logins also surface here — they need named accounts.
-    assert "Priya Raman" in needs and needs["Priya Raman"] == "front_desk"
-    assert "Aisha Kone" in needs and needs["Aisha Kone"] == "lab"
+    # No scheduler, it_admin or lab account exists anywhere today.
+    assert needs["Marisol Vega"] == "scheduler"
+    assert needs["Daniel Okafor"] == "it_admin"
+    assert needs["Ben Osei"] == "lab"
+    # People behind the shared logins surface here too — they need named ones.
+    assert needs["Priya Raman"] == "lab"
+    assert needs["Sofia Marin"] == "front_desk"
+
+
+def test_a_temporary_placement_is_provisioned_with_an_expiry():
+    # The client was explicit about this one: "Set an expiry on the account at
+    # provisioning; do not rely on someone remembering." An agency placement
+    # gets the same ROLE as a permanent registrar — weakening it would be a
+    # policy invention — and the temporary part is carried by the expiry.
+    sofia = next(f for f in _report() if f.subject == "Sofia Marin")
+
+    assert sofia.outcome == dry_run.NEEDS_ACCOUNT
+    assert sofia.proposed_role == "front_desk"
+    assert "2026-09-30" in sofia.detail
 
 
 def test_an_unmappable_function_denies_by_default_and_proposes_nothing():
-    findings = _report()
-    grace = next(f for f in findings if f.subject == "Grace Liang")
+    roster = [RosterRow("Ada Byron", "Volunteer Coordinator", "Outreach", "Riverbend Main", "active")]
 
-    assert grace.outcome == dry_run.UNMAPPED_FUNCTION
-    assert grace.proposed_role is None
+    findings = dry_run.build_report(roster, [], known_roles={"clinician"})
+    ada = next(f for f in findings if f.subject == "Ada Byron")
+
+    assert ada.outcome == dry_run.UNMAPPED_FUNCTION
+    assert ada.proposed_role is None
 
 
 def test_staff_on_leave_are_surfaced_as_an_open_question_not_defaulted():
@@ -178,12 +270,14 @@ def test_staff_on_leave_are_surfaced_as_an_open_question_not_defaulted():
     # asserted Yusuf Demir was not in MIGRATE, which passed happily while he
     # appeared in NO bucket at all — the report silently dropped him. Assert the
     # bucket he must be in, not merely one he must not be.
-    findings = _report()
-    yusuf = [f for f in findings if f.subject == "Yusuf Demir"]
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Riverbend Main", "leave")]
 
-    assert len(yusuf) == 1, "on-leave staff must not vanish from the report"
-    assert yusuf[0].outcome == dry_run.HOLD_ON_LEAVE
-    assert yusuf[0].proposed_role is None
+    findings = dry_run.build_report(roster, [], known_roles={"clinician"})
+    ada = [f for f in findings if f.subject == "Ada Byron"]
+
+    assert len(ada) == 1, "on-leave staff must not vanish from the report"
+    assert ada[0].outcome == dry_run.HOLD_ON_LEAVE
+    assert ada[0].proposed_role is None
 
 
 def test_a_terminated_person_with_no_account_is_not_reported_as_needing_one():
@@ -258,9 +352,17 @@ def test_the_seeded_accounts_produce_the_documented_split():
         dry_run.read_roster(ROSTER_CSV), dry_run.read_accounts_from_seed(SEED_SQL)
     )
 
-    assert len(_outcomes(findings, dry_run.MIGRATE)) == 9   # + drkim (Grace Kim)
+    # Against the CLIENT's roster: ten of the thirteen seeded accounts map
+    # cleanly, and the three that do not are exactly the three that are not
+    # people. Nothing lands in DENY BY DEFAULT or UNRECOGNISED STATUS — before
+    # the vocabulary fix, seven real staff sat in the former and three dated
+    # statuses in the latter.
+    assert len(_outcomes(findings, dry_run.MIGRATE)) == 10
     assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 3   # frontdesk, labtech, itadmin
-    assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 1  # drlee
+    assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 0  # no departure holds an account
+    assert len(_outcomes(findings, dry_run.DEPARTED_CHECKED)) == 2  # Marcus Hale, Erin Castillo
+    assert len(_outcomes(findings, dry_run.UNMAPPED_FUNCTION)) == 0
+    assert len(_outcomes(findings, dry_run.UNKNOWN_STATUS)) == 0
 
 
 def test_a_missing_users_insert_yields_no_accounts_rather_than_crashing(tmp_path):
@@ -322,7 +424,14 @@ def test_an_unrecognised_status_is_reported_not_filtered_out():
 
 
 def test_a_terminated_person_with_no_account_stays_out_of_needs_account():
+    # The original intent still holds: somebody who has left must never be
+    # reported as needing an account. What changed on 2026-08-20 is the other
+    # half — this used to assert `findings == []`, i.e. that they vanished
+    # entirely. That silence was the bug: the client listed departures
+    # specifically so the report would say whether a live account exists.
     roster = [dry_run.RosterRow("Gone Person", "Physician", "Medicine", "Main", "terminated")]
     findings = dry_run.build_report(roster, [], known_roles={"clinician"})
 
-    assert findings == []  # nothing to provision, nothing to disable
+    assert not _outcomes(findings, dry_run.NEEDS_ACCOUNT)
+    assert not _outcomes(findings, dry_run.MIGRATE)
+    assert [f.outcome for f in findings] == [dry_run.DEPARTED_CHECKED]

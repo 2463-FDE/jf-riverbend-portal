@@ -46,6 +46,24 @@ FUNCTION_TO_ROLE = {
     "release of information clerk": "roi_clerk",
     "scheduling coordinator": "scheduler",
     "systems administrator": "it_admin",
+    # --- the client's own wording, added 2026-08-20 with their roster --------
+    # Their functions are more specific than ours were, and every one of these
+    # previously fell through to UNMAPPED — which reported seven real staff as
+    # "deny by default" in the safe column. A specialty is not a role: all three
+    # physician variants are `clinician`, exactly as the signed matrix has it.
+    "physician family medicine": "clinician",
+    "physician internal medicine": "clinician",
+    "physician pediatrics": "clinician",
+    "medical assistant": "nursing_ma",   # same note area as clinicians, per the matrix
+    "scheduler": "scheduler",
+    "it administrator": "it_admin",
+    "practice manager": "management",    # reporting only; asks a clinician for a chart
+    # Agency placements do the same job as the permanent role. The temporary
+    # part of their status is handled by status, not by a different role —
+    # giving an agency registrar a weaker role than a permanent one would be a
+    # policy invention nobody asked for.
+    "patient registration agency": "front_desk",
+    "front desk agency": "front_desk",
 }
 
 # Outcomes. MIGRATE is the only one that changes a role; every other bucket
@@ -57,6 +75,34 @@ UNMAPPED_FUNCTION = "unmapped_function_deny_by_default"
 HOLD_ON_LEAVE = "hold_on_leave_undecided"
 NEEDS_ACCOUNT = "needs_account"
 UNKNOWN_STATUS = "unknown_roster_status"
+ROLE_DISAGREEMENT = "role_disagreement_with_client"
+DEPARTED_CHECKED = "departure_checked_no_account"
+
+# The client writes dated statuses; this mapper's logic is built on three plain
+# ones. Normalising at READ time keeps the decision branches unchanged and
+# keeps the raw value for the report, rather than scattering date parsing
+# through the outcome logic.
+#
+#   departed_2026-05      -> terminated  (they have left; disable if found)
+#   temp_ends_2026-09-30  -> active      (working now; the end date is an
+#                                         expiry to set at provisioning, NOT a
+#                                         reason to treat them as inactive)
+_DEPARTED_RE = re.compile(r"^departed[_-](\d{4}-\d{2}(?:-\d{2})?)$")
+_TEMP_RE = re.compile(r"^temp[_-]ends[_-](\d{4}-\d{2}-\d{2})$")
+
+
+def normalise_status(raw: str):
+    """Return (status, expires_on). An unrecognised value passes through
+    untouched so it still lands in UNKNOWN_STATUS — never silently coerced to
+    `active`, which would migrate somebody on the strength of a typo."""
+    value = (raw or "").strip().lower()
+    m = _DEPARTED_RE.match(value)
+    if m:
+        return "terminated", None
+    m = _TEMP_RE.match(value)
+    if m:
+        return "active", m.group(1)
+    return value, None
 
 
 @dataclass(frozen=True)
@@ -66,6 +112,16 @@ class RosterRow:
     department: str
     clinic: str
     status: str
+    # What the roster literally said, kept so the report can quote it. A
+    # normalised "terminated" tells an operator less than "departed_2026-05".
+    raw_status: str = ""
+    # Set only for a temp/agency placement. An account for one of these must be
+    # created WITH an expiry — the client's instruction was explicit: "do not
+    # rely on someone remembering".
+    expires_on: Optional[str] = None
+    # The client's own proposal. Cross-check only; the mapping still derives
+    # its own and the report flags disagreement.
+    client_proposed_role: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +144,16 @@ class Finding:
 _SUFFIX = re.compile(r"\s*\((?:[^)]*)\)\s*$")        # "Maya Okonkwo (COO)"
 _TRAILING_CRED = re.compile(r",\s*[A-Za-z.]+\s*$")    # "Karen Cole, RN"
 _TITLE = re.compile(r"^(dr|doctor|mr|mrs|ms|miss)\.?\s+", re.I)
+# "Anil Patel MD" — a credential with no comma before it. The client's roster
+# writes them this way while `users.full_name` writes "Dr. Anil Patel", so
+# without this five of the six clinical accounts (drkim, drpatel, drnguyen,
+# drlee, nurse_kc) failed to match and were reported as having no owner —
+# recommending that four working clinicians be disabled. Anchored and
+# enumerated rather than "any trailing word", so a real surname like "Bright"
+# or "Reyes" is never eaten.
+_BARE_CRED = re.compile(
+    r"\s+(md|do|rn|lpn|np|pa|ma|rd|phd|dds|pharmd|mph|msn|bsn)\.?$", re.I
+)
 
 
 def normalise_name(raw: str) -> str:
@@ -101,6 +167,7 @@ def normalise_name(raw: str) -> str:
     s = (raw or "").strip()
     s = _SUFFIX.sub("", s)
     s = _TRAILING_CRED.sub("", s)
+    s = _BARE_CRED.sub("", s)
     s = _TITLE.sub("", s)
     return " ".join(s.lower().split())
 
@@ -141,18 +208,31 @@ def role_for_function(function: str, known_roles=None) -> Optional[str]:
     return role if role in known_roles else None
 
 
+def _row(r) -> RosterRow:
+    raw = (r.get("status") or "").strip()
+    status, expires_on = normalise_status(raw)
+    proposed = (r.get("proposed_role") or "").strip() or None
+    return RosterRow(
+        name=r["name"].strip(),
+        function=r["function"].strip(),
+        department=r["department"].strip(),
+        clinic=r["clinic"].strip(),
+        status=status,
+        raw_status=raw,
+        expires_on=expires_on,
+        client_proposed_role=proposed,
+    )
+
+
 def read_roster(path):
-    """Read the roster CSV, skipping '#' comment lines."""
+    """Read the roster CSV, skipping '#' comment lines.
+
+    `proposed_role` is optional: a roster without it still reads, and the
+    cross-check simply has nothing to compare against."""
     with open(path, newline="") as f:
         lines = [ln for ln in f if not ln.lstrip().startswith("#")]
     return [
-        RosterRow(
-            name=r["name"].strip(),
-            function=r["function"].strip(),
-            department=r["department"].strip(),
-            clinic=r["clinic"].strip(),
-            status=r["status"].strip().lower(),
-        )
+        _row(r)
         for r in csv.DictReader(lines)
         if (r.get("name") or "").strip()
     ]
@@ -270,8 +350,26 @@ def build_report(roster, accounts, known_roles=None):
             continue
         for person in people:
             if person.status == "terminated":
-                # Nothing to do: no account, and they have left. Reporting them
-                # as "needs an account" would be actively wrong.
+                # Reporting them as "needs an account" would be actively wrong —
+                # but dropping them silently is worse, and was the behaviour
+                # until 2026-08-20. The client listed three departures and said
+                # exactly why: "I do not know whether these still have live
+                # accounts... I would rather they surface in your dry run than
+                # in an audit." A report that answers nothing about them does
+                # not answer the question they asked.
+                findings.append(
+                    Finding(
+                        outcome=DEPARTED_CHECKED,
+                        subject=person.name,
+                        detail=(
+                            f"{person.function or 'role not stated'} — roster says "
+                            f"{person.raw_status or person.status}. Checked against every "
+                            f"account: no live account found under this name. Nothing to "
+                            f"disable. If they held an account under a username variant "
+                            f"this name-based check would miss it."
+                        ),
+                    )
+                )
                 continue
             if person.status == "leave":
                 # PR #32 review [medium]: previously skipped entirely, so an
@@ -306,6 +404,13 @@ def build_report(roster, accounts, known_roles=None):
                 )
                 continue
             role = role_for_function(person.function, known_roles)
+            expiry = (
+                f" Provision WITH an expiry of {person.expires_on} — the roster marks this "
+                f"a temporary placement and the client asked not to rely on someone "
+                f"remembering."
+                if person.expires_on
+                else ""
+            )
             findings.append(
                 Finding(
                     outcome=NEEDS_ACCOUNT if role else UNMAPPED_FUNCTION,
@@ -313,7 +418,7 @@ def build_report(roster, accounts, known_roles=None):
                     detail=(
                         f"{person.function}, {person.department}, {person.clinic} — "
                         + (
-                            f"active staff with no account. Needs one as '{role}'."
+                            f"active staff with no account. Needs one as '{role}'.{expiry}"
                             if role
                             else f'function "{person.function}" maps to no role.'
                         )
@@ -324,8 +429,50 @@ def build_report(roster, accounts, known_roles=None):
     return findings
 
 
+def cross_check_client_roles(findings, roster):
+    """Flag where the mapping and the CLIENT disagree about a role.
+
+    The client's roster carries their own `proposed_role` per person. It is
+    deliberately NOT used as the answer — the mapping derives its own from
+    function, validated against config/roles.yaml. Comparing the two catches
+    both failure directions in one pass: a FUNCTION_TO_ROLE entry that has
+    drifted from what the client actually wants, and a typo or stale row on
+    the client's side.
+
+    Silence here is meaningful: it means every role this report proposes is one
+    the client already wrote down, which is most of what a sign-off is for.
+    """
+    by_name = {normalise_name(r.name): r for r in roster if r.client_proposed_role}
+    extra = []
+    for f in findings:
+        if not f.proposed_role:
+            continue
+        person = by_name.get(normalise_name(f.subject))
+        if person is None:
+            # Account-side subjects (usernames) won't match a roster name; the
+            # MIGRATE detail already carries the person, and re-deriving the
+            # link here would duplicate the matching logic above.
+            continue
+        if person.client_proposed_role != f.proposed_role:
+            extra.append(
+                Finding(
+                    outcome=ROLE_DISAGREEMENT,
+                    subject=f.subject,
+                    detail=(
+                        f"this report proposes '{f.proposed_role}' from the function "
+                        f'"{person.function}", but the client\'s roster proposes '
+                        f"'{person.client_proposed_role}'. Resolve before sign-off — "
+                        f"one of the two is wrong and the report must not pick a side."
+                    ),
+                )
+            )
+    return findings + extra
+
+
 def format_report(findings):
-    order = [MIGRATE, DECIDE_NO_OWNER, DISABLE_DEPARTED, UNMAPPED_FUNCTION, HOLD_ON_LEAVE, NEEDS_ACCOUNT, UNKNOWN_STATUS]
+    order = [MIGRATE, ROLE_DISAGREEMENT, DECIDE_NO_OWNER, DISABLE_DEPARTED,
+             DEPARTED_CHECKED, UNMAPPED_FUNCTION, HOLD_ON_LEAVE, NEEDS_ACCOUNT,
+             UNKNOWN_STATUS]
     titles = {
         MIGRATE: "MIGRATE — ready, one person, one account, mapped function",
         DECIDE_NO_OWNER: "DECIDE — no identified owner (disable, or split into named accounts)",
@@ -334,6 +481,8 @@ def format_report(findings):
         HOLD_ON_LEAVE: "OPEN QUESTION — staff on leave, no rule set",
         NEEDS_ACCOUNT: "NEEDS AN ACCOUNT — active staff with none",
         UNKNOWN_STATUS: "UNRECOGNISED STATUS — cannot be actioned",
+        ROLE_DISAGREEMENT: "DISAGREEMENT — the client proposed a different role",
+        DEPARTED_CHECKED: "DEPARTURES CHECKED — left the network, no account found",
     }
     out = [
         "ROSTER DRY-RUN MAPPING",
@@ -420,7 +569,7 @@ def main(argv):
     if not accounts:
         print("no accounts found — nothing to map.", file=sys.stderr)
         return 2
-    print(format_report(build_report(roster, accounts)))
+    print(format_report(cross_check_client_roles(build_report(roster, accounts), roster)))
     print(f"\nRoster: {os.path.relpath(roster_path)}   Accounts: {source}")
     print(
         "Training-simulation dataset — the people are fictional by design. "
