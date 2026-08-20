@@ -14,6 +14,10 @@ class Settings:
     db_user = os.getenv("DB_USER", "riverbend_app")
     db_password = os.getenv("DB_PASSWORD", "")
 
+    # Branch 7B: shared secret proving a call arrived through the gateway.
+    # Same variable, same semantics as intake/records/eligibility/scheduling.
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
     @property
     def db_url(self) -> str:
         return (

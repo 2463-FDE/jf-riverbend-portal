@@ -14,5 +14,9 @@ class Settings:
     # guardrail for inbound message size (bytes of the raw HL7 string)
     max_message_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "262144"))
 
+    # Branch 7B: shared secret proving a call arrived through the gateway.
+    # Same variable, same semantics as intake/records/eligibility/scheduling.
+    internal_service_token = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
 
 settings = Settings()

@@ -167,6 +167,12 @@ services:
   interop-service:
     build: ./services/interop-service
     env_file: .env
+    environment:
+      # Branch 7B: this service now verifies that a call came through the
+      # gateway. Deliberately NOT in the committed .env — it is a secret, and
+      # the ${VAR:?...} form makes a missing value stop compose rather than
+      # start a service that 401s every real request.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8075/healthz')\""]
       interval: 10s
@@ -176,6 +182,12 @@ services:
   roi-service:
     build: ./services/roi-service
     env_file: .env
+    environment:
+      # Branch 7B: this service now verifies that a call came through the
+      # gateway. Deliberately NOT in the committed .env — it is a secret, and
+      # the ${VAR:?...} form makes a missing value stop compose rather than
+      # start a service that 401s every real request.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
     depends_on:
       postgres:
         condition: service_healthy
