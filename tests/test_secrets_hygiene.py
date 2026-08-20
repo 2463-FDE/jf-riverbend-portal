@@ -43,11 +43,46 @@ def test_dotenv_is_not_tracked():
 
 
 def test_gitignore_covers_real_env_files():
-    ignored = (REPO / ".gitignore").read_text()
-    assert ".env" in ignored, ".gitignore must exclude .env or it will be re-added"
-    assert "!.env.example" in ignored, (
+    """Parse the rules, don't substring-match the file.
+
+    Review finding C2-GITIGNORE-TEST-WEAK: a substring check passes on the
+    explanatory COMMENT above the rules, so deleting the actual `.env` line
+    would leave this test green. The comment exists precisely because the rule
+    is non-obvious, which makes that failure mode likely rather than theoretical.
+    """
+    rules = {
+        line.strip()
+        for line in (REPO / ".gitignore").read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+    assert ".env" in rules, ".gitignore must exclude .env or it will be re-added"
+    assert ".env.*" in rules, "variant env files (.env.local, .env.production) too"
+    assert "!.env.example" in rules, (
         "the .env.example template must stay tracked — it is the only documentation "
         "of which variables a deployment needs"
+    )
+
+
+def test_every_env_file_reference_is_optional():
+    """A clean clone has no `.env`, and a required `env_file` is a HARD compose
+    error that fires BEFORE any `${VAR:?}` guard — so the operator gets
+    "env file not found" instead of the message naming the variable to set.
+
+    Review finding C2-CI-MISSING-ENVFILE, confirmed by running
+    `docker compose config` in a fresh worktree: it failed on all seven
+    services. Marking each optional keeps the ${VAR:?} guards as the real
+    fail-fast, and `.env` still supplies interpolation when it exists.
+    """
+    compose = (REPO / "docker-compose.yml").read_text()
+
+    assert "env_file: .env" not in compose, (
+        "short-form `env_file: .env` is required-by-default and breaks a clean "
+        "clone. Use the long form with `required: false`."
+    )
+    # One `- path: .env` / `required: false` pair per service that reads .env.
+    assert compose.count("- path: .env") == compose.count("required: false"), (
+        "every env_file path must carry `required: false`"
     )
 
 

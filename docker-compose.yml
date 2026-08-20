@@ -46,7 +46,14 @@ services:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Round-17 review (2026-08-06): fails `docker compose config`/`up`
       # immediately with this message if unset, rather than starting a
@@ -90,7 +97,14 @@ services:
     build:
       context: .
       dockerfile: services/intake-service/Dockerfile
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Round-17 review (2026-08-06): see gateway's identical entry above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
@@ -115,7 +129,14 @@ services:
     build:
       context: .
       dockerfile: services/eligibility-service/Dockerfile
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Branch 7: this service now verifies that a call came through the
       # gateway. Deliberately NOT in the committed .env — it is a secret,
@@ -139,7 +160,14 @@ services:
     build:
       context: .
       dockerfile: services/records-service/Dockerfile
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Round-17 review (2026-08-06): see gateway's identical entry above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
@@ -156,7 +184,14 @@ services:
 
   scheduling-service:
     build: ./services/scheduling-service
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Branch 7: this service now verifies that a call came through the
       # gateway. Deliberately NOT in the committed .env — it is a secret,
@@ -174,7 +209,14 @@ services:
 
   interop-service:
     build: ./services/interop-service
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Branch 7B: this service now verifies that a call came through the
       # gateway. Deliberately NOT in the committed .env — it is a secret, and
@@ -189,7 +231,14 @@ services:
 
   roi-service:
     build: ./services/roi-service
-    env_file: .env
+    env_file:
+      # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
+      # clone does not have one — and a missing env_file is a HARD compose
+      # error that fires before any `${VAR:?}` guard, producing "env file not
+      # found" instead of the message naming the variable to set. Marking it
+      # optional keeps the ${VAR:?} guards as the real fail-fast.
+      - path: .env
+        required: false
     environment:
       # Branch 7B: this service now verifies that a call came through the
       # gateway. Deliberately NOT in the committed .env — it is a secret, and
