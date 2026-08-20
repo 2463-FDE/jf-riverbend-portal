@@ -139,6 +139,12 @@ class Finding:
     detail: str
     proposed_role: Optional[str] = None
     context: list = field(default_factory=list)
+    # The roster person this finding was matched to, when there is one. Set so
+    # the client cross-check can find them: a MIGRATE finding's `subject` is a
+    # USERNAME, and re-deriving the person from it would mean repeating the
+    # name-matching logic — which is exactly how the cross-check came to
+    # silently skip every migrated account (review R1-MAJOR-001).
+    roster_name: Optional[str] = None
 
 
 _SUFFIX = re.compile(r"\s*\((?:[^)]*)\)\s*$")        # "Maya Okonkwo (COO)"
@@ -342,6 +348,7 @@ def build_report(roster, accounts, known_roles=None):
                         subject=acct.username,
                         detail=f"{person.name} — {person.function}, {person.clinic}. Currently '{acct.role}'.",
                         proposed_role=role,
+                        roster_name=person.name,
                     )
                 )
 
@@ -424,6 +431,7 @@ def build_report(roster, accounts, known_roles=None):
                         )
                     ),
                     proposed_role=role,
+                    roster_name=person.name,
                 )
             )
     return findings
@@ -447,11 +455,10 @@ def cross_check_client_roles(findings, roster):
     for f in findings:
         if not f.proposed_role:
             continue
-        person = by_name.get(normalise_name(f.subject))
+        # Prefer the roster person the match already established. Falling back
+        # to `subject` covers roster-side findings, whose subject IS the name.
+        person = by_name.get(normalise_name(f.roster_name or f.subject))
         if person is None:
-            # Account-side subjects (usernames) won't match a roster name; the
-            # MIGRATE detail already carries the person, and re-deriving the
-            # link here would duplicate the matching logic above.
             continue
         if person.client_proposed_role != f.proposed_role:
             extra.append(

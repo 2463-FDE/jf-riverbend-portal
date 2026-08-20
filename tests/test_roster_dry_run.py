@@ -435,3 +435,75 @@ def test_a_terminated_person_with_no_account_stays_out_of_needs_account():
     assert not _outcomes(findings, dry_run.NEEDS_ACCOUNT)
     assert not _outcomes(findings, dry_run.MIGRATE)
     assert [f.outcome for f in findings] == [dry_run.DEPARTED_CHECKED]
+
+
+# --- the client cross-check (review R1-MAJOR-001) ---------------------------
+
+
+def test_a_disagreement_on_a_MATCHED_account_is_reported():
+    """The population the sign-off actually cares about.
+
+    This shipped broken: `cross_check_client_roles` looked the roster person up
+    by `finding.subject`, but a MIGRATE subject is a USERNAME, so every matched
+    account was silently skipped and the report printed "zero disagreements"
+    while comparing nothing. The finding now carries the matched roster name.
+    """
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Main", "active",
+                        client_proposed_role="front_desk")]
+    accounts = [Account("abyron", "Dr. Ada Byron", "staff", True)]
+
+    findings = dry_run.cross_check_client_roles(
+        dry_run.build_report(roster, accounts, known_roles={"clinician", "front_desk"}),
+        roster,
+    )
+    disagreements = _outcomes(findings, dry_run.ROLE_DISAGREEMENT)
+
+    assert len(disagreements) == 1, "a matched account's role must be cross-checked"
+    assert disagreements[0].subject == "abyron"
+    # Both sides are named, and neither is presented as the winner.
+    assert "clinician" in disagreements[0].detail
+    assert "front_desk" in disagreements[0].detail
+    assert "must not pick a side" in disagreements[0].detail
+
+
+def test_agreement_on_a_matched_account_reports_nothing():
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Main", "active",
+                        client_proposed_role="clinician")]
+    accounts = [Account("abyron", "Dr. Ada Byron", "staff", True)]
+
+    findings = dry_run.cross_check_client_roles(
+        dry_run.build_report(roster, accounts, known_roles={"clinician"}), roster
+    )
+
+    assert not _outcomes(findings, dry_run.ROLE_DISAGREEMENT)
+
+
+def test_a_roster_side_disagreement_is_also_reported():
+    # Someone with no account: the finding's subject IS the roster name, so
+    # this path exercises the fallback rather than the carried link.
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Main", "active",
+                        client_proposed_role="lab")]
+
+    findings = dry_run.cross_check_client_roles(
+        dry_run.build_report(roster, [], known_roles={"clinician", "lab"}), roster
+    )
+
+    assert len(_outcomes(findings, dry_run.ROLE_DISAGREEMENT)) == 1
+
+
+def test_the_shipped_roster_genuinely_agrees_with_the_client():
+    """Now that the comparison works, "zero disagreements" is a real signal.
+
+    Asserted against the actual roster and the actual seed, because the claim
+    that goes to the client for signature is exactly this one.
+    """
+    roster = dry_run.read_roster(ROSTER_CSV)
+    findings = dry_run.cross_check_client_roles(
+        dry_run.build_report(roster, dry_run.read_accounts_from_seed(SEED_SQL)), roster
+    )
+
+    assert not _outcomes(findings, dry_run.ROLE_DISAGREEMENT)
+    # And it compared something: every migrated account carries the roster
+    # person it matched, which is what the cross-check needs.
+    migrated = _outcomes(findings, dry_run.MIGRATE)
+    assert migrated and all(f.roster_name for f in migrated)
