@@ -1,5 +1,10 @@
 -- Riverbend Patient Portal — consolidated database schema (current state).
--- Postgres 15. All PHI is protected at the disk level (RDS volume encryption).
+-- Postgres 15. PHI is NOT encrypted at rest. `dob`, `ssn` and `notes` below
+-- are plain text, and `ssn_digits` is a generated, INDEXED copy of the SSN.
+-- This line previously claimed disk-level protection from a managed-database
+-- volume. No such deployment exists (docker compose, local `pgdata` volume),
+-- and there is no encryption of any kind. See adr/0008 for the recorded risk
+-- decision and its remediation plan.
 --
 -- This file is the flattened "current" schema loaded by docker-entrypoint on a
 -- fresh volume. The incremental history lives in db/migrations/*.sql and is kept

@@ -1,4 +1,4 @@
-All PHI is encrypted and the system is fully HIPAA compliant.
+PHI in this system is **not** encrypted at rest, and the system is **not** HIPAA compliant. See Compliance below and `adr/0008`.
 
 # Riverbend Patient Portal
 
@@ -82,8 +82,37 @@ are not. See `tests/README.md`.
 
 ## Compliance
 
-Riverbend is a HIPAA covered entity. All patient data is encrypted and access is
-controlled through per-user logins. See `adr/0002-data-and-compliance.md`.
+Riverbend Community Health is a HIPAA covered entity. **This application does
+not currently meet the Security Rule.** The claim previously on this line —
+that patient data was encrypted and the system was compliant — was false:
+`dob`, `ssn` and clinical `notes` are stored in plain text (`db/schema.sql`).
+
+What is implemented and tested:
+
+- per-user authentication with a nine-role permission grid (`config/roles.yaml`)
+- per-(actor, patient) authorization enforced at the data boundary, failing
+  closed (`services/records-service/patient_access_gate.py`)
+- clinical notes withheld from roles that may not read them
+- caller verification between every service, refusing untokened in-network calls
+- PHI-safe logging with redaction (`libs/safe_logging`)
+- a default-deny clinician review gate over withheld patient-facing content
+
+What is not:
+
+- **no encryption at rest** — see `adr/0008` for the recorded risk decision
+- no TLS on any hop
+- no MFA outside a pilot-clinic scope
+- no tamper-evident audit trail (audit rows are recorded, not protected)
+- no signed-authorization check before a release of information
+- one shared database credential; no deployment pipeline; no backup or
+  recovery process; no security scanning in CI
+
+Administrative, physical and organizational safeguards — risk analysis,
+workforce training, sanction and breach policies, and Business Associate
+Agreements — are the covered entity's responsibility and are **not evidenced in
+this repository**. Technical controls alone do not make a system compliant.
+
+See `adr/0002-data-and-compliance.md` and `adr/0008-phi-encryption-at-rest.md`.
 
 ---
 Helix Digital Partners · handoff build · v1.4.0
