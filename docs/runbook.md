@@ -5,9 +5,10 @@ Compose; one stack per clinic region.
 
 ## Required one-time setup: INTERNAL_SERVICE_TOKEN
 
-Round-17 review (2026-08-06, PR #20) and cycle branch 7A (2026-08-15):
-`gateway`, `intake-service`, `records-service`, `eligibility-service` and
-`scheduling-service` all now refuse to start unless `INTERNAL_SERVICE_TOKEN`
+Round-17 review (2026-08-06, PR #20), cycle branch 7A (2026-08-15) and
+branch 7B (2026-08-20): `gateway`, `intake-service`, `records-service`,
+`eligibility-service`, `scheduling-service`, `interop-service` and
+`roi-service` all now refuse to start unless `INTERNAL_SERVICE_TOKEN`
 is set to a real random value at least 32 characters long — this is the
 shared secret that proves a call actually came through the gateway rather
 than reaching a service directly.
@@ -22,14 +23,14 @@ public, guessable secret every deployment shipped unmodified), so `.env`
 needs it set explicitly before the first `make up`:
 
 ```bash
-# generates a 64-char hex value; the SAME value is needed by all five
+# generates a 64-char hex value; the SAME value is needed by all seven
 # services — they share one .env, so setting it once here is enough
 openssl rand -hex 32
 ```
 
 Put that value in `.env`'s `INTERNAL_SERVICE_TOKEN=` line (see the detailed
 comment above that line in `.env.example` for the full history). Without it,
-the five services fail fast at container startup with a clear `RuntimeError`
+the seven services fail fast at container startup with a clear `RuntimeError`
 in `docker compose logs` (rather than starting and sitting "unhealthy" until
 the healthcheck's retry budget runs out) — that log line is the signal to
 come back here.
@@ -265,7 +266,7 @@ anyone. (Full list: `db/seed/generate_seed.py`.)
 
 Three prerequisites, each of which silently breaks the demo if skipped.
 
-**1. `INTERNAL_SERVICE_TOKEN` must be set.** Five services refuse to start
+**1. `INTERNAL_SERVICE_TOKEN` must be set.** Seven services refuse to start
 without it and compose refuses to interpolate — see the top of this file.
 Never commit the value.
 
