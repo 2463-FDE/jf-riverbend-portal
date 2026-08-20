@@ -34,7 +34,18 @@ describe("the patient name beside the ID", () => {
     render(<PatientName patientId="" />);
 
     expect(apiFetch).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("patient-name")).not.toBeInTheDocument();
+    expect(screen.getByTestId("patient-name")).toHaveTextContent(/patient name/i);
+  });
+
+  it("holds its space before a name resolves, so the row does not reflow", () => {
+    // The box sits between the ID field and the Load button. If it collapsed
+    // when empty, a name arriving would shove the Load button sideways under
+    // the cursor.
+    vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1042, name: "Maria Alvarez" }));
+
+    render(<PatientName patientId="1042" />);
+
+    expect(screen.getByTestId("patient-name")).toBeInTheDocument();
   });
 
   it("says the name is unavailable on a denial instead of leaving a gap", async () => {
@@ -76,6 +87,7 @@ describe("the patient name beside the ID", () => {
     rerender(<PatientName patientId="" />);
 
     expect(screen.queryByText("Maria Alvarez")).not.toBeInTheDocument();
+    expect(screen.getByTestId("patient-name")).toHaveTextContent(/patient name/i);
   });
 
   it("does not treat a 200 with no name as a name", async () => {

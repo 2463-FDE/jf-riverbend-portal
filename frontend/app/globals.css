@@ -646,6 +646,23 @@ textarea:focus-visible,
   min-height: 84px;
   resize: vertical;
 }
+/* A display-only box that sits in an input row without inviting a click —
+   used for the resolved patient name beside the Patient ID field. Softer
+   border and a tinted ground so it reads as "resolved value", not "field you
+   forgot to fill in". */
+.rb-input--readonly {
+  background: var(--rb-surface-alt);
+  border-color: var(--rb-border);
+  color: var(--rb-text);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rb-input--readonly.rb-input--placeholder {
+  color: var(--rb-text-faint);
+}
 .rb-field-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

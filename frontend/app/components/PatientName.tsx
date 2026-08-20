@@ -3,8 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "../lib/session";
 
-// The patient's name, shown beside the bare Patient ID on the records and
-// appointments screens (client request, 2026-08-16).
+// The patient's name, in a display-only box between the Patient ID field and
+// the Load button on the records and appointments screens (client request,
+// 2026-08-16; boxed and reordered after review, 2026-08-20).
+//
+// It holds its own space whether or not a name is resolved, so the row does not
+// reflow when one arrives — a name appearing mid-row used to push the Load
+// button sideways under the cursor.
 //
 // `patientId` must be the LOADED id, not the input's live value. Every
 // successful get_patient writes an audit row (records-service _write_audit),
@@ -45,19 +50,20 @@ export default function PatientName({ patientId }: { patientId: string }) {
 
   // A denied lookup is the authorization boundary working correctly — grants
   // are sparse, so e.g. front desk holds 1042 but not 1737. Left as an empty
-  // gap it reads as a broken screen, so it says so instead.
-  if (unavailable) {
-    return (
-      <span className="rb-muted" style={{ fontSize: 13, whiteSpace: "nowrap" }}>
-        Name unavailable
-      </span>
-    );
-  }
-  if (!name) return null;
+  // box it reads as a broken screen, so it says so instead. The waiting state
+  // is faint placeholder text rather than blank, for the same reason.
+  const placeholder = unavailable ? "Name unavailable" : "Patient name";
+  const resolved = Boolean(name);
 
   return (
-    <span style={{ fontWeight: 600, whiteSpace: "nowrap" }} data-testid="patient-name">
-      {name}
-    </span>
+    <div
+      className={`rb-input rb-input--readonly${resolved ? "" : " rb-input--placeholder"}`}
+      style={{ flex: "0 1 220px" }}
+      aria-label="Patient name"
+      title={name ?? placeholder}
+      data-testid="patient-name"
+    >
+      {name ?? placeholder}
+    </div>
   );
 }

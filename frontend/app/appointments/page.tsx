@@ -137,11 +137,11 @@ export default function AppointmentsPage() {
           <label className="rb-field__label" htmlFor="appt-patient">
             Patient ID
           </label>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 560 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 520 }}>
             <input
               id="appt-patient"
               className="rb-input"
-              style={{ flex: "0 1 200px" }}
+              style={{ flex: "0 1 160px" }}
               value={patientId}
               onChange={(e) => {
                 setPatientId(e.target.value);
@@ -151,6 +151,7 @@ export default function AppointmentsPage() {
                 setLoadedPatientId("");
               }}
             />
+            <PatientName patientId={loadedPatientId} />
             <button
               className="rb-btn"
               onClick={() => {
@@ -161,7 +162,6 @@ export default function AppointmentsPage() {
             >
               Load
             </button>
-            <PatientName patientId={loadedPatientId} />
           </div>
           <span className="rb-field__hint">Demo patient ID defaults to 1042.</span>
         </div>

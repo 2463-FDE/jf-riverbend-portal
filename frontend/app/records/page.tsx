@@ -197,20 +197,20 @@ export default function RecordsPage() {
           <label className="rb-field__label" htmlFor="rec-patient">
             Patient ID
           </label>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 640 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", maxWidth: 600 }}>
             <input
               id="rec-patient"
               className="rb-input"
-              style={{ flex: "0 1 240px" }}
+              style={{ flex: "0 1 160px" }}
               value={patientId}
               onChange={(e) => handlePatientIdChange(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && load()}
               inputMode="numeric"
             />
+            <PatientName patientId={loadedPatientId} />
             <button className="rb-btn rb-btn--primary" onClick={load} disabled={busy} type="button">
               {busy ? "Loading…" : <><IconSearch width={16} height={16} /> Load</>}
             </button>
-            <PatientName patientId={loadedPatientId} />
           </div>
           <span className="rb-field__hint">Demo patient ID defaults to 1042.</span>
         </div>
