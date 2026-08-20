@@ -12,10 +12,18 @@
 |---|---|
 | `DB_PASSWORD` | the application's database password |
 | `PAYER_API_KEY` | a `pyr_live_`-prefixed payer clearinghouse key |
-| `SESSION_SECRET` | the secret signing browser sessions |
+| `SESSION_SECRET` | **not actually in use** — see below |
 
 `.gitignore` did not exclude `.env`, so the file was committed and every clone
-carries it. This was found during the 2026-08-20 compliance review, not by a
+carries it.
+
+`SESSION_SECRET` turned out to be dead configuration. Verified 2026-08-20: no
+code reads it, and sessions are opaque `uuid4().hex` tokens held server-side in
+Redis under `session:{token}`, never signed — so there is no signature for a
+secret to protect and rotating the value changes nothing. It is annotated as
+unused in `.env.example` rather than deleted, so the note is discoverable: the
+variable's presence implies a session-signing control that does not exist,
+which is the same trap as `config/roles.yaml`'s unread `default_role`. This was found during the 2026-08-20 compliance review, not by a
 scanner — there is no secret scanning in CI (tracked separately as C6).
 
 Two things were already correct and are unchanged by this decision:
@@ -33,8 +41,14 @@ history.**
 2. `docker-compose.yml` no longer defaults `POSTGRES_PASSWORD` to `changeme`.
    It uses the `${VAR:?message}` form, so a missing value stops compose rather
    than booting a stack on a guessable credential.
-3. The three values are treated as **disclosed** and must be rotated wherever
-   they are used.
+3. The disclosed values are rotated on the following schedule, agreed
+   2026-08-20:
+
+   | Value | Action |
+   |---|---|
+   | `PAYER_API_KEY` | Rotate **2026-08-21** with the payer vendor. Carried as debt until then |
+   | `DB_PASSWORD` | Rotate **before deployment, after code freeze** — rotating mid-window would break every running stack and the demo dataset for no security gain in a simulation |
+   | `SESSION_SECRET` | **No rotation.** Unused by the application; changing it has no effect until session signing exists |
 4. Git history is **not** rewritten.
 
 ## Why not rewrite history
