@@ -1,0 +1,182 @@
+"""The trace and provenance spine for the September 2 agentic path.
+
+The privacy property is the point. The client's constraint is absolute — never
+persist prompts, model output, retrieved text, patient data, identifiers,
+credentials or raw provider errors — and a convention cannot hold that line.
+Someone adds `prompt=` for a day's debugging and it ships.
+
+So these tests assert the guard is *enforced*, that failing loudly is the chosen
+behaviour, and that the safe path still carries enough to be useful. A trace
+nobody can read is not privacy, it is just absence.
+"""
+import pytest
+
+from libs.agent_provenance import (
+    FORBIDDEN_KEYS,
+    STAGES,
+    ForbiddenPayload,
+    ProvenanceLabel,
+    Stage,
+    TraceRecorder,
+    assert_safe,
+)
+
+
+def _rec():
+    return TraceRecorder(correlation_id="corr-1")
+
+
+def _full(t):
+    t.request(actor_role="patient")
+    t.retrieval(document_count=2, citation_ids=["c1", "c2"], categories=["lab"], excluded_count=1)
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x", latency_ms=120)
+    t.validation(passed=True, validation_code=None, citation_ids=["c1"])
+    t.review(decision="approved", draft_version=1, decided_by_user_id=13)
+    t.display(draft_version=1, label=ProvenanceLabel.REAL)
+    return t
+
+
+# --- the guard -------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("key", [
+    "prompt", "system_prompt", "messages", "completion", "response",
+    "model_output", "draft_text", "summary_text", "content", "raw_response",
+    "retrieved_text", "document", "chunk", "passage", "context",
+    "ssn", "dob", "mrn", "name", "patient_name", "address", "email", "notes",
+    "password", "api_key", "authorization", "aws_secret_access_key",
+    "internal_service_token", "bedrock_token",
+    "error", "error_message", "traceback",
+])
+def test_a_forbidden_attribute_raises(key):
+    with pytest.raises(ForbiddenPayload):
+        _rec().record(Stage.PROVIDER_CALL, **{key: "anything"})
+
+
+def test_the_guard_is_case_insensitive():
+    with pytest.raises(ForbiddenPayload):
+        _rec().record(Stage.REQUEST, PROMPT="x")
+
+
+def test_failing_loudly_is_the_chosen_behaviour():
+    """A dropped trace is recoverable; a leaked prompt in an aggregator is not.
+    So the guard raises rather than silently dropping the attribute — a silent
+    drop would let the caller believe the value was recorded."""
+    t = _rec()
+
+    with pytest.raises(ForbiddenPayload):
+        t.record(Stage.PROVIDER_CALL, model_id="m", prompt="leak")
+
+    assert t.events == [], "nothing is recorded when any attribute is rejected"
+
+
+def test_the_error_message_names_the_offenders_and_the_alternative():
+    with pytest.raises(ForbiddenPayload) as exc:
+        _rec().record(Stage.PROVIDER_CALL, prompt="x", ssn="y")
+
+    message = str(exc.value)
+    assert "prompt" in message and "ssn" in message
+    assert "citation id" in message, "must tell the caller what to record instead"
+
+
+def test_assert_safe_allows_the_permitted_metadata():
+    # The whole permitted vocabulary from the client's list.
+    assert_safe({
+        "source_id": "doc-1", "source_version": "v2", "citation_ids": ["c1"],
+        "categories": ["lab"], "status": "approved", "correlation_id": "corr-1",
+        "created_at": "2026-09-02T00:00:00Z", "model_id": "model-x",
+        "provenance_label": "real", "validation_code": "UNSUPPORTED_CLAIM",
+        "draft_version": 1, "decided_by_user_id": 13, "error_type": "ClientError",
+    })
+
+
+def test_forbidden_keys_does_not_accidentally_ban_permitted_names():
+    permitted = {
+        "source_id", "source_version", "citation_ids", "categories", "status",
+        "correlation_id", "model_id", "provenance_label", "validation_code",
+        "draft_version", "decided_by_user_id", "error_type", "tool_name",
+        "document_count", "excluded_count", "latency_ms", "actor_role",
+    }
+    assert not (permitted & FORBIDDEN_KEYS)
+
+
+# --- what the stages carry -------------------------------------------------- #
+
+
+def test_one_trace_covers_all_seven_stages():
+    """The client requires ONE trace across the whole path, so a partial trace
+    is a failed acceptance criterion rather than a partial success."""
+    t = _full(_rec())
+
+    assert t.is_complete()
+    assert t.missing_stages() == []
+    assert len(STAGES) == 7
+
+
+def test_an_incomplete_trace_names_what_is_missing():
+    t = _rec()
+    t.request(actor_role="patient")
+
+    assert not t.is_complete()
+    assert "provider_call" in t.missing_stages()
+    assert "display" in t.missing_stages()
+
+
+def test_retrieval_records_counts_and_ids_not_documents():
+    t = _rec()
+    event = t.retrieval(document_count=3, citation_ids=["c1"], categories=["lab"],
+                        excluded_count=2)
+
+    assert event.attributes["document_count"] == 3
+    assert event.attributes["excluded_count"] == 2, "an excluded doc is evidence the bound worked"
+    assert "document" not in event.attributes and "context" not in event.attributes
+
+
+def test_provider_call_accepts_an_error_TYPE_but_not_a_message():
+    t = _rec()
+    t.provider_call(label=ProvenanceLabel.FALLBACK, model_id=None,
+                    error_type="ModuleNotFoundError")
+
+    assert t.events[-1].attributes["error_type"] == "ModuleNotFoundError"
+    with pytest.raises(ForbiddenPayload):
+        t.record(Stage.PROVIDER_CALL, error_message="No module named 'boto3'")
+
+
+def test_review_records_a_user_id_never_a_name():
+    t = _rec()
+    t.review(decision="approved", draft_version=2, decided_by_user_id=13)
+
+    assert t.events[-1].attributes["decided_by_user_id"] == 13
+    with pytest.raises(ForbiddenPayload):
+        t.record(Stage.REVIEW, name="Dr. Grace Kim")
+
+
+# --- the three labels ------------------------------------------------------- #
+
+
+def test_the_three_provenance_labels_are_exactly_the_clients_three():
+    assert {l.value for l in ProvenanceLabel} == {"real", "fixture", "fallback"}
+
+
+def test_a_fallback_display_is_labelled_as_such():
+    """Fallback text must never be presented as model output."""
+    t = _rec()
+    t.display(draft_version=1, label=ProvenanceLabel.FALLBACK)
+
+    assert t.events[-1].attributes["provenance_label"] == "fallback"
+
+
+def test_the_label_survives_from_provider_call_to_display():
+    t = _full(_rec())
+    call = next(e for e in t.events if e.stage is Stage.PROVIDER_CALL)
+    shown = next(e for e in t.events if e.stage is Stage.DISPLAY)
+
+    assert call.attributes["provenance_label"] == shown.attributes["provenance_label"]
+
+
+def test_the_correlation_id_is_one_value_for_the_whole_request():
+    t = _full(_rec())
+
+    assert t.correlation_id == "corr-1"
+    assert len(t.events) == 7
