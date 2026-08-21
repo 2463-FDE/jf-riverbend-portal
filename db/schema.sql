@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS users (
     -- The foreign key is attached below, after `patients` is created.
     patient_id    INTEGER,
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    -- WHY an account is inactive (019). Login refuses every inactive account
+    -- identically; this is what lets it tell the roster-migration cases apart
+    -- so the client's specified copy can be shown for an unmapped account.
+    disabled_reason TEXT,
     last_login_at TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -254,6 +258,29 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at  TIMESTAMPTZ                     -- soft delete
 );
+
+-- ---------------------------------------------------------------------------
+-- Role migration accounting (019, branch 9 part 2)
+-- ---------------------------------------------------------------------------
+-- One row per account the roster migration touched. The client signs a mapping
+-- report and then a migration runs; this is the record of what actually
+-- changed, and it is the unmapped-account list they asked to receive back.
+--
+-- Append-only BY CONVENTION, not by enforcement. Tamper-evident audit is
+-- separate, unstarted work — do not describe this table as protected.
+CREATE TABLE IF NOT EXISTS role_migration_log (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT NOT NULL,           -- not a FK: the record must outlive the account
+    from_role     TEXT,
+    to_role       TEXT,                    -- NULL when the outcome was not a migration
+    outcome       TEXT NOT NULL,
+    detail        TEXT,
+    roster_name   TEXT,
+    approved_by   TEXT NOT NULL,           -- who signed the report this run applied
+    applied_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS role_migration_log_username_idx ON role_migration_log (username);
+CREATE INDEX IF NOT EXISTS role_migration_log_outcome_idx ON role_migration_log (outcome);
 
 -- ---------------------------------------------------------------------------
 -- Release of Information (ROI)

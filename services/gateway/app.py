@@ -219,7 +219,31 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         log.error("login db error: %s", e)
         raise HTTPException(status_code=503, detail="auth backend unavailable")
 
-    if not user or not user.is_active or not verify_password(req.password, user.password_hash):
+    # Password FIRST, status second. The combined check this replaces was
+    # correct but could not carry the client's unmapped-account message without
+    # turning it into an account-existence oracle: anyone could probe usernames
+    # and learn which ones the roster does not cover, without knowing a
+    # password. Verifying credentials before revealing status means the message
+    # only ever reaches someone who already authenticated as that user.
+    if not user or not verify_password(req.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="invalid username or password")
+
+    if not user.is_active:
+        # Branch 9 part 2. The roster migration disables accounts the client's
+        # roster does not cover, and the client specified this copy verbatim.
+        # Every occurrence is logged so the list can go back to them — that is
+        # the deliverable, not a debugging aid.
+        if user.disabled_reason and user.disabled_reason.startswith("role_migration_"):
+            log.warning(
+                "login denied: unmapped account user=%s reason=%s",
+                user.username, user.disabled_reason,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="access is being updated, contact your supervisor",
+            )
+        # Any other inactive account keeps the original, deliberately
+        # indistinguishable response.
         raise HTTPException(status_code=401, detail="invalid username or password")
 
     user.last_login_at = func.now()
