@@ -16,6 +16,8 @@ The properties that matter, in order:
 import os
 import sys
 
+import pytest
+
 from conftest import load_module
 
 SCRIPTS = os.path.join(
@@ -129,3 +131,115 @@ def test_the_dry_run_reports_the_real_roster_plan(capsys):
         assert username in out
     # And the client's copy is quoted so an operator sees what the user will.
     assert "access is being updated, contact your supervisor" in out
+
+
+# --- apply_plan: the path review round 1 found untested ---------------------
+#
+# R1-MAJOR-001 and -002. The previous version issued `UPDATE ... RETURNING role`
+# and never fetched the result, so a zero-row match committed silently AND still
+# wrote a log row claiming the account had been migrated. It also logged
+# from_role=None always. Both are exercised here with a fake cursor rather than a
+# live database, so they run in CI without infrastructure.
+
+
+class _FakeCursor:
+    """Records statements and answers the locked read from a known account set."""
+
+    def __init__(self, existing):
+        self.existing = dict(existing)   # username -> current role
+        self.statements = []
+        self.logs = []
+        self._last = None
+        self.rowcount = 0
+
+    def execute(self, sql, params=()):
+        self.statements.append((sql, params))
+        if sql.startswith("SELECT role FROM users"):
+            username = params[0]
+            self._last = (self.existing[username],) if username in self.existing else None
+            self.rowcount = 1 if self._last else 0
+        elif sql.startswith("UPDATE users"):
+            username = params[-1]
+            self.rowcount = 1 if username in self.existing else 0
+        elif sql.startswith("INSERT INTO role_migration_log"):
+            self.logs.append(params)
+            self.rowcount = 1
+
+    def fetchone(self):
+        return self._last
+
+
+class _FakeConn:
+    def __init__(self, existing):
+        self.cur = _FakeCursor(existing)
+        self.committed = False
+        self.rolled_back = False
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def test_apply_records_the_role_it_migrated_FROM():
+    """R1-MAJOR-002. `drkim` starts on `clinician` and the rest on the
+    deprecated flat `staff`; the log has to preserve that distinction or it
+    cannot answer "which accounts changed" at all."""
+    conn = _FakeConn({"drkim": "clinician", "drpatel": "staff"})
+    migrations = [
+        _f(dry_run.MIGRATE, "drkim", "clinician"),
+        _f(dry_run.MIGRATE, "drpatel", "clinician"),
+    ]
+
+    migrate.apply_plan(conn, migrations, [], "Jorge")
+
+    logged = {row[0]: (row[1], row[2]) for row in conn.cur.logs}
+    assert logged["drkim"] == ("clinician", "clinician")
+    assert logged["drpatel"] == ("staff", "clinician")
+    assert conn.committed
+
+
+def test_a_missing_account_aborts_everything_and_logs_nothing():
+    """R1-MAJOR-001. The plan comes from the committed seed and is written to
+    whatever DATABASE_URL points at; those can diverge. A log row claiming a
+    migration that did not happen is worse than no migration."""
+    conn = _FakeConn({"drpatel": "staff"})          # drkim absent
+    migrations = [
+        _f(dry_run.MIGRATE, "drpatel", "clinician"),
+        _f(dry_run.MIGRATE, "drkim", "clinician"),
+    ]
+
+    with pytest.raises(migrate.AccountMissing, match="drkim"):
+        migrate.apply_plan(conn, migrations, [], "Jorge")
+
+    assert conn.rolled_back and not conn.committed
+
+
+def test_deactivations_also_record_the_prior_role():
+    conn = _FakeConn({"frontdesk": "staff"})
+
+    migrate.apply_plan(conn, [], [(_f(dry_run.DECIDE_NO_OWNER, "frontdesk"),
+                                   "role_migration_no_owner")], "Jorge")
+
+    row = conn.cur.logs[0]
+    assert row[0] == "frontdesk"
+    assert row[1] == "staff"      # from_role preserved
+    assert row[2] is None         # to_role: nothing was assigned
+
+
+def test_the_locked_read_precedes_every_write():
+    """The lock has to be taken before the UPDATE or two concurrent runs can
+    interleave on the same account."""
+    conn = _FakeConn({"drpatel": "staff"})
+
+    migrate.apply_plan(conn, [_f(dry_run.MIGRATE, "drpatel", "clinician")], [], "Jorge")
+
+    kinds = [s.split()[0] + (" FOR UPDATE" if "FOR UPDATE" in s else "")
+             for s, _ in conn.cur.statements]
+    assert kinds[0] == "SELECT FOR UPDATE"
+    assert kinds[1] == "UPDATE"
+    assert kinds[2] == "INSERT"

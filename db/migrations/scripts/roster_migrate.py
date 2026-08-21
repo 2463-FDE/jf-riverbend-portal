@@ -95,33 +95,90 @@ def format_plan(migrations, deactivations, untouched, applied):
     return "\n".join(out)
 
 
+class AccountMissing(Exception):
+    """A planned account does not exist in the target database.
+
+    The plan is built from the committed seed, then written to whatever
+    DATABASE_URL points at. Those can diverge — a username renamed, an account
+    deleted, a database seeded from a different revision. Aborting the whole
+    transaction is the only safe answer: a log row claiming an account was
+    migrated when no row changed is worse than no migration at all.
+    """
+
+
+def _lock_and_read_role(cur, username: str) -> str:
+    """Lock the target row and return its CURRENT role, or raise.
+
+    Two review findings share this one fix (R1-MAJOR-001, R1-MAJOR-002). The
+    previous version issued `UPDATE ... RETURNING role` and never fetched the
+    result, so a zero-row match committed silently and still wrote a log row
+    saying the account had been migrated. It also passed from_role=None, so the
+    log recorded "to what" but not "from what" — losing the real distinction
+    between `drkim` (already `clinician`) and the accounts on the deprecated
+    flat `staff` role, which is exactly the question the table exists to answer.
+
+    SELECT ... FOR UPDATE both proves the row exists and captures the prior
+    role, under a lock held for the rest of the transaction.
+    """
+    cur.execute("SELECT role FROM users WHERE username = %s FOR UPDATE", (username,))
+    row = cur.fetchone()
+    if row is None:
+        raise AccountMissing(
+            f"account {username!r} is in the approved plan but does not exist in the "
+            f"target database. The plan was built from db/seed/seed.sql; this database "
+            f"has diverged from it. Nothing has been changed."
+        )
+    return row[0]
+
+
+def _log(cur, username, from_role, to_role, finding, approved_by):
+    cur.execute(
+        "INSERT INTO role_migration_log "
+        "(username, from_role, to_role, outcome, detail, roster_name, approved_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (username, from_role, to_role, finding.outcome, finding.detail,
+         finding.roster_name, approved_by),
+    )
+
+
 def apply_plan(conn, migrations, deactivations, approved_by):
     """Single transaction. A partial migration leaves accounts in states nobody
-    signed off on, so this either completes or leaves the database untouched."""
+    signed off on, so this either completes or leaves the database untouched.
+
+    Every write is preceded by a locked read that proves the row exists and
+    yields its prior role. Any missing account aborts everything.
+    """
     cur = conn.cursor()
-    for f in migrations:
-        cur.execute(
-            "UPDATE users SET role = %s, is_active = TRUE, disabled_reason = NULL "
-            "WHERE username = %s RETURNING role",
-            (f.proposed_role, f.subject),
-        )
-        cur.execute(
-            "INSERT INTO role_migration_log "
-            "(username, from_role, to_role, outcome, detail, roster_name, approved_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (f.subject, None, f.proposed_role, f.outcome, f.detail, f.roster_name, approved_by),
-        )
-    for f, reason in deactivations:
-        cur.execute(
-            "UPDATE users SET is_active = FALSE, disabled_reason = %s WHERE username = %s",
-            (reason, f.subject),
-        )
-        cur.execute(
-            "INSERT INTO role_migration_log "
-            "(username, from_role, to_role, outcome, detail, roster_name, approved_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (f.subject, None, None, f.outcome, f.detail, f.roster_name, approved_by),
-        )
+    try:
+        for f in migrations:
+            from_role = _lock_and_read_role(cur, f.subject)
+            cur.execute(
+                "UPDATE users SET role = %s, is_active = TRUE, disabled_reason = NULL "
+                "WHERE username = %s",
+                (f.proposed_role, f.subject),
+            )
+            if cur.rowcount != 1:
+                raise AccountMissing(
+                    f"expected to update exactly one row for {f.subject!r}, "
+                    f"updated {cur.rowcount}. Nothing has been changed."
+                )
+            _log(cur, f.subject, from_role, f.proposed_role, f, approved_by)
+
+        for f, reason in deactivations:
+            from_role = _lock_and_read_role(cur, f.subject)
+            cur.execute(
+                "UPDATE users SET is_active = FALSE, disabled_reason = %s WHERE username = %s",
+                (reason, f.subject),
+            )
+            if cur.rowcount != 1:
+                raise AccountMissing(
+                    f"expected to update exactly one row for {f.subject!r}, "
+                    f"updated {cur.rowcount}. Nothing has been changed."
+                )
+            _log(cur, f.subject, from_role, None, f, approved_by)
+    except Exception:
+        conn.rollback()
+        raise
     conn.commit()
 
 
