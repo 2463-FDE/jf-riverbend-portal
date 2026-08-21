@@ -180,3 +180,49 @@ def test_the_correlation_id_is_one_value_for_the_whole_request():
 
     assert t.correlation_id == "corr-1"
     assert len(t.events) == 7
+
+
+# --- the persistence boundary (adr/0010, decision A) ------------------------ #
+#
+# The draft text IS persisted, as a clinical artifact. The prohibition is scoped
+# to telemetry. These tests pin the telemetry half — the schema half is enforced
+# by migration 020's trigger and CHECK, verified against a live database.
+
+
+@pytest.mark.parametrize("key", [
+    "generated_text", "draft_text", "summary_text", "text", "content",
+    "output", "model_output", "completion", "response", "generated",
+])
+def test_draft_text_can_never_reach_a_trace_under_any_name(key):
+    """adr/0010's boundary, from the telemetry side. The artifact is stored; the
+    telemetry copy is what is forbidden, and it must stay forbidden under every
+    plausible attribute name someone might reach for."""
+    with pytest.raises(ForbiddenPayload):
+        _rec().record(Stage.DISPLAY, **{key: "A1c 6.2%, down from 7.5% in March."})
+
+
+def test_the_prompt_itself_is_forbidden_but_its_version_is_not():
+    """Only prompt_version is persisted or traced. The prompt text stays out of
+    the database exactly as it stays out of the trace."""
+    t = _rec()
+    t.record(Stage.PROVIDER_CALL, prompt_version="v3")
+
+    assert t.events[-1].attributes["prompt_version"] == "v3"
+    with pytest.raises(ForbiddenPayload):
+        t.record(Stage.PROVIDER_CALL, prompt="You are a clinical summariser...")
+
+
+def test_a_display_event_references_a_version_rather_than_carrying_the_text():
+    """This is the shape the whole boundary depends on: telemetry says WHICH
+    version was shown, and the artifact table says what that version says."""
+    t = _rec()
+    event = t.display(draft_version=2, label=ProvenanceLabel.REAL)
+
+    assert event.attributes["draft_version"] == 2
+    assert not any(k in event.attributes for k in ("generated_text", "text", "content"))
+
+
+def test_prompt_version_is_not_accidentally_banned():
+    # The guard must not be so broad that the permitted metadata is unusable.
+    assert "prompt_version" not in FORBIDDEN_KEYS
+    assert "draft_version" not in FORBIDDEN_KEYS

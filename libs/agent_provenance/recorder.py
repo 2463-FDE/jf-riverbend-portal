@@ -71,6 +71,10 @@ FORBIDDEN_KEYS = frozenset(
         "prompt", "prompts", "system_prompt", "user_prompt", "messages",
         "completion", "response", "response_text", "output", "model_output",
         "generated_text", "draft_text", "summary_text", "text", "content",
+        # Near-miss names a caller would plausibly reach for. Added because a
+        # test asked for `generated` and the guard did not have it — exact-match
+        # on the full key, so `draft_version` and `prompt_version` stay allowed.
+        "generated", "generated_summary", "draft", "summary", "reply",
         "body", "raw_body", "raw_response",
         # retrieved material
         "document", "documents", "chunk", "chunks", "retrieved", "retrieved_text",

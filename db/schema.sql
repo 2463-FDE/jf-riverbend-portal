@@ -283,31 +283,13 @@ CREATE INDEX IF NOT EXISTS role_migration_log_username_idx ON role_migration_log
 CREATE INDEX IF NOT EXISTS role_migration_log_outcome_idx ON role_migration_log (outcome);
 
 -- ---------------------------------------------------------------------------
--- Agentic draft provenance (020) — metadata only, NO content by design
+-- Agentic draft provenance (020) — the clinical artifact plus its metadata
 -- ---------------------------------------------------------------------------
---
--- WHAT THIS TABLE HOLDS, AND WHAT IT DELIBERATELY DOES NOT
---
--- The client's constraint is explicit: persist only provenance metadata —
--- source id/version, citation ids, categories, status, timestamps, correlation
--- id. Never persist prompts, model output, retrieved text, patient data,
--- identifiers, credentials, or raw provider errors.
---
--- So there is NO content column here, and that is not an omission. Every column
--- below is metadata about a generation, not the generation.
---
--- ⚠️ OPEN DESIGN QUESTION, deliberately not answered by this migration.
--- `patient_summary_reviews` (018) also stores no text: approval points at a
--- record_id and the DETERMINISTIC renderer regenerates the summary at display
--- time. That works precisely because it is deterministic. A model-generated
--- draft is not reproducible, so "display exactly the approved version" cannot
--- be satisfied by regeneration. Whether the draft text is persisted, and where,
--- is a decision for the user — see w8-planner. This migration is additive and
--- does not foreclose either answer.
---
--- Additive and guarded, so it is safe to re-apply at any prior migration point
--- (see apply.sh).
-
+-- generated_text IS PHI and IS persisted, deliberately (adr/0010): a model
+-- response is not reproducible, so regenerating at display could show a patient
+-- something no clinician approved. The prohibition on persisting model output is
+-- scoped to logs, traces, telemetry and prompts — libs/agent_provenance raises
+-- if draft text is put into a trace. Text is immutable, enforced by trigger.
 CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     id              SERIAL PRIMARY KEY,
     patient_id      INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
@@ -341,6 +323,35 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     -- a message: a validator message could quote the text it rejected.
     validation_code TEXT,
 
+    -- THE CLINICAL ARTIFACT. Immutable once written — see the trigger below.
+    -- This is what the clinician reviews and what the patient is shown; it is
+    -- never regenerated at display time.
+    generated_text  TEXT NOT NULL,
+
+    -- Which prompt produced it. A version identifier, NOT the prompt itself:
+    -- the prompt text stays out of the database exactly as it stays out of
+    -- traces.
+    prompt_version  TEXT,
+
+    -- Reviewer / editor, by user id. An id is a reference; a username is an
+    -- identifier, and identifiers do not belong in metadata columns.
+    reviewed_by     INTEGER REFERENCES users(id),
+    approved_at     TIMESTAMPTZ,
+    rejected_at     TIMESTAMPTZ,
+
+    -- A decided draft must name its decider and its moment, and an undecided
+    -- one must claim neither. Mirrors migration 018's constraint deliberately:
+    -- the review gate's default-deny semantics are the pattern to copy, not to
+    -- reinvent.
+    CONSTRAINT agent_draft_decision_complete CHECK (
+        (status IN ('approved', 'rejected')
+            AND reviewed_by IS NOT NULL
+            AND (approved_at IS NOT NULL OR rejected_at IS NOT NULL))
+        OR
+        (status NOT IN ('approved', 'rejected')
+            AND approved_at IS NULL AND rejected_at IS NULL)
+    ),
+
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -371,6 +382,34 @@ CREATE INDEX IF NOT EXISTS agent_draft_citation_draft_idx
     ON agent_draft_citation (draft_id);
 CREATE INDEX IF NOT EXISTS agent_draft_citation_source_idx
     ON agent_draft_citation (source_id, source_version);
+
+-- IMMUTABILITY. The status of a draft moves (draft -> validated -> approved),
+-- but its TEXT and its version never do. Without this, "the patient sees
+-- exactly the version the clinician approved" is a convention that one UPDATE
+-- silently breaks — and nothing downstream would notice, because the row would
+-- still look approved.
+CREATE OR REPLACE FUNCTION agent_draft_text_is_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.generated_text IS DISTINCT FROM OLD.generated_text THEN
+        RAISE EXCEPTION
+            'agent_draft_provenance.generated_text is immutable (draft id=%, version=%). '
+            'A revised summary is a NEW version, not an edit of an approved one.',
+            OLD.id, OLD.version;
+    END IF;
+    IF NEW.version IS DISTINCT FROM OLD.version
+       OR NEW.patient_id IS DISTINCT FROM OLD.patient_id THEN
+        RAISE EXCEPTION 'agent_draft_provenance identity is immutable (draft id=%)', OLD.id;
+    END IF;
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS agent_draft_immutable_text ON agent_draft_provenance;
+CREATE TRIGGER agent_draft_immutable_text
+    BEFORE UPDATE ON agent_draft_provenance
+    FOR EACH ROW EXECUTE FUNCTION agent_draft_text_is_immutable();
 
 -- ---------------------------------------------------------------------------
 -- Release of Information (ROI)
