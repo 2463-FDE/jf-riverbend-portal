@@ -1,80 +1,97 @@
-# Responsibility matrix — OWNER UNASSIGNED
+# Responsibility matrix — training environment
 
-**Date:** 2026-08-21 · **Status:** every owner unassigned, deliberately
+**Date:** 2026-08-21 · **Status:** operational ownership **not applicable**
+
+> **Scope decision, 2026-08-21.** This is a synthetic training project. There is
+> **no production hosting target** — local Docker Compose only — and **no
+> production operational handover or on-call ownership is in scope.** Bedrock is
+> used solely as an external model-inference provider for synthetic-data
+> testing; it hosts neither the application nor the database.
+>
+> `CODEOWNERS` and operational ownership are therefore **not applicable**, not
+> merely unassigned. The rows below name the code area a future maintainer would
+> read first, which is the part that remains useful.
 
 Week 9 asks that outstanding items are merged or carry a blocker card with a
-moved estimate and a **named owner**. This repository names no owner for any
-area: there is no `CODEOWNERS`, and no internal team, role or individual is
-identified anywhere in the code, ADRs or docs. That gap has been open across
-three reporting cycles.
+moved estimate and a named owner. In a training environment with no production
+deployment, "owner" has no operational meaning: there is no on-call rotation to
+join and no incident for anyone to be paged about.
 
-**Every row below reads `OWNER UNASSIGNED`, and that is the point.** Inventing a
-plausible name would satisfy the template and mislead whoever inherits this on
-Monday — they would page someone who never agreed to be paged. The client
-supplies these names, or the rows stay unassigned and visible.
+So every row reads **N/A (training)** rather than a name or a placeholder. The
+column is retained because the *code areas* are real and a future maintainer
+needs the map; only the operational ownership is out of scope.
 
-Replace a row's owner only with a name the client has actually given.
+If this project were ever deployed for real use, every row would need a named
+owner before that happened. That is recorded here as the condition, not as an
+outstanding request.
 
 ## Areas
 
 | Area | Repository surface | Owner | Notes |
 |---|---|---|---|
-| Gateway / authN + authZ | `services/gateway/` | OWNER UNASSIGNED | Session policy, RBAC grid loading, all outbound internal-token forwarding |
-| Records + patient authorization | `services/records-service/` | OWNER UNASSIGNED | `patient_access_gate.py` is the RIV-201 control; the highest-risk file in the repo |
-| Patient portal (invitation → summary → review) | `services/records-service/{patient_summary,review_queue}.py`, `frontend/app/{my-results,review-queue}` | OWNER UNASSIGNED | The purchased product |
-| Intake + duplicate matching | `services/intake-service/` | OWNER UNASSIGNED | RIV-160 / `adr/0004` match key |
-| Eligibility | `services/eligibility-service/`, `libs/eligibility_agent/` | OWNER UNASSIGNED | Async + circuit breaker; needs a payer credential to settle |
-| Scheduling | `services/scheduling-service/` | OWNER UNASSIGNED | Idempotency keys, booking constraints |
-| HL7 interop | `services/interop-service/` | OWNER UNASSIGNED | Known gap: AL1/RXA dropped (`tests/test_hl7_parser.py` xfail) |
-| Release of information | `services/roi-service/` | OWNER UNASSIGNED | No signed-authorization check; no accounting of disclosures |
-| Roster / role migration | `db/migrations/scripts/roster_dry_run.py`, `db/seed/staff_roster_SYNTHETIC.csv` | OWNER UNASSIGNED | Client roster received 2026-08-19 |
-| Database schema + migrations | `db/schema.sql`, `db/migrations/` | OWNER UNASSIGNED | `schema.sql` is hand-maintained alongside forward migrations |
-| Secrets + configuration | `.env.example`, `docker-compose.yml`, `adr/0007` | OWNER UNASSIGNED | Rotation of the three disclosed values is outstanding |
-| CI | `.github/workflows/ci.yml` | OWNER UNASSIGNED | No dependency, container or secret scanning |
-| Deployment + operations | *nothing in repo* | OWNER UNASSIGNED | **No deploy step exists anywhere.** See blocker B-1 |
-| Backup / recovery | *nothing in repo* | OWNER UNASSIGNED | No `pg_dump`, no restore path |
-| Frontend | `frontend/` | OWNER UNASSIGNED | Nine screens |
+| Gateway / authN + authZ | `services/gateway/` | N/A (training) | Session policy, RBAC grid loading, all outbound internal-token forwarding |
+| Records + patient authorization | `services/records-service/` | N/A (training) | `patient_access_gate.py` is the RIV-201 control; the highest-risk file in the repo |
+| Patient portal (invitation → summary → review) | `services/records-service/{patient_summary,review_queue}.py`, `frontend/app/{my-results,review-queue}` | N/A (training) | The purchased product |
+| Intake + duplicate matching | `services/intake-service/` | N/A (training) | RIV-160 / `adr/0004` match key |
+| Eligibility | `services/eligibility-service/`, `libs/eligibility_agent/` | N/A (training) | Async + circuit breaker. **Simulated** — no payer vendor or endpoint exists (B-2) |
+| Scheduling | `services/scheduling-service/` | N/A (training) | Idempotency keys, booking constraints |
+| HL7 interop | `services/interop-service/` | N/A (training) | Known gap: AL1/RXA dropped (`tests/test_hl7_parser.py` xfail) |
+| Release of information | `services/roi-service/` | N/A (training) | No signed-authorization check; no accounting of disclosures |
+| Roster / role migration | `db/migrations/scripts/roster_dry_run.py`, `db/seed/staff_roster_SYNTHETIC.csv` | N/A (training) | Client roster received 2026-08-19 |
+| Database schema + migrations | `db/schema.sql`, `db/migrations/` | N/A (training) | `schema.sql` is hand-maintained alongside forward migrations |
+| Secrets + configuration | `.env.example`, `docker-compose.yml`, `adr/0007` | N/A (training) | `.env` untracked; template credentials blank. `PAYER_API_KEY` stays blank by decision |
+| CI | `.github/workflows/ci.yml` | N/A (training) | No dependency, container or secret scanning |
+| Deployment + operations | *nothing in repo* | N/A (training) | No deploy step, by design — local Docker Compose only (B-1) |
+| Backup / recovery | *nothing in repo* | N/A (training) | Out of scope: no production data to recover (B-1) |
+| Frontend | `frontend/` | N/A (training) | Nine screens |
 
 ## Blocker cards
 
-Each carries what is blocked, who must resolve it, and a moved estimate. **No
-estimate here is a commitment**, because none of these has an owner to commit.
+Three of the five cards previously here were **closed by scope decisions on
+2026-08-21** rather than resolved by work. They are kept, marked closed, because
+a card that silently disappears looks like it was done.
 
-### B-1 · Deployment target unknown
-- **Blocks:** encryption-at-rest evidence via a managed volume, TLS termination,
-  backup/recovery design, per-service database credentials.
-- **Resolver:** client. Open across three reporting cycles.
-- **Moved estimate:** unschedulable until answered. AWS Bedrock has been named
-  as the model provider, which does not say where Postgres or the services run.
+### B-1 · Deployment target — **CLOSED, not applicable**
+- **Was:** blocking encryption-at-rest evidence, TLS termination, backup design
+  and per-service database credentials.
+- **Resolution:** there is no production hosting target. **Local Docker Compose
+  only.** TLS, backup/recovery and production credential separation are
+  therefore out of scope for this project, and must not be described as gaps
+  against a deployment that does not exist.
+- **Still true:** if this were ever deployed for real use, all four would be
+  prerequisites.
 
-### B-2 · Payer clearinghouse vendor identity and BAA status
-- **Blocks:** the vendor-governance memo; eligibility cannot settle past
-  `pending` without a payer credential.
-- **Resolver:** client.
-- **Moved estimate:** unschedulable.
+### B-2 · Payer clearinghouse and BAA — **CLOSED, not applicable**
+- **Was:** blocking the vendor-governance memo; eligibility cannot settle.
+- **Resolution:** **no payer clearinghouse, live endpoint or real payer data
+  exists in this simulation.** `PAYER_API_KEY` stays blank and eligibility
+  behaviour is labelled simulated. **No BAA is executed, and none is represented
+  as required for a real integration**, because there is no real integration.
+- **Open engineering item, not a blocker:** the placeholder endpoint is still
+  wired to a live `httpx` call, so an eligibility check attempts a real outbound
+  request to a reserved domain and fails. That needs a simulation mode; it is
+  work, not a client question.
 
-### B-3 · No operational owner for any area
-- **Blocks:** every row above; escalation after handover; W9's own acceptance
-  criterion.
-- **Resolver:** client.
-- **Moved estimate:** unschedulable. This card is the reason this document
-  exists rather than a `CODEOWNERS` file.
+### B-3 · Operational ownership — **CLOSED, not applicable**
+- **Was:** no owner named for any area.
+- **Resolution:** no production operational handover or on-call ownership is in
+  scope for a training environment. `CODEOWNERS` is not applicable.
 
-### B-4 · Runtime verification unavailable in the working environment
-- **Blocks:** the integration/acceptance suite (95 tests collect but do not
-  run), the five unbaselined client metrics, and any live denial proof.
-- **Resolver:** local environment — `docker compose config` currently fails on a
-  missing `INTERNAL_SERVICE_TOKEN`, which is set locally and never committed.
-- **Moved estimate:** hours once the stack starts; the tests exist.
+### B-4 · Runtime verification — **OPEN**
+- **Blocks:** the integration/acceptance suite (95 tests collect), the five
+  unbaselined client metrics, and every live denial proof.
+- **Resolver:** local environment. `docker compose config` passes as of
+  2026-08-21; the remaining step is starting the stack and running the suite.
+- **Moved estimate:** hours. The tests exist.
 
-### B-5 · Week 8 scope conflict
-- **Blocks:** knowing what Week 8 delivers. `Weekly-Deliverables-updatedAug10.docx`
-  assigns a Safe-Harbor de-identification scrub, a data-flow/BAA memo and a
-  recommendation gate. The planning skill lists de-identification and vendor
-  assurance as explicitly out of cycle and plans compliance/roster work instead.
-- **Resolver:** Jorge, then client.
-- **Moved estimate:** the de-identification scrub is days of work and has not
-  started.
+### B-5 · Week 8 scope — **RESOLVED**
+- **Was:** the deliverables document assigns a Safe-Harbor de-identification
+  scrub, a data-flow/BAA memo and a recommendation gate; the planning skill
+  listed de-identification as out of cycle.
+- **Resolution:** both tracks, minimal each (2026-08-21). The scrub and the
+  recommendation gate are built; the memo is outstanding and must be written to
+  the simulation scope above — describing the pattern, not asserting a live
+  disclosure or an executed agreement.
 
 ## What someone inheriting this on Monday needs first
 
