@@ -94,14 +94,24 @@ jobs:
         # the real secret isn't available, and only ever use the real
         # secret when one is configured. Actual deployments still get the
         # real secret via env_file: .env, untouched by this fallback.
+        #
+        # 2026-08-20 (C2): DB_PASSWORD joined the same category. `.env` used to
+        # be committed, so compose interpolation quietly resolved it from the
+        # tracked file; untracking `.env` made this step fail, which is the
+        # fail-fast doing its job — it found a place that depended on a
+        # committed secret. Same throwaway-value treatment, same reasoning: this
+        # step builds images and never starts a container, so it needs *a*
+        # value, not the real one.
         run: |
-          if [ -n "${INTERNAL_SERVICE_TOKEN:-}" ]; then
-            echo "Using INTERNAL_SERVICE_TOKEN from repository secret."
-          else
-            echo "No INTERNAL_SERVICE_TOKEN secret available (e.g. a fork PR) — generating a throwaway build-only value."
-            INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
-            export INTERNAL_SERVICE_TOKEN
-          fi
+          for var in INTERNAL_SERVICE_TOKEN DB_PASSWORD; do
+            if [ -n "$(eval "echo \"\${$var:-}\"")" ]; then
+              echo "Using $var from repository secret."
+            else
+              echo "No $var secret available (e.g. a fork PR) — generating a throwaway build-only value."
+              export "$var=$(openssl rand -hex 32)"
+            fi
+          done
           docker compose build
         env:
           INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
