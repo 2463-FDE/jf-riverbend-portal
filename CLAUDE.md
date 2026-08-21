@@ -186,7 +186,14 @@ open here as open until the code says otherwise.
   module docstring for the full review history.
   `services/intake-service/logging_config.py`'s docstring still described the
   old, unremediated behavior and has been corrected in this pass.
-- `README.md` states "All PHI is encrypted and the system is fully HIPAA compliant" — this is contradicted by `adr/0002` and `ARCHITECTURE.md` §7. Treat that claim as unverified, not fact.
+- **Corrected 2026-08-20 (AUD-12):** `README.md` line 1 and its Compliance
+  section asserted blanket PHI encryption and HIPAA compliance from the initial
+  scaffold. Both were false — `dob`, `ssn` and `notes` are plain text — and both
+  are now replaced with the actual posture. `db/schema.sql`'s separate
+  disk-encryption claim went the same way; there is no managed-database
+  deployment behind it. The recorded risk decision is `adr/0008`, and
+  `tests/test_compliance_claims.py` fails if either claim returns. **PHI is not
+  encrypted at rest: do not describe it as protected.**
 - Gateway-to-service authentication is now **partial**: `intake-service` and
   `records-service` verify a shared `INTERNAL_SERVICE_TOKEN` (fails closed if
   unset — see `services/gateway/config.py`, `services/records-service/app.py`,

@@ -73,8 +73,13 @@ deterministically by `db/seed/generate_seed.py` → `db/seed/seed.sql`
 (~250 patients, ~475 encounters, ~690 records, plus appointments, slots,
 insurance, ROI requests, and audit rows).
 
-Encryption is handled at the storage layer (volume encryption) + TLS in transit;
-PHI columns (`ssn`, `notes`, …) are stored as plain `TEXT` (see `adr/0002`).
+**There is no encryption anywhere in this system.** PHI columns (`ssn`,
+`notes`, `dob`) are plain `TEXT`, and `ssn_digits` is a generated, indexed copy
+of the SSN. Nothing is encrypted at the storage layer — the deployment is
+docker compose with a local `pgdata` volume — and no hop uses TLS, including
+`/login`. This paragraph previously claimed storage-layer encryption and TLS in
+transit; both were false. See `adr/0008` for the recorded risk decision and
+`adr/0002` for the original data-and-compliance discussion.
 
 ## 6. External integrations
 
