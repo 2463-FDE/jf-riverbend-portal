@@ -41,6 +41,14 @@ history.**
 2. `docker-compose.yml` no longer defaults `POSTGRES_PASSWORD` to `changeme`.
    It uses the `${VAR:?message}` form, so a missing value stops compose rather
    than booting a stack on a guessable credential.
+
+   ⚠️ **That alone was not enough.** Compose's failure message points a new
+   operator at copying `.env.example`, which itself shipped
+   `DB_PASSWORD=changeme` — so the *documented setup path* still booted Postgres
+   on a predictable credential. The control was bypassed one file over, in the
+   file the error message recommends. Every credential-shaped key in the
+   template now ships EMPTY: a template that starts a working stack is a
+   template nobody edits.
 3. The disclosed values are rotated on the following schedule, agreed
    2026-08-20:
 

@@ -160,3 +160,60 @@ def test_ci_supplies_every_variable_compose_requires():
         f"mentions them, so docker-build will fail on interpolation. Add each to the "
         f"build step's env and its throwaway-value fallback."
     )
+
+
+# A key whose NAME says it holds a credential. Model ids and hostnames are not
+# credentials, so `OPENAI_MODEL=changeme` is untidy but harmless — a guard that
+# flagged it would be noise, and noisy guards get deleted.
+_CREDENTIAL_KEY = re.compile(r"(PASSWORD|SECRET|TOKEN|_KEY|APIKEY)$", re.I)
+
+# Values that look like a credential but are not one. Shipping any of these is
+# worse than shipping nothing: a template that boots is a template nobody edits.
+_PLACEHOLDERS = {"changeme", "change_me", "password", "secret", "example", "todo", "xxx"}
+
+
+def test_no_tracked_env_template_ships_a_placeholder_credential():
+    """Review C2-TEMPLATE-CHANGEME-DB.
+
+    Removing docker-compose.yml's `${DB_PASSWORD:-changeme}` fallback did less
+    than it appeared to: compose's failure message points a new operator at
+    copying `.env.example`, which shipped `DB_PASSWORD=changeme`. So the
+    documented setup path still booted Postgres on a predictable credential —
+    the control was bypassed one file over, in the file the message recommends.
+
+    Empty is the only safe value here. A template that starts a working stack is
+    a template nobody edits.
+    """
+    templates = [f for f in _tracked_files() if f.endswith(".example") or f.endswith(".env.template")]
+    assert templates, "expected at least .env.example to be tracked"
+
+    offenders = []
+    for rel in templates:
+        for i, line in enumerate((REPO / rel).read_text().splitlines(), start=1):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if not _CREDENTIAL_KEY.search(key.strip()):
+                continue
+            if value.strip().strip('"\'').lower() in _PLACEHOLDERS:
+                offenders.append(f"{rel}:{i} {key.strip()}")
+
+    assert not offenders, (
+        f"placeholder credentials in a tracked template: {offenders}. Ship these EMPTY "
+        f"and document how to generate a real value — a template that boots on a "
+        f"guessable secret is the setup path everyone follows."
+    )
+
+
+def test_the_placeholder_guard_actually_discriminates():
+    """The allowance for non-credential keys is the risky half of the test above."""
+    assert _CREDENTIAL_KEY.search("DB_PASSWORD")
+    assert _CREDENTIAL_KEY.search("PAYER_API_KEY")
+    assert _CREDENTIAL_KEY.search("SESSION_SECRET")
+    assert _CREDENTIAL_KEY.search("INTERNAL_SERVICE_TOKEN")
+    # Not credentials — a model id or a hostname naming itself "changeme" is
+    # untidy, not a vulnerability.
+    assert not _CREDENTIAL_KEY.search("OPENAI_MODEL")
+    assert not _CREDENTIAL_KEY.search("BEDROCK_MODEL_ID")
+    assert not _CREDENTIAL_KEY.search("DB_HOST")
