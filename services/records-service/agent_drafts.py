@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from logging_config import configure
 from models import AgentDraftCitation, AgentDraftProvenance
 from config import settings
@@ -70,6 +71,7 @@ def create_draft(
     model_id: Optional[str] = None,
     prompt_version: Optional[str] = None,
     citations: Iterable[dict] = (),
+    trace: Optional[TraceRecorder] = None,
 ) -> AgentDraftProvenance:
     """Persist a new draft version and its citations.
 
@@ -114,11 +116,27 @@ def create_draft(
         "agent draft created (correlation_id=%s patient_id=%s version=%s label=%s)",
         correlation_id, patient_id, draft.version, provenance_label,
     )
+    if trace is not None:
+        # Citation ids and counts, never the citations' content and never the
+        # draft text — libs.agent_provenance raises if either is attempted, so
+        # this call is also a live assertion that we are not leaking.
+        cite_list = list(citations)
+        trace.retrieval(
+            document_count=len({c["source_id"] for c in cite_list}),
+            citation_ids=[c["citation_id"] for c in cite_list],
+            categories=sorted({c.get("category") for c in cite_list if c.get("category")}),
+        )
+        trace.provider_call(
+            label=ProvenanceLabel(provenance_label),
+            model_id=model_id,
+            prompt_version=prompt_version,
+        )
     return draft
 
 
 def record_validation(db: Session, draft: AgentDraftProvenance, *, passed: bool,
-                      validation_code: Optional[str] = None) -> AgentDraftProvenance:
+                      validation_code: Optional[str] = None,
+                      trace: Optional[TraceRecorder] = None) -> AgentDraftProvenance:
     """Deterministic validation's verdict.
 
     A refusal is terminal for that version: `refused` is not a state a review can
@@ -136,11 +154,18 @@ def record_validation(db: Session, draft: AgentDraftProvenance, *, passed: bool,
         "agent draft validation (correlation_id=%s version=%s passed=%s code=%s)",
         draft.correlation_id, draft.version, passed, validation_code,
     )
+    if trace is not None:
+        trace.validation(
+            passed=passed,
+            validation_code=validation_code,
+            citation_ids=[c.citation_id for c in citations_for(db, draft.id)],
+        )
     return draft
 
 
 def decide(db: Session, draft: AgentDraftProvenance, *, approve: bool,
-           reviewed_by: int) -> AgentDraftProvenance:
+           reviewed_by: int,
+           trace: Optional[TraceRecorder] = None) -> AgentDraftProvenance:
     """The clinician gate. Points at THIS version, by construction.
 
     Only a validated draft is decidable. A refused draft cannot be approved —
@@ -176,10 +201,17 @@ def decide(db: Session, draft: AgentDraftProvenance, *, approve: bool,
         "agent draft decided (correlation_id=%s version=%s approved=%s by_user_id=%s)",
         draft.correlation_id, draft.version, approve, reviewed_by,
     )
+    if trace is not None:
+        trace.review(
+            decision=APPROVED if approve else REJECTED,
+            draft_version=draft.version,
+            decided_by_user_id=reviewed_by,
+        )
     return draft
 
 
-def approved_draft(db: Session, patient_id: int) -> Optional[AgentDraftProvenance]:
+def approved_draft(db: Session, patient_id: int,
+                   trace: Optional[TraceRecorder] = None) -> Optional[AgentDraftProvenance]:
     """The one version a patient may see, or None.
 
     Default deny, exactly like the review gate: no approved row means nothing is
@@ -188,12 +220,20 @@ def approved_draft(db: Session, patient_id: int) -> Optional[AgentDraftProvenanc
     regeneration could differ from what was approved.
     """
     try:
-        return db.execute(
+        draft = db.execute(
             select(AgentDraftProvenance).where(
                 AgentDraftProvenance.patient_id == patient_id,
                 AgentDraftProvenance.status == APPROVED,
             )
         ).scalars().one_or_none()
+        if trace is not None and draft is not None:
+            # WHICH version was shown, and under what label. Not what it said —
+            # that is the whole boundary adr/0010 draws.
+            trace.display(
+                draft_version=draft.version,
+                label=ProvenanceLabel(draft.provenance_label),
+            )
+        return draft
     except SQLAlchemyError:
         log.exception("approved_draft: database error for patient_id=%s", patient_id)
         raise

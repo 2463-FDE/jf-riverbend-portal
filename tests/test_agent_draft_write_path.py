@@ -22,6 +22,8 @@ from conftest import load_module
 # separately would register `patients` twice in the same MetaData.
 drafts = load_module("services/records-service/agent_drafts.py", "agent_drafts_mod")
 
+from libs.agent_provenance import ForbiddenPayload, Stage, TraceRecorder  # noqa: E402
+
 TEXT_V1 = "Your A1c is 6.2%, down from 7.5% in March."
 TEXT_V2 = "Your A1c is 6.2%, down 1.3 points since March."
 CORR = "corr-test-1"
@@ -213,3 +215,136 @@ def test_the_provenance_label_reaches_the_displayed_version(db, label, model):
                                                passed=True), approve=True, reviewed_by=13)
 
     assert drafts.approved_draft(db, 1042).provenance_label == label
+
+
+# --- the trace, threaded through the real transitions ----------------------- #
+#
+# The client requires ONE privacy-safe trace covering request, agent decisions,
+# retrieval outcome, provider call, validation, draft version, review decision
+# and approved display. These assert it against the actual write path rather
+# than against a hand-built recorder, because a trace that only holds together
+# in a unit test is not evidence.
+
+CITES = [
+    {"source_id": "doc-1", "source_version": "v2", "citation_id": "c1", "category": "lab"},
+    {"source_id": "doc-1", "source_version": "v2", "citation_id": "c2", "category": "lab"},
+    {"source_id": "doc-2", "source_version": "v1", "citation_id": "c3", "category": "vitals"},
+]
+
+
+def test_one_trace_covers_all_seven_stages_through_the_real_path(db):
+    trace = TraceRecorder(correlation_id=CORR)
+    trace.request(actor_role="patient")
+    trace.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+
+    draft = drafts.create_draft(
+        db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
+        provenance_label=drafts.LABEL_REAL, model_id="model-x", prompt_version="v1",
+        citations=CITES, trace=trace,
+    )
+    drafts.record_validation(db, draft, passed=True, trace=trace)
+    drafts.decide(db, draft, approve=True, reviewed_by=13, trace=trace)
+    drafts.approved_draft(db, 1042, trace=trace)
+
+    assert trace.is_complete(), f"missing stages: {trace.missing_stages()}"
+
+
+def test_the_trace_carries_citation_ids_and_counts_not_content(db):
+    trace = TraceRecorder(correlation_id=CORR)
+    drafts.create_draft(
+        db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
+        provenance_label=drafts.LABEL_REAL, model_id="model-x", citations=CITES, trace=trace,
+    )
+
+    retrieval = next(e for e in trace.events if e.stage is Stage.RETRIEVAL)
+    assert retrieval.attributes["citation_ids"] == ["c1", "c2", "c3"]
+    assert retrieval.attributes["document_count"] == 2, "two distinct sources, three citations"
+    assert retrieval.attributes["categories"] == ["lab", "vitals"]
+
+
+def test_no_stage_of_the_real_path_ever_carries_the_draft_text(db):
+    """The boundary, asserted end to end. The text is in the database; it is not
+    in the trace, and the guard would have raised if any stage tried."""
+    trace = TraceRecorder(correlation_id=CORR)
+    draft = drafts.create_draft(
+        db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
+        provenance_label=drafts.LABEL_REAL, model_id="model-x", citations=CITES, trace=trace,
+    )
+    drafts.record_validation(db, draft, passed=True, trace=trace)
+    drafts.decide(db, draft, approve=True, reviewed_by=13, trace=trace)
+    drafts.approved_draft(db, 1042, trace=trace)
+
+    serialised = repr([e.attributes for e in trace.events])
+    assert TEXT_V1 not in serialised
+    assert "A1c" not in serialised, "not even a fragment of the clinical text"
+
+
+def test_the_display_stage_names_the_version_that_was_shown(db):
+    trace = TraceRecorder(correlation_id=CORR)
+    draft = _create(db)
+    drafts.record_validation(db, draft, passed=True)
+    drafts.decide(db, draft, approve=True, reviewed_by=13)
+    drafts.approved_draft(db, 1042, trace=trace)
+
+    shown = next(e for e in trace.events if e.stage is Stage.DISPLAY)
+    assert shown.attributes["draft_version"] == 1
+    assert shown.attributes["provenance_label"] == drafts.LABEL_REAL
+
+
+def test_nothing_is_traced_when_there_is_nothing_approved_to_show(db):
+    """A display event for a patient who was shown nothing would be a false
+    record of a disclosure."""
+    trace = TraceRecorder(correlation_id=CORR)
+    _create(db)  # created, never approved
+
+    assert drafts.approved_draft(db, 1042, trace=trace) is None
+    assert not any(e.stage is Stage.DISPLAY for e in trace.events)
+
+
+def test_a_refusal_is_traced_with_its_code_and_no_review_follows(db):
+    trace = TraceRecorder(correlation_id=CORR)
+    draft = _create(db)
+    drafts.record_validation(db, draft, passed=False, validation_code="UNSUPPORTED_CLAIM",
+                             trace=trace)
+
+    validation = next(e for e in trace.events if e.stage is Stage.VALIDATION)
+    assert validation.attributes["passed"] is False
+    assert validation.attributes["validation_code"] == "UNSUPPORTED_CLAIM"
+    assert not any(e.stage is Stage.REVIEW for e in trace.events)
+
+
+def test_the_provider_stage_records_the_prompt_version_not_the_prompt(db):
+    trace = TraceRecorder(correlation_id=CORR)
+    drafts.create_draft(
+        db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
+        provenance_label=drafts.LABEL_REAL, model_id="model-x", prompt_version="v3",
+        trace=trace,
+    )
+
+    call = next(e for e in trace.events if e.stage is Stage.PROVIDER_CALL)
+    assert call.attributes["prompt_version"] == "v3"
+    assert call.attributes["model_id"] == "model-x"
+    assert "prompt" not in call.attributes
+
+
+def test_a_fallback_draft_traces_as_fallback_with_no_model(db):
+    trace = TraceRecorder(correlation_id=CORR)
+    drafts.create_draft(
+        db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
+        provenance_label=drafts.LABEL_FALLBACK, model_id=None, trace=trace,
+    )
+
+    call = next(e for e in trace.events if e.stage is Stage.PROVIDER_CALL)
+    assert call.attributes["provenance_label"] == "fallback"
+    assert call.attributes["model_id"] is None
+
+
+def test_the_write_path_works_without_a_trace_at_all(db):
+    """Tracing is threaded, not required. A caller that passes no recorder must
+    still get correct behaviour — otherwise observability becomes a dependency
+    of correctness."""
+    draft = _create(db)
+    drafts.record_validation(db, draft, passed=True)
+    drafts.decide(db, draft, approve=True, reviewed_by=13)
+
+    assert drafts.approved_draft(db, 1042).version == 1
