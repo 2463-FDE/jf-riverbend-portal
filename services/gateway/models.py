@@ -27,6 +27,10 @@ class User(Base):
     # the constraint where it belongs — in the database.
     patient_id = Column(Integer)
     is_active = Column(Boolean, nullable=False, default=True)
+    # WHY the account is inactive (migration 019). Login refuses every inactive
+    # account, but the roster migration needs the reason so an unmapped user
+    # gets the client's specified message instead of "invalid credentials".
+    disabled_reason = Column(Text)
     last_login_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
