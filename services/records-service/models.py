@@ -140,3 +140,63 @@ class PatientSummaryReview(Base):
     decided_at = Column(TIMESTAMP(timezone=True))
     decision_note = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class AgentDraftProvenance(Base):
+    """A model-generated summary draft: the clinical artifact plus its provenance.
+
+    Migration 020, decided in `adr/0010`. Two things about this table are easy to
+    get wrong and both are enforced in the database rather than here:
+
+    1. **`generated_text` is immutable.** A revision is a NEW version, never an
+       edit of an approved one — a `BEFORE UPDATE` trigger raises otherwise.
+       `status` may still move (`draft` -> `validated` -> `approved`).
+    2. **A decided draft must name its decider**, and an undecided one must
+       claim neither reviewer nor timestamp (CHECK constraint, mirroring 018).
+
+    ⚠️ `generated_text` is PERSISTED PHI and is currently UNENCRYPTED — it is in
+    scope for the encryption work but that has not landed. Synthetic data only.
+    It must never be copied into a trace, a log or a prompt; `libs.agent_provenance`
+    raises if anything tries.
+    """
+
+    __tablename__ = "agent_draft_provenance"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, nullable=False)
+    version = Column(Integer, nullable=False)
+    status = Column(Text, nullable=False, default="draft")
+    provenance_label = Column(Text, nullable=False)
+    correlation_id = Column(Text, nullable=False)
+    model_id = Column(Text)
+    validation_code = Column(Text)
+    generated_text = Column(Text, nullable=False)
+    prompt_version = Column(Text)
+    reviewed_by = Column(Integer)
+    approved_at = Column(TIMESTAMP(timezone=True))
+    rejected_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("patient_id", "version", name="agent_draft_patient_version"),)
+
+
+class AgentDraftCitation(Base):
+    """One citation a draft made, pinned to the SOURCE VERSION it cited.
+
+    Source version matters: an approved document can be superseded, and an
+    approval has to stay interpretable against what was actually cited rather
+    than against whatever that source says later.
+    """
+
+    __tablename__ = "agent_draft_citation"
+
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("agent_draft_provenance.id"), nullable=False)
+    source_id = Column(Text, nullable=False)
+    source_version = Column(Text, nullable=False)
+    citation_id = Column(Text, nullable=False)
+    category = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("draft_id", "citation_id", name="agent_draft_citation_unique"),)
