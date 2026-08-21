@@ -328,6 +328,29 @@ def build_report(roster, accounts, known_roles=None):
                     ),
                 )
             )
+        elif person.status != "active":
+            # Review R2-MAJOR-001. This branch did not exist, so any status
+            # that was not exactly "terminated" or "leave" fell through to the
+            # role lookup below and was MIGRATED — on an account that already
+            # exists, which is the population this whole report exists to gate.
+            # A typo like "sabbatical" silently changed somebody's role.
+            #
+            # The no-account path had this guard from the start; the matched
+            # path did not, and the round-1 test only exercised the former,
+            # which is why it survived a review. Never infer "active" from the
+            # absence of a recognised status.
+            findings.append(
+                Finding(
+                    outcome=UNKNOWN_STATUS,
+                    subject=acct.username,
+                    detail=(
+                        f'{person.name} has roster status "{person.raw_status or person.status}", '
+                        f"which has no defined handling. Not migrated — define the status or "
+                        f"correct the roster first."
+                    ),
+                    roster_name=person.name,
+                )
+            )
         else:
             role = role_for_function(person.function, known_roles)
             if role is None:

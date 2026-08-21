@@ -507,3 +507,50 @@ def test_the_shipped_roster_genuinely_agrees_with_the_client():
     # person it matched, which is what the cross-check needs.
     migrated = _outcomes(findings, dry_run.MIGRATE)
     assert migrated and all(f.roster_name for f in migrated)
+
+
+def test_an_unrecognised_status_on_a_MATCHED_account_is_never_migrated():
+    """Review R2-MAJOR-001 — the gap the round-1 test could not see.
+
+    The status guard existed only on the no-account path, so a status that was
+    not exactly "terminated" or "leave" fell through to the role lookup and
+    MIGRATED an account that already exists. That is the population the report
+    exists to gate: a typo silently changed somebody's role.
+
+    The pre-existing test at test_an_unrecognised_status_is_reported_not_filtered_out
+    passes an EMPTY account list, which is why it never caught this.
+    """
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Main", "sabbatical",
+                        raw_status="sabbatical")]
+    accounts = [Account("abyron", "Ada Byron", "staff", True)]
+
+    findings = dry_run.build_report(roster, accounts, known_roles={"clinician"})
+
+    assert not _outcomes(findings, dry_run.MIGRATE), "an undefined status must never migrate"
+    assert [f.outcome for f in findings] == [dry_run.UNKNOWN_STATUS]
+    finding = findings[0]
+    assert finding.subject == "abyron"
+    assert finding.proposed_role is None
+    # Quote what the roster said, so an operator can find and fix the row.
+    assert "sabbatical" in finding.detail
+
+
+def test_a_recognised_status_on_a_matched_account_still_migrates():
+    # The guard must not be so broad that it blocks the normal path — that
+    # would turn a silent-migration bug into a silent-nothing-happens bug.
+    roster = [RosterRow("Ada Byron", "Physician", "Clinical", "Main", "active")]
+    accounts = [Account("abyron", "Ada Byron", "staff", True)]
+
+    findings = dry_run.build_report(roster, accounts, known_roles={"clinician"})
+
+    assert [f.outcome for f in findings] == [dry_run.MIGRATE]
+    assert findings[0].proposed_role == "clinician"
+
+
+def test_the_shipped_roster_has_no_undefined_statuses_on_matched_accounts():
+    # Belt and braces on the real data: the client's dated statuses normalise
+    # cleanly, so nothing should be sitting in this bucket today.
+    roster = dry_run.read_roster(ROSTER_CSV)
+    findings = dry_run.build_report(roster, dry_run.read_accounts_from_seed(SEED_SQL))
+
+    assert not _outcomes(findings, dry_run.UNKNOWN_STATUS)
