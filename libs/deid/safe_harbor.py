@@ -81,6 +81,40 @@ RESIDUAL_RISK_CATEGORIES = {
     "R": "open-ended by definition — a rare condition plus a small clinic identifies",
 }
 
+# Sensitive field NAME -> the Safe Harbor category that field actually holds.
+#
+# Review DEID-REPORT-CATEGORY: every structured key was reported as category A
+# ("names") regardless of content, so `ssn` counted as A rather than G and the
+# report stopped being a category ledger — which is what adr/0009's gate
+# enumerates residual risk against. A field whose name is not listed here falls
+# back to R, "any other unique identifying number, characteristic, or code",
+# which is the honest bucket for an unclassified identifier rather than a guess.
+_FIELD_CATEGORY = {
+    "name": "A", "first_name": "A", "last_name": "A", "patient_name": "A",
+    "full_name": "A",
+    "address": "B", "street_address": "B", "city": "B", "state": "B",
+    "zip_code": "B",
+    "dob": "C", "date_of_birth": "C",
+    "phone": "D", "phone_number": "D",
+    "email": "F",
+    "ssn": "G", "social_security_number": "G",
+    "api_key": "R", "authorization": "R", "token": "R", "session_token": "R",
+    "password": "R",
+    # Clinical free-text and model payloads are not one of the eighteen
+    # identifier categories — they are the CONTENT those identifiers appear in.
+    # Reported under R so they are visible in the ledger without being
+    # miscounted as a specific identifier type.
+    "notes": "R", "clinical_notes": "R", "diagnosis": "R", "allergies": "R",
+    "medications": "R", "prompt": "R", "response": "R", "completion": "R",
+    "raw_body": "R", "body": "R",
+}
+
+
+def field_category(field_name: str) -> str:
+    """Safe Harbor category for a sensitive field name; R when unclassified."""
+    return _FIELD_CATEGORY.get(field_name.lower(), "R")
+
+
 # --- patterns, most specific first ----------------------------------------- #
 # Each entry: (category letter, name, compiled pattern, replacement)
 _PATTERNS = [
@@ -195,7 +229,7 @@ def scrub_structured(payload: Any, known_identifiers: Iterable[str] = ()) -> tup
             result = {}
             for k, v in node.items():
                 if isinstance(k, str) and k.lower() in SENSITIVE_FIELD_NAMES:
-                    _bump(report, "A", f"field:{k.lower()}", 1)
+                    _bump(report, field_category(k), f"field:{k.lower()}", 1)
                     result[k] = MASK
                 else:
                     result[k] = walk(v)

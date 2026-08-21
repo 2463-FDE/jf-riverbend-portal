@@ -12,6 +12,7 @@ from .safe_harbor import (
     DeidReport,
     IDENTIFIER_CATEGORIES,
     RESIDUAL_RISK_CATEGORIES,
+    field_category,
     scrub,
     scrub_structured,
 )
@@ -19,6 +20,7 @@ from .safe_harbor import (
 __all__ = [
     "scrub",
     "scrub_structured",
+    "field_category",
     "DeidReport",
     "IDENTIFIER_CATEGORIES",
     "RESIDUAL_RISK_CATEGORIES",

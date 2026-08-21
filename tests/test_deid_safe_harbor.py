@@ -12,6 +12,7 @@ import pytest
 
 from libs.deid import (
     IDENTIFIER_CATEGORIES,
+    field_category,
     RESIDUAL_RISK_CATEGORIES,
     scrub,
     scrub_structured,
@@ -154,3 +155,49 @@ def test_the_field_name_list_is_shared_not_duplicated():
     from libs.safe_logging.redact import SENSITIVE_FIELD_NAMES
 
     assert safe_harbor.SENSITIVE_FIELD_NAMES is SENSITIVE_FIELD_NAMES
+
+
+# --- the report must be a real category ledger (review DEID-REPORT-CATEGORY) ---
+
+
+@pytest.mark.parametrize("field,category", [
+    ("ssn", "G"), ("social_security_number", "G"),
+    ("email", "F"),
+    ("dob", "C"), ("date_of_birth", "C"),
+    ("phone", "D"),
+    ("name", "A"), ("first_name", "A"), ("patient_name", "A"),
+    ("address", "B"), ("zip_code", "B"),
+])
+def test_each_sensitive_field_reports_its_real_category(field, category):
+    """Every structured key used to report as A regardless of content, so `ssn`
+    counted as "names". That stops the report being a category ledger, which is
+    what adr/0009's gate enumerates residual risk against."""
+    _, report = scrub_structured({field: "whatever"})
+
+    assert list(report.counts) == [f"{category}:field:{field}"]
+
+
+def test_an_unclassified_sensitive_field_falls_back_to_R():
+    # R is "any other unique identifying number, characteristic, or code" — the
+    # honest bucket for something unclassified, rather than guessing a category.
+    assert field_category("token") == "R"
+    assert field_category("some_field_added_later") == "R"
+
+
+def test_clinical_free_text_is_not_miscounted_as_an_identifier_type():
+    # `notes` and model payloads are the CONTENT identifiers appear in, not one
+    # of the eighteen categories. Visible in the ledger, not mislabelled.
+    for field in ("notes", "prompt", "response", "body"):
+        assert field_category(field) == "R"
+
+
+def test_every_mapped_category_is_a_real_safe_harbor_letter():
+    from libs.deid import safe_harbor
+
+    assert set(safe_harbor._FIELD_CATEGORY.values()) <= set(IDENTIFIER_CATEGORIES)
+
+
+def test_a_mixed_payload_reports_distinct_categories():
+    _, report = scrub_structured({"ssn": "1", "email": "x@y.org", "dob": "2026-03-02"})
+
+    assert {k.split(":", 1)[0] for k in report.counts} == {"G", "F", "C"}
