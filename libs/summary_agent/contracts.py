@@ -7,6 +7,7 @@ exists to be recomputed, and doing that in binary floating point would make
 describe, and dropping it silently would hide that.
 """
 import json
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal, Optional, Union
@@ -65,6 +66,12 @@ class StructuredDraft(BaseModel):
         return list(dict.fromkeys(c.citation_id for c in self.claims))
 
 
+# Bedrock returns the JSON inside a ```json fence. Stripping it is a transport
+# detail, not a loosening of the contract: what is inside still has to satisfy
+# the schema, the discriminated union and every validation rule unchanged.
+_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+
+
 class DraftParseError(ValueError):
     """The model returned something that is not a draft. Carries no model text."""
 
@@ -76,6 +83,9 @@ def parse_draft(payload: str) -> StructuredDraft:
     not reach a log or a trace even on an error path. Claims go through a
     discriminated union, so an unknown `kind` is a parse failure rather than a
     silently dropped claim."""
+    fenced = _FENCE.match(payload or "")
+    if fenced:
+        payload = fenced.group(1)
     try:
         raw = json.loads(payload)
     except (ValueError, TypeError) as exc:
