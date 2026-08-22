@@ -333,7 +333,7 @@ CREATE TABLE IF NOT EXISTS rag_embeddings (
     model        TEXT NOT NULL DEFAULT '',  -- e.g. OLLAMA_EMBED_MODEL; '' for the fake provider
     dimension    INTEGER NOT NULL,
     content_hash TEXT NOT NULL,             -- sha256 of the embedded text; drives re-embed/re-write skip
-    embedding    VECTOR(768) NOT NULL,      -- nomic-embed-text (Ollama) dimension; see migration 011
+    embedding    VECTOR(16) NOT NULL,       -- matches migration 010 and FakeEmbeddingProvider (16-dim)
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (record_id, provider, model)
