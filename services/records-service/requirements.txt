@@ -2,8 +2,26 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
-pydantic==2.10.4
+# Bumped 2.10.4 -> 2.10.6 for this service only: langchain-aws==1.7.3 requires
+# pydantic>=2.10.6. Patch bump; fastapi==0.115.6 and langchain-core accept it.
+pydantic==2.10.6
 
 # config/roles.yaml loader (roles_config.py) — the signed permission matrix,
 # enforced here at the data boundary rather than only at the gateway.
 PyYAML==6.0.2
+
+# ── Agent dependency set for the Week-8 patient-summary agent (D1) ──
+# records-service is the chosen agent host (w8-planner: it owns the grant check,
+# summary, review gate and draft persistence). It will run a LangChain v1
+# tool-calling agent over a DIRECT Bedrock Converse call. This is a TESTED-
+# COMPATIBLE set on python:3.12-slim — the five pins install together and
+# provide langchain.agents.create_agent (v1 agent API) and
+# langchain_aws.ChatBedrockConverse. botocore 1.43.78 is bearer-token-capable
+# (generic AWS_BEARER_TOKEN_<SERVICE> resolver), replacing the non-bearer
+# boto3==1.35.90 pinned in libs/. DEPENDENCY-COMPATIBILITY ONLY — this does NOT
+# implement the agent path; the packages are unused until that code lands.
+langchain==1.3.16
+langchain-core==1.6.0
+langchain-aws==1.7.3
+boto3==1.43.78
+botocore==1.43.78
