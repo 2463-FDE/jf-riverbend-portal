@@ -285,11 +285,18 @@ CREATE INDEX IF NOT EXISTS role_migration_log_outcome_idx ON role_migration_log 
 -- ---------------------------------------------------------------------------
 -- Agentic draft provenance (020) — the clinical artifact plus its metadata
 -- ---------------------------------------------------------------------------
+-- Kept in sync with db/migrations/020_agent_draft_provenance.sql — see that
+-- file for the full reasoning (persistence boundary, transition graph,
+-- provenance truthfulness, reapplication safety). Constraints here are
+-- written inline, unlike the migration's guarded ALTER TABLE form, because
+-- this file only ever CREATEs a fresh table on an empty volume.
+--
 -- generated_text IS PHI and IS persisted, deliberately (adr/0010): a model
 -- response is not reproducible, so regenerating at display could show a patient
 -- something no clinician approved. The prohibition on persisting model output is
 -- scoped to logs, traces, telemetry and prompts — libs/agent_provenance raises
--- if draft text is put into a trace. Text is immutable, enforced by trigger.
+-- if draft text is put into a trace. Identity/evidence is immutable and status
+-- only advances along a fixed transition graph, both enforced by trigger below.
 CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     id              SERIAL PRIMARY KEY,
     patient_id      INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
@@ -299,6 +306,9 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     -- answerable after a regeneration.
     version         INTEGER NOT NULL,
 
+    -- draft -> validated -> approved -> superseded, or draft -> refused /
+    -- validated -> rejected. refused/rejected/superseded are terminal. See
+    -- the transition-guard trigger below, which enforces this graph directly.
     status          TEXT NOT NULL DEFAULT 'draft'
                     CHECK (status IN ('draft', 'validated', 'refused',
                                       'approved', 'rejected', 'superseded')),
@@ -307,7 +317,8 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     -- fixture= a recorded response was replayed
     -- fallback = the deterministic path ran; no model was called
     -- The client requires these labels to be explicit. `fallback` text must
-    -- never be presented as model output.
+    -- never be presented as model output. See agent_draft_provenance_truthful
+    -- below for what each label requires of model_id/prompt_version.
     provenance_label TEXT NOT NULL
                      CHECK (provenance_label IN ('real', 'fixture', 'fallback')),
 
@@ -316,11 +327,13 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     correlation_id  TEXT NOT NULL,
 
     -- Model identity is configuration, not output. Recorded so a demo can say
-    -- which model produced a draft; NULL for fallback.
+    -- which model produced a draft; NULL for fallback, required for real/fixture.
     model_id        TEXT,
 
     -- Machine-readable outcome of deterministic validation. A reason code, not
-    -- a message: a validator message could quote the text it rejected.
+    -- a message: a validator message could quote the text it rejected. NULL
+    -- while status='draft'; 'PASS' for every post-validation non-refused state;
+    -- a specific non-PASS code while 'refused'.
     validation_code TEXT,
 
     -- THE CLINICAL ARTIFACT. Immutable once written — see the trigger below.
@@ -330,7 +343,7 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
 
     -- Which prompt produced it. A version identifier, NOT the prompt itself:
     -- the prompt text stays out of the database exactly as it stays out of
-    -- traces.
+    -- traces. NULL for fallback, required for real/fixture, same as model_id.
     prompt_version  TEXT,
 
     -- Reviewer / editor, by user id. An id is a reference; a username is an
@@ -339,17 +352,50 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     approved_at     TIMESTAMPTZ,
     rejected_at     TIMESTAMPTZ,
 
-    -- A decided draft must name its decider and its moment, and an undecided
-    -- one must claim neither. Mirrors migration 018's constraint deliberately:
-    -- the review gate's default-deny semantics are the pattern to copy, not to
-    -- reinvent.
+    -- Exact per-status decision-completeness — not merely "decided XOR
+    -- undecided" (that would let an 'approved' row carry rejected_at). Mirrors
+    -- migration 018's default-deny pattern, extended to this table's four
+    -- decided/undecided states. 'superseded' retains the original approval's
+    -- decider/timestamp: a supersede is a newer version taking over, not an
+    -- un-approval.
     CONSTRAINT agent_draft_decision_complete CHECK (
-        (status IN ('approved', 'rejected')
-            AND reviewed_by IS NOT NULL
-            AND (approved_at IS NOT NULL OR rejected_at IS NOT NULL))
-        OR
-        (status NOT IN ('approved', 'rejected')
-            AND approved_at IS NULL AND rejected_at IS NULL)
+        (status IN ('draft', 'validated', 'refused')
+            AND reviewed_by IS NULL AND approved_at IS NULL AND rejected_at IS NULL)
+        OR (status = 'approved'
+            AND reviewed_by IS NOT NULL AND approved_at IS NOT NULL AND rejected_at IS NULL)
+        OR (status = 'rejected'
+            AND reviewed_by IS NOT NULL AND rejected_at IS NOT NULL AND approved_at IS NULL)
+        OR (status = 'superseded'
+            AND reviewed_by IS NOT NULL AND approved_at IS NOT NULL AND rejected_at IS NULL)
+    ),
+
+    -- Provenance truthfulness. NULL-safe: every nullable column compared here
+    -- is guarded with an explicit IS [NOT] NULL, because a bare equality
+    -- against a NULL evaluates to NULL, and Postgres does not treat a CHECK's
+    -- NULL result as a violation — an unguarded `model_id = 'x'` would
+    -- silently let a NULL model_id through.
+    CONSTRAINT agent_draft_provenance_truthful CHECK (
+        (provenance_label = 'fallback'
+            AND model_id IS NULL AND prompt_version IS NULL)
+        OR (provenance_label IN ('real', 'fixture')
+            AND model_id IS NOT NULL AND btrim(model_id) <> ''
+            AND prompt_version IS NOT NULL AND btrim(prompt_version) <> '')
+    ),
+
+    -- Closes the "empty string" loophole NOT NULL does not catch.
+    CONSTRAINT agent_draft_correlation_id_nonblank CHECK (btrim(correlation_id) <> ''),
+    CONSTRAINT agent_draft_generated_text_nonblank CHECK (btrim(generated_text) <> ''),
+    CONSTRAINT agent_draft_version_positive CHECK (version > 0),
+
+    -- Validation-code consistency — same NULL-safety discipline as
+    -- agent_draft_provenance_truthful above.
+    CONSTRAINT agent_draft_validation_code_consistent CHECK (
+        (status = 'draft' AND validation_code IS NULL)
+        OR (status IN ('validated', 'approved', 'rejected', 'superseded')
+            AND validation_code IS NOT NULL AND validation_code = 'PASS')
+        OR (status = 'refused'
+            AND validation_code IS NOT NULL AND btrim(validation_code) <> ''
+            AND validation_code <> 'PASS')
     ),
 
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -363,6 +409,15 @@ CREATE INDEX IF NOT EXISTS agent_draft_provenance_patient_idx
 CREATE INDEX IF NOT EXISTS agent_draft_provenance_correlation_idx
     ON agent_draft_provenance (correlation_id);
 
+-- At most one PATIENT-VISIBLE version at a time, enforced by a unique index
+-- rather than an application-level check-then-insert — concurrency-safe by
+-- construction. A regeneration must move the old approved row to 'superseded'
+-- in the SAME transaction that approves the new version, or the new approval
+-- is rejected by this index.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_draft_one_approved_per_patient
+    ON agent_draft_provenance (patient_id)
+    WHERE status = 'approved';
+
 -- One row per citation a draft made. Source id AND version, because an approved
 -- document can be superseded and an approval must remain interpretable against
 -- the version that was actually cited.
@@ -375,6 +430,13 @@ CREATE TABLE IF NOT EXISTS agent_draft_citation (
     category        TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+    -- A citation naming an empty source/citation id is not evidence of
+    -- anything and would defeat the "cited ids are a subset of retrieved ids"
+    -- check in libs/patient_view_agent/composer.py by comparing against blanks.
+    CONSTRAINT agent_draft_citation_fields_nonblank CHECK (
+        btrim(source_id) <> '' AND btrim(source_version) <> '' AND btrim(citation_id) <> ''
+    ),
+
     UNIQUE (draft_id, citation_id)
 );
 
@@ -383,33 +445,139 @@ CREATE INDEX IF NOT EXISTS agent_draft_citation_draft_idx
 CREATE INDEX IF NOT EXISTS agent_draft_citation_source_idx
     ON agent_draft_citation (source_id, source_version);
 
--- IMMUTABILITY. The status of a draft moves (draft -> validated -> approved),
--- but its TEXT and its version never do. Without this, "the patient sees
--- exactly the version the clinician approved" is a convention that one UPDATE
--- silently breaks — and nothing downstream would notice, because the row would
--- still look approved.
-CREATE OR REPLACE FUNCTION agent_draft_text_is_immutable()
+-- IDENTITY, EVIDENCE AND LIFECYCLE GUARD. A CHECK constraint only sees one
+-- row's final state; these four guarantees each compare OLD to NEW, or must
+-- run on DELETE (which no CHECK ever sees), so they must be a trigger:
+-- (1) patient_id, version, generated_text, provenance_label, correlation_id,
+-- model_id and prompt_version never change after insert; (2) validation_code
+-- is set exactly once, when the row leaves 'draft'; (3) status only advances
+-- along the transition graph documented on the table above — every other
+-- move, including any move out of a terminal state, is rejected; (4) a row
+-- that has left 'draft' can never be DELETEd, deterministically and
+-- independent of whether it has any citations (a plain cascade-only guard, as
+-- this once was, leaves a decided draft with zero citations unprotected).
+CREATE OR REPLACE FUNCTION agent_draft_provenance_guard()
 RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.generated_text IS DISTINCT FROM OLD.generated_text THEN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.status <> 'draft' THEN
+            RAISE EXCEPTION
+                'agent_draft_provenance rows are never deleted once they leave '
+                '''draft'' status (draft id=%, status=%). Deletion policy beyond '
+                'this refusal is w8-planner-2 B3.', OLD.id, OLD.status;
+        END IF;
+        RETURN OLD;
+    END IF;
+
+    -- TG_OP = 'UPDATE' from here on.
+    IF NEW.patient_id IS DISTINCT FROM OLD.patient_id
+       OR NEW.version IS DISTINCT FROM OLD.version
+       OR NEW.generated_text IS DISTINCT FROM OLD.generated_text
+       OR NEW.provenance_label IS DISTINCT FROM OLD.provenance_label
+       OR NEW.correlation_id IS DISTINCT FROM OLD.correlation_id
+       OR NEW.model_id IS DISTINCT FROM OLD.model_id
+       OR NEW.prompt_version IS DISTINCT FROM OLD.prompt_version
+    THEN
         RAISE EXCEPTION
-            'agent_draft_provenance.generated_text is immutable (draft id=%, version=%). '
-            'A revised summary is a NEW version, not an edit of an approved one.',
+            'agent_draft_provenance identity/evidence is immutable once written '
+            '(draft id=%, version=%): patient_id, version, generated_text, '
+            'provenance_label, correlation_id, model_id and prompt_version never '
+            'change after insert. A corrected or regenerated draft is a NEW version.',
             OLD.id, OLD.version;
     END IF;
-    IF NEW.version IS DISTINCT FROM OLD.version
-       OR NEW.patient_id IS DISTINCT FROM OLD.patient_id THEN
-        RAISE EXCEPTION 'agent_draft_provenance identity is immutable (draft id=%)', OLD.id;
+
+    IF NEW.validation_code IS DISTINCT FROM OLD.validation_code
+       AND OLD.status <> 'draft'
+    THEN
+        RAISE EXCEPTION
+            'agent_draft_provenance.validation_code may only be set once, when '
+            'leaving draft status (draft id=%, current status=%)', OLD.id, OLD.status;
     END IF;
+
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        IF NOT (
+            (OLD.status = 'draft'        AND NEW.status IN ('validated', 'refused'))
+            OR (OLD.status = 'validated' AND NEW.status IN ('approved', 'rejected'))
+            OR (OLD.status = 'approved'  AND NEW.status = 'superseded')
+        ) THEN
+            RAISE EXCEPTION
+                'invalid agent_draft_provenance status transition % -> % (draft id=%). '
+                'Allowed: draft->validated|refused, validated->approved|rejected, '
+                'approved->superseded. refused/rejected/superseded are terminal.',
+                OLD.status, NEW.status, OLD.id;
+        END IF;
+    END IF;
+
     NEW.updated_at = now();
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS agent_draft_immutable_text ON agent_draft_provenance;
-CREATE TRIGGER agent_draft_immutable_text
-    BEFORE UPDATE ON agent_draft_provenance
-    FOR EACH ROW EXECUTE FUNCTION agent_draft_text_is_immutable();
+DROP TRIGGER IF EXISTS agent_draft_provenance_guard_trigger ON agent_draft_provenance;
+CREATE TRIGGER agent_draft_provenance_guard_trigger
+    BEFORE UPDATE OR DELETE ON agent_draft_provenance
+    FOR EACH ROW EXECUTE FUNCTION agent_draft_provenance_guard();
+
+DROP FUNCTION IF EXISTS agent_draft_text_is_immutable();
+
+-- CITATION IMMUTABILITY GUARD. UPDATE is forbidden outright. INSERT is
+-- allowed only while the parent draft is still 'draft'. DELETE is allowed
+-- while the parent is still 'draft', OR when the parent row is no longer
+-- found at all — which, given the parent guard above only ever permits
+-- deleting a 'draft' parent, can only mean this DELETE is running as part of
+-- the FK's ON DELETE CASCADE from that already-permitted deletion (the parent
+-- tuple is gone before the cascade fires this trigger, in the same
+-- transaction). Treating "parent not found" as forbidden — as an earlier
+-- version of this file did — made it impossible to ever delete a draft
+-- parent that had any citations, since its own legitimate cascade would trip
+-- this exact guard.
+--
+-- CONCURRENCY: both lookups take `FOR SHARE` on the parent row, not a plain
+-- SELECT, so a citation write and a concurrent status-transition UPDATE on
+-- the same draft are always serialized against each other rather than racing
+-- past one another's uncommitted state.
+CREATE OR REPLACE FUNCTION agent_draft_citation_guard()
+RETURNS TRIGGER AS $$
+DECLARE
+    parent_status TEXT;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION
+            'agent_draft_citation rows are immutable — no field may be changed '
+            'once written (citation id=%). A corrected citation set belongs to a '
+            'NEW draft version.', OLD.id;
+    ELSIF TG_OP = 'INSERT' THEN
+        SELECT status INTO parent_status
+            FROM agent_draft_provenance WHERE id = NEW.draft_id
+            FOR SHARE;
+        IF parent_status IS DISTINCT FROM 'draft' THEN
+            RAISE EXCEPTION
+                'a citation may only be added while its draft is still in '
+                '''draft'' status (draft id=%, status=%)',
+                NEW.draft_id, COALESCE(parent_status, '<no such draft>');
+        END IF;
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        SELECT status INTO parent_status
+            FROM agent_draft_provenance WHERE id = OLD.draft_id
+            FOR SHARE;
+        IF parent_status IS NOT NULL AND parent_status <> 'draft' THEN
+            RAISE EXCEPTION
+                'a citation may not be removed once its draft has left ''draft'' '
+                'status (citation id=%, draft status=%)',
+                OLD.id, parent_status;
+        END IF;
+        RETURN OLD;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS agent_draft_citation_guard_trigger ON agent_draft_citation;
+CREATE TRIGGER agent_draft_citation_guard_trigger
+    BEFORE INSERT OR UPDATE OR DELETE ON agent_draft_citation
+    FOR EACH ROW EXECUTE FUNCTION agent_draft_citation_guard();
 
 -- ---------------------------------------------------------------------------
 -- Release of Information (ROI)
