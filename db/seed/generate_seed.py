@@ -54,13 +54,20 @@ emit()
 # roster-gated piece of work, and this seed is what "before the migration"
 # looks like.
 #
-# One exception, added deliberately: `drkim` carries role='clinician'. The S3
-# review queue is gated on summary_review.decide, which `staff` does NOT hold —
-# correctly, because deciding releases withheld clinical content to a patient
-# and no legacy account should be able to do that. Without a single genuinely
-# clinical account, the feature would be unreachable by anyone and therefore
-# undemonstrable. This is not the account migration; it is one demo account
-# with the role it would obviously be assigned.
+# Two exceptions, added deliberately: `drkim` and `drnguyen` (2026-08-22,
+# promoted from legacy `staff`) carry role='clinician'. The S3 review queue is
+# gated on summary_review.decide, which `staff` does NOT hold — correctly,
+# because deciding releases withheld clinical content to a patient and no
+# legacy account should be able to do that. TWO clinical accounts, not one, so
+# the shared-queue case (a patient granted to more than one reviewer — see
+# patient 1738 below) is demonstrable at all; a single clinician account can
+# only ever prove exclusive access, never overlap. This is not the account
+# migration; it is two demo accounts with the roles they would obviously be
+# assigned. Every other account here keeps the flat legacy role on purpose —
+# tests/integration/test_review_queue_flow.py's negative test
+# (test_a_legacy_staff_account_cannot_reach_the_queue) needs real accounts that
+# are STILL `staff` to prove the containment against, and drpatel is that
+# account for the treating-provider-but-not-a-reviewer case specifically.
 # ---------------------------------------------------------------------------
 _DEFAULT_ROLE = "staff"
 
@@ -70,14 +77,14 @@ USERS = [
     ("rdelgado",  "Rosa Delgado (Registration)"),
     ("jpark",     "Jin Park (Registration)"),
     ("drpatel",   "Dr. Anil Patel"),
-    ("drnguyen",  "Dr. Anita Nguyen"),
+    ("drnguyen",  "Dr. Anita Nguyen", "clinician"),
     ("drlee",     "Dr. Sandra Lee"),
     ("billing1",  "Tom Reyes (Billing)"),
     ("roiclerk",  "Dana White (ROI Clerk)"),
     ("labtech",   "Lab Intake"),
     ("nurse_kc",  "Karen Cole, RN"),
     ("itadmin",   "Helix Support"),
-    # Reviewer for the S3 queue — see the note above on why this one is not 'staff'.
+    # Reviewer for the S3 queue — see the note above on why these are not 'staff'.
     ("drkim",     "Dr. Grace Kim", "clinician"),
 ]
 
@@ -679,36 +686,45 @@ gwrows = [
     " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
     " (3, 1042)", " (3, 1330)", " (3, 1588)",                  # rdelgado
     " (5, 1043)",                                             # drpatel
-    " (6, 1330)", " (6, 1601)",                               # drnguyen
-    " (13, 1737)",                                            # drkim (review queue)
+    " (6, 1330)", " (6, 1601)",                               # drnguyen (treating provider, unrelated to the clinician matrix below)
     # frontdesk (2026-08-22): tests/integration/test_patient_acceptance_e2e.py
     # and test_patient_summary_flow.py both drive the invitation for 1737
     # through the `frontdesk` account, and invitation issuance now requires an
     # active grant for the specific chart (services/gateway/app.py's
     # has_active_grant check), not merely the patients.write permission.
-    # Adding this does not weaken drkim's "granted 1737 only" isolation, which
-    # is about the REVIEW QUEUE (gated on summary_review.decide, a permission
-    # front_desk's role does not hold and never will) — a registration grant
-    # and review-queue visibility are two different authorizations, and
-    # tests/integration/test_review_queue_flow.py's own scoping assertion is
-    # about drnguyen/drpatel, not frontdesk.
     " (2, 1737)",                                             # frontdesk
     # frontdesk / 1629 (2026-08-22): same reasoning as 1737 above —
     # tests/integration/test_patient_acceptance_e2e.py activates patient B
     # (1629, "the other patient, used only to prove they cannot be reached")
-    # through frontdesk too, and now needs a grant to do it. 1629 stays
-    # ungranted for drkim/clinician purposes elsewhere; this is only a
-    # front-desk registration grant, same non-conflict as 1737's.
+    # through frontdesk too, and now needs a grant to do it.
     " (2, 1629)",                                             # frontdesk
-    # Curated fixtures (2026-08-22). drpatel treats 1738's hypertension
-    # (the same provider named on its curated encounters); drnguyen treats
-    # 1739's asthma likewise. frontdesk registers both, matching 1601's
-    # front_desk-registered pattern above. 1042 and 1737 already have staff
-    # grants from the rows above (frontdesk/rdelgado, drkim) and need no more.
-    " (5, 1738)",                                             # drpatel
-    " (2, 1738)",                                             # frontdesk
-    " (6, 1739)",                                             # drnguyen
-    " (2, 1739)",                                             # frontdesk
+    # Curated fixtures (2026-08-22). drpatel is the treating provider named on
+    # 1738's own curated encounters (hypertension) — a chart-access grant,
+    # not a review-queue one: `staff` (drpatel's role) does not hold
+    # summary_review.decide, so this never lets drpatel see or decide a case.
+    # frontdesk registers all four canonical patients.
+    " (5, 1738)",                                             # drpatel (treating provider)
+    " (2, 1738)", " (2, 1739)",                                # frontdesk
+    #
+    # --- the clinician reviewer matrix (2026-08-22) -------------------------
+    # Two clinician accounts, deliberately overlapping on ONE patient so the
+    # shared-queue case is demonstrable — a single reviewer can only ever
+    # prove exclusive access, never that two independent grants on the same
+    # chart coexist without either one seeing more than the other allows.
+    #
+    #   drkim    : 1042, 1737, 1738   (NOT 1739)
+    #   drnguyen : 1738, 1739         (NOT 1042, NOT 1737)
+    #
+    # 1738 (Thomas Johnson) is the deliberate overlap: both clinicians hold an
+    # active grant for it, so a review-queue listing shows it to both, and a
+    # decision either one makes must not be silently overwritable by the
+    # other (services/records-service/review_queue.py's existing
+    # only-a-VALIDATED-draft/pending-case transition guard already enforces
+    # this generically — it has no special case for "more than one reviewer
+    # holds a grant" because the grant only decides WHO can attempt a
+    # transition, never how many attempts a case tolerates).
+    " (13, 1042)", " (13, 1737)", " (13, 1738)",               # drkim
+    " (6, 1738)", " (6, 1739)",                                # drnguyen
 ]
 # Self-grants for the two pre-activated patient accounts — the same fact and
 # the same table a real activation writes (services/gateway/app.py's

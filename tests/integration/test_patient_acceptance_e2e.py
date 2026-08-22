@@ -50,7 +50,7 @@ PATIENT_B = 1629
 PASSWORD = "portal-patient-passphrase"
 
 FRONT_DESK = "frontdesk"
-CLINICIAN = "drkim"      # the seed's one account on the `clinician` role
+CLINICIAN = "drkim"      # one of the seed's two `clinician` accounts (drnguyen is the other, granted 1738/1739)
 
 
 def _run(sql, params=()):

@@ -336,13 +336,15 @@ def test_reads_the_seeded_accounts_from_seed_sql():
     # to change. If this ever fails, the seed moved ahead of the migration.
     # Was {"staff"} alone, and that was the point: it pinned the pre-migration
     # reality where every account carries the deprecated flat role. That is
-    # still true of the twelve original accounts, and the assertion keeps
-    # saying so — but `drkim` is deliberately `clinician`, because the S3
-    # review queue is gated on a permission `staff` does not hold and the
-    # feature would otherwise be unreachable by anyone. This is one demo
-    # account with an obvious role, not the roster-gated account migration.
+    # still true of the eleven original accounts, and the assertion keeps
+    # saying so — but `drkim` and `drnguyen` (2026-08-22, promoted from
+    # `staff`) are deliberately `clinician`, because the S3 review queue is
+    # gated on a permission `staff` does not hold and a SINGLE clinical
+    # account could only ever prove exclusive access, never that patient 1738's
+    # deliberate two-reviewer overlap works. These are demo accounts with
+    # obvious roles, not the roster-gated account migration.
     assert {a.role for a in accounts} == {"staff", "clinician"}
-    assert sum(1 for a in accounts if a.role == "clinician") == 1
+    assert sum(1 for a in accounts if a.role == "clinician") == 2
     assert all(a.is_active for a in accounts)
 
 

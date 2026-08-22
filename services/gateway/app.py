@@ -351,7 +351,19 @@ def issue_patient_invitation(
         select(User.id).where(User.patient_id == patient_id, User.is_active.is_(True))
     ).scalar_one_or_none()
     if existing_account is not None:
-        raise HTTPException(status_code=409, detail="this patient already has an active portal account")
+        # Structured, not a string the frontend has to parse: this and the
+        # LIVE_INVITATION conflict below are different states requiring
+        # different UI (no revoke control makes sense for an account that
+        # already exists), and a caller distinguishing them by matching
+        # English text is exactly the coupling a machine-readable reason
+        # exists to avoid.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "ACTIVE_PORTAL_ACCOUNT",
+                "message": "this patient already has an active portal account",
+            },
+        )
 
     code = patient_invitations.generate_code()
     invitation = PatientInvitation(
@@ -374,10 +386,13 @@ def issue_patient_invitation(
         log.warning("invitation issue rejected for patient_id=%s", patient_id)
         raise HTTPException(
             status_code=409,
-            detail=(
-                "this patient already has an unexpired invitation; revoke it "
-                "before issuing another"
-            ),
+            detail={
+                "reason": "LIVE_INVITATION",
+                "message": (
+                    "this patient already has an unexpired invitation; revoke it "
+                    "before issuing another"
+                ),
+            },
         )
 
     if lapsed:
@@ -407,11 +422,15 @@ def revoke_patient_invitation(
     that stayed valid for fourteen days with no way to close it.
 
     Idempotent, and deliberately does not report whether a code was actually
-    outstanding — same permission as issuing, so this leaks nothing to a
-    caller who could issue anyway, but it keeps the response uniform.
+    outstanding — same permission AND grant as issuing (2026-08-22 — this had
+    lagged issuance's own has_active_grant requirement), so revoking leaks
+    nothing beyond what issuing already could, and a caller who cannot issue
+    for this chart cannot revoke for it either.
     """
     revoker_id = parse_user_id(session.get("user_id"))
     if revoker_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    if not has_active_grant(db, user_id=revoker_id, patient_id=patient_id):
         raise HTTPException(status_code=403, detail="not authorized")
 
     revoked = (

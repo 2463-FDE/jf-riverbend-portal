@@ -31,11 +31,14 @@ DB_DSN = os.getenv(
 _PATIENT = 1737
 _PASSWORD = "portal-patient-passphrase"
 
-# drkim is the seed's one account on the `clinician` role. The other twelve
-# are still on the deprecated `staff` role, which does NOT hold
-# summary_review.decide — so unlike an earlier version of this file, the
-# exclusion is now demonstrable here rather than only in the role grid:
-# see test_a_legacy_staff_account_cannot_reach_the_queue below.
+# drkim and drnguyen (2026-08-22, promoted from `staff`) are the seed's two
+# `clinician` accounts — deliberately two, not one, so patient 1738's grant
+# overlap between them is demonstrable (see generate_seed.py's own grant
+# matrix comment). Every other seeded account remains on the deprecated
+# `staff` role, which does NOT hold summary_review.decide — so the exclusion
+# is demonstrable here rather than only in the role grid: see
+# test_a_legacy_staff_account_cannot_reach_the_queue below, which uses one of
+# the accounts still genuinely on `staff`.
 _CLINICIAN = "drkim"
 
 
@@ -260,7 +263,11 @@ def test_the_review_queue_refuses_an_unauthenticated_caller():
 
 
 def test_a_legacy_staff_account_cannot_reach_the_queue(patient_token):
-    """Every seeded account except drkim is on the deprecated `staff` role.
+    """Every seeded account except drkim and drnguyen is on the deprecated
+    `staff` role. drpatel below is deliberately still one of them — a
+    treating-provider chart-access grant (patients.read/records.read) is not
+    the same authorization as summary_review.decide, and drpatel holding the
+    former for patient 1738 must not let it reach the queue.
 
     Adversarial review of #40 made the point that mattered: deciding is the
     release action, so gating it on a permission legacy accounts hold would
@@ -290,11 +297,11 @@ def test_a_clinician_sees_only_cases_for_patients_they_are_granted(queued_cases)
     offers a control that releases it, so it is a chart-reading surface and
     belongs behind patient_access_grants like every other one.
 
-    drkim is granted 1737 only. drpatel holds a grant for 1043 and none for
-    1737 — but drpatel is on `staff` and cannot reach the route at all, so the
-    account that proves the scoping is drnguyen, who is also `staff`. The
-    grant boundary itself is therefore asserted here through the one clinical
-    account and the DB, and in the unit tests through the query.
+    drkim is granted 1042, 1737 and 1738 — not 1043, and not 1739 (drnguyen's
+    grant, not drkim's). drpatel holds a grant for 1043 and 1738 but is on
+    `staff` and cannot reach the route at all, so the grant boundary itself is
+    asserted here through drkim's own case list against the DB, and in the
+    unit tests through the query.
     """
     granted = {
         r[0]
@@ -336,3 +343,111 @@ def test_an_ungranted_case_cannot_be_decided_by_id(patient_token, clinician_toke
         timeout=10,
     )
     assert r.status_code == 409, "an ungranted case must not be decidable by id"
+
+
+# --- round 3: the two-clinician overlap on the real seeded roster -----------
+#
+# Everything above proves the grant boundary using `_PATIENT` (1737, drkim
+# only) and a synthetic invited-then-activated account. That leaves the
+# actual reason drnguyen was promoted alongside drkim unproven end to end:
+# patient 1738 is the one case both clinicians are granted, and the queue's
+# pending->decided guard (already exercised above by
+# test_a_decided_case_cannot_be_decided_again) has to hold under a SECOND
+# reviewer racing the first, not just a retry by the same one. This runs
+# against the real, preactivated seed accounts (patient-1738, patient-1739)
+# rather than the invitation flow, since that is how those two patients
+# actually reach the portal.
+
+_SHARED_PATIENT = 1738     # granted to both drkim and drnguyen
+_EXCLUSIVE_PATIENT = 1739  # granted to drnguyen only
+_PATIENT_PASSWORD = "portalportal123"  # docs/runbook.md; preactivated accounts only
+
+
+def _reset_reviews(patient_id):
+    _run("DELETE FROM patient_summary_reviews WHERE patient_id = %s", (patient_id,))
+
+
+@pytest.fixture
+def two_clinician_setup():
+    """Queues fresh cases for the shared and exclusive patients, from a clean
+    review-queue state for both, and cleans up after itself so a later run of
+    this file finds the same empty starting point `_reset` guarantees for
+    `_PATIENT`."""
+    _reset_reviews(_SHARED_PATIENT)
+    _reset_reviews(_EXCLUSIVE_PATIENT)
+
+    shared_patient_token = _token(f"patient-{_SHARED_PATIENT}", _PATIENT_PASSWORD)
+    exclusive_patient_token = _token(f"patient-{_EXCLUSIVE_PATIENT}", _PATIENT_PASSWORD)
+    _summary(shared_patient_token)      # queues 1738's refused content
+    _summary(exclusive_patient_token)   # queues 1739's refused content
+
+    yield
+
+    _reset_reviews(_SHARED_PATIENT)
+    _reset_reviews(_EXCLUSIVE_PATIENT)
+
+
+def _cases_for(token, patient_id):
+    r = httpx.get(f"{GATEWAY}/review-queue", headers=_auth(token), timeout=10)
+    assert r.status_code == 200, r.text
+    return [c for c in r.json()["items"] if c["patient_id"] == patient_id]
+
+
+def test_the_shared_patient_is_visible_to_both_granted_clinicians(two_clinician_setup):
+    """1738 is the one patient both drkim and drnguyen are granted — this is
+    what makes the shared-queue scenario demonstrable at all, per
+    generate_seed.py's grant matrix comment."""
+    kim_cases = _cases_for(_token("drkim"), _SHARED_PATIENT)
+    nguyen_cases = _cases_for(_token("drnguyen"), _SHARED_PATIENT)
+
+    assert kim_cases, "drkim is granted 1738 and must see its pending cases"
+    assert nguyen_cases, "drnguyen is granted 1738 and must see its pending cases"
+    assert {c["id"] for c in kim_cases} == {c["id"] for c in nguyen_cases}, (
+        "both reviewers hold the same grant for this patient, so they must see "
+        "the same case set, not a filtered subset of each other's"
+    )
+
+
+def test_the_exclusive_patient_is_hidden_from_the_ungranted_clinician(two_clinician_setup):
+    """1739 is granted to drnguyen only — drkim holds no grant for it, and the
+    seed generator deliberately keeps it that way (see generate_seed.py)."""
+    nguyen_cases = _cases_for(_token("drnguyen"), _EXCLUSIVE_PATIENT)
+    kim_cases = _cases_for(_token("drkim"), _EXCLUSIVE_PATIENT)
+
+    assert nguyen_cases, "drnguyen is granted 1739 and must see its pending cases"
+    assert kim_cases == [], "drkim holds no grant for 1739 and must not see any of its cases"
+
+
+def test_one_clinicians_decision_on_the_shared_case_blocks_the_other(two_clinician_setup):
+    """The pending->decided guard already proven against a single reviewer
+    (test_a_decided_case_cannot_be_decided_again) must also hold against a
+    SECOND, independently-authorized reviewer — that is the actual risk an
+    overlapping grant introduces, and it is what patient 1738 exists to
+    demonstrate."""
+    case = _cases_for(_token("drkim"), _SHARED_PATIENT)[0]
+
+    first = httpx.post(
+        f"{GATEWAY}/review-queue/{case['id']}/decision",
+        headers=_auth(_token("drkim")),
+        json={"decision": "approved"},
+        timeout=10,
+    )
+    assert first.status_code == 200, first.text
+
+    second = httpx.post(
+        f"{GATEWAY}/review-queue/{case['id']}/decision",
+        headers=_auth(_token("drnguyen")),
+        json={"decision": "rejected"},
+        timeout=10,
+    )
+    assert second.status_code == 409, (
+        "drnguyen's own grant for 1738 is real, but the case is no longer "
+        "pending — a second authorized reviewer must not be able to overwrite "
+        "the first one's decision"
+    )
+
+    shown = [
+        i for i in _summary(_token(f"patient-{_SHARED_PATIENT}", _PATIENT_PASSWORD))
+        if i["record_id"] == case["record_id"]
+    ][0]
+    assert shown["released_by_review"] is True, "drkim's approval is what must stand"

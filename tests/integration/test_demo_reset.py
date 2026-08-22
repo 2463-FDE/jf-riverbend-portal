@@ -140,28 +140,29 @@ def test_reset_restores_a_reviewer_grant_that_had_expired():
     assert _reviewer_grant_is_active()
 
 
-def test_the_printed_verification_reports_a_state_the_reset_cannot_fix():
-    """The second half of the original bug, tested from the failing side.
+def test_reset_restores_a_deactivated_reviewer_account_to_active():
+    """A disabled reviewer account used to be a state `make demo-reset`
+    genuinely could NOT repair — this test originally asserted exactly that,
+    from the failing side, so the printed summary would at least be honest
+    about it rather than printing a reassuring role that meant nothing.
 
-    The old line printed the account's ROLE, which is true whether or not that
-    reviewer can see anything — so what an operator trusts was decoupled from
-    what breaks. Asserting it says "active" on a healthy run proves little: the
-    buggy version said something reassuring too.
-
-    So this creates a state the reset genuinely cannot repair — a disabled
-    reviewer account, which the gate's predicate rejects via u.is_active — and
-    requires the summary to SAY so. A verification line that cannot report
-    failure is not a verification line.
+    2026-08-22: that limitation is now closed by explicit request — the reset
+    restores BOTH clinician accounts (drkim and drnguyen) to active, the same
+    way it already restored a revoked or expired grant. A rehearsal or a test
+    that deactivates a reviewer account must not require a re-seed to fix, and
+    the summary line (`active_reviewers`) is what an operator reads to
+    confirm the repair actually took, not merely that the command exited 0.
     """
     _run("UPDATE users SET is_active = false WHERE username = %s", (REVIEWER,))
-    try:
-        out = _demo_reset()
-        assert "INACTIVE" in out, (
-            "the summary must report an unusable reviewer, not a reassuring role"
-        )
-        assert not _reviewer_grant_is_active()
-    finally:
-        _run("UPDATE users SET is_active = true WHERE username = %s", (REVIEWER,))
+    assert not _reviewer_grant_is_active(), "precondition: a disabled account is not an active grant"
+
+    out = _demo_reset()
+
+    assert _reviewer_grant_is_active(), "reset must reactivate the account, not merely the grant"
+    assert REVIEWER in out, "the summary must name the restored reviewer, not just say the role exists"
+    assert "INACTIVE" not in out and "NONE" not in out, (
+        "a restored reviewer must not still be reported as unusable"
+    )
 
 
 # --- the everyday job ------------------------------------------------------

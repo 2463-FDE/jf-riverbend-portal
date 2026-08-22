@@ -217,7 +217,10 @@ export default function RecordsPage() {
               onKeyDown={(e) => e.key === "Enter" && load()}
               inputMode="numeric"
             />
-            <PatientName patientId={loadedPatientId} />
+            {/* nameOnly (2026-08-22): the id is already the adjacent input's
+                own value on this screen, so repeating "Patient ID {id}" here
+                too would be redundant with something one field over. */}
+            <PatientName patientId={loadedPatientId} nameOnly />
             <button className="rb-btn rb-btn--primary" onClick={load} disabled={busy} type="button">
               {busy ? "Loading…" : <><IconSearch width={16} height={16} /> Load</>}
             </button>

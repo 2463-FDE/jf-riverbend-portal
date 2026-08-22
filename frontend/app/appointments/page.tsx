@@ -151,7 +151,9 @@ export default function AppointmentsPage() {
                 setLoadedPatientId("");
               }}
             />
-            <PatientName patientId={loadedPatientId} />
+            {/* nameOnly (2026-08-22): same reasoning as records/page.tsx —
+                the id is already shown in the adjacent Patient ID input. */}
+            <PatientName patientId={loadedPatientId} nameOnly />
             <button
               className="rb-btn"
               onClick={() => {

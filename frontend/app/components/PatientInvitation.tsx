@@ -36,15 +36,24 @@ export default function PatientInvitation({ patientId }: { patientId: string }) 
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        // 409 is the useful one: this patient already has an unexpired
-        // invitation. Say what to do about it rather than showing a status
-        // code, and offer the action that does it.
-        setBlocked(res.status === 409);
-        setError(
-          res.status === 409
-            ? "This patient already has an unexpired invitation. Revoke it before issuing another."
-            : body?.detail || "Could not issue an invitation. Please try again."
-        );
+        // Branch on the machine-readable reason, never on the English
+        // message — a 409 is not ONE thing. LIVE_INVITATION means a revoke
+        // control is the useful next action; ACTIVE_PORTAL_ACCOUNT means
+        // there is no invitation to revoke at all, and offering that button
+        // would be an action with nothing behind it.
+        const reason = body?.detail?.reason;
+        setBlocked(reason === "LIVE_INVITATION");
+        if (reason === "LIVE_INVITATION") {
+          setError("This patient already has an unexpired invitation.");
+        } else if (reason === "ACTIVE_PORTAL_ACCOUNT") {
+          setError("This patient already has an active portal account.");
+        } else {
+          setError(
+            typeof body?.detail === "string"
+              ? body.detail
+              : body?.detail?.message || "Could not issue an invitation. Please try again."
+          );
+        }
         return;
       }
       setBlocked(false);

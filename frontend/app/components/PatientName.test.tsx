@@ -108,4 +108,31 @@ describe("the patient name beside the ID", () => {
 
     expect(await screen.findByText(/name unavailable/i)).toBeInTheDocument();
   });
+
+  it("shows only the name when nameOnly is set (records/appointments)", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1738, name: "Thomas Johnson" }));
+
+    render(<PatientName patientId="1738" nameOnly />);
+
+    const box = await screen.findByTestId("patient-name");
+    expect(box).toHaveTextContent("Thomas Johnson");
+    expect(box).not.toHaveTextContent(/Patient ID/);
+  });
+
+  it("nameOnly still falls back to the same placeholder text on denial", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(err(403, { error: "name unavailable" }));
+
+    render(<PatientName patientId="1739" nameOnly />);
+
+    expect(await screen.findByText(/name unavailable/i)).toBeInTheDocument();
+  });
+
+  it("defaults to combined when nameOnly is omitted (review cards, results, summaries)", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1738, name: "Thomas Johnson" }));
+
+    render(<PatientName patientId="1738" />);
+
+    const box = await screen.findByTestId("patient-name");
+    expect(box).toHaveTextContent("Thomas Johnson — Patient ID 1738");
+  });
 });

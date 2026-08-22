@@ -5,15 +5,18 @@ import { identityLine, usePatientIdentity } from "../lib/usePatientIdentity";
 // The patient's identity, in a display-only box between the Patient ID field
 // and the Load button on the records and appointments screens (client
 // request, 2026-08-16; boxed and reordered after review, 2026-08-20; format
-// standardized to "{Name} — Patient ID {id}" 2026-08-22 so the same string
-// shape appears everywhere a patient is identified, not only here).
+// standardized to "{Name} — Patient ID {id}" 2026-08-22, then narrowed on
+// 2026-08-22 — see `nameOnly` below).
 //
-// The ID is shown again inside this box even though it is also the adjacent
-// input's own value: this box is the one piece of UI meant to read on its own
-// (a screenshot, a screen reader) without depending on a sibling element still
-// being in view, and "consistent everywhere" means the same two facts appear
-// together every time, not just on the two screens where an ID input happens
-// to be adjacent.
+// `nameOnly` (records and appointments ONLY): those two screens already show
+// the id in the adjacent Patient ID input, so repeating "Patient ID {id}"
+// inside this box too was redundant with something already on screen one
+// field over. Every OTHER caller (the review queue's per-case label, the
+// agent-draft panel, a patient's own identity on /my-results and the
+// approved agent-summary) has no adjacent id anywhere and keeps the combined
+// "{Name} — Patient ID {id}" string — those are the "standalone" contexts
+// this box is the ONLY source of the id for. Default is combined, so a
+// caller that forgets the prop gets the safer, more self-contained behavior.
 //
 // It holds its own space whether or not a name is resolved, so the row does not
 // reflow when one arrives — a name appearing mid-row used to push the Load
@@ -29,7 +32,13 @@ import { identityLine, usePatientIdentity } from "../lib/usePatientIdentity";
 // records screen has one (patientIdRef) but the appointments screen has none,
 // and a name that lags one patient behind the chart beneath it is worse than
 // no name at all.
-export default function PatientName({ patientId }: { patientId: string }) {
+export default function PatientName({
+  patientId,
+  nameOnly = false,
+}: {
+  patientId: string;
+  nameOnly?: boolean;
+}) {
   const path = patientId ? `/api/patients/${encodeURIComponent(patientId)}/name` : null;
   const { name, unavailable } = usePatientIdentity(path, patientId);
 
@@ -44,7 +53,7 @@ export default function PatientName({ patientId }: { patientId: string }) {
   // unauthorized states are UNCHANGED from before — no identity information at
   // all, not even the id, is added to what this box shows when there is
   // nothing this viewer may see.
-  const display = identityLine(name, patientId) ?? placeholder;
+  const display = (nameOnly ? name : identityLine(name, patientId)) ?? placeholder;
   const resolved = Boolean(name);
 
   return (

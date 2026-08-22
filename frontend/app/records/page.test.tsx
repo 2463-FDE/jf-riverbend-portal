@@ -248,9 +248,11 @@ describe("Patient ID input — no default, no request until asked", () => {
     fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
     fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
 
-    await waitFor(() =>
-      expect(screen.getByText("Maria Gonzalez — Patient ID 1042")).toBeInTheDocument()
-    );
+    // The Patient ID field already shows the id — the adjacent name box
+    // (2026-08-22: nameOnly on this screen) must not repeat it.
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+    expect(screen.queryByText(/Patient ID 1042/)).not.toBeInTheDocument();
+    expect((screen.getByLabelText(/patient id/i) as HTMLInputElement).value).toBe("1042");
     expect(apiFetch).toHaveBeenCalledWith(expect.stringContaining("patient_id=1042"));
   });
 
@@ -269,9 +271,7 @@ describe("Patient ID input — no default, no request until asked", () => {
     render(<RecordsPage />);
     fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
     fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
-    await waitFor(() =>
-      expect(screen.getByText("Maria Gonzalez — Patient ID 1042")).toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
 

@@ -172,6 +172,48 @@ def test_an_active_account_blocks_a_second_invitation(env):
     resp = client.post("/patients/1042/invitation", headers=_auth())
 
     assert resp.status_code == 409
+    # Machine-readable, not English text the frontend would have to parse —
+    # and specifically ACTIVE_PORTAL_ACCOUNT, not LIVE_INVITATION: the two
+    # conflicts need different UI (no revoke control makes sense for an
+    # account that already exists).
+    assert resp.json()["detail"]["reason"] == "ACTIVE_PORTAL_ACCOUNT"
+
+
+def test_revoking_requires_the_same_active_grant_as_issuing(env, monkeypatch):
+    """Revoking had lagged issuing's own has_active_grant requirement — a
+    caller who cannot issue for this chart must not be able to revoke for it
+    either."""
+    client, Session = env
+    client.post("/patients/1042/invitation", headers=_auth())
+    monkeypatch.setattr(
+        app_mod, "get_session",
+        lambda t: {"user_id": "3", "username": "ungranted", "role": "front_desk"} if t == VALID else None,
+    )
+    with Session() as s:
+        s.add(app_mod.User(id=3, username="ungranted", password_hash="x", role="front_desk"))
+        s.commit()
+
+    resp = client.delete("/patients/1042/invitation", headers=_auth())
+
+    assert resp.status_code == 403
+    with Session() as s:
+        still_live = s.execute(
+            text("SELECT revoked_at FROM patient_invitations WHERE patient_id = 1042")
+        ).scalar()
+        assert still_live is None, "an unauthorized caller must not revoke"
+
+
+def test_revoking_a_live_invitation_allows_a_replacement_to_be_issued(env):
+    client, _ = env
+    client.post("/patients/1042/invitation", headers=_auth())
+
+    revoked = client.delete("/patients/1042/invitation", headers=_auth())
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked"] == 1
+
+    reissued = client.post("/patients/1042/invitation", headers=_auth())
+    assert reissued.status_code == 201
+    assert reissued.json()["code"]
 
 
 def test_a_code_cannot_be_redeemed_twice(env):
