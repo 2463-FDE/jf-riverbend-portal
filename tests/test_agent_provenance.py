@@ -168,6 +168,80 @@ def test_a_genuine_tool_loop_repeating_before_draft_is_ordered():
     assert t.is_acceptable()
 
 
+def _up_to_retrieval(t):
+    t.request(actor_role="patient")
+    t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])
+    return t
+
+
+def test_a_single_decision_then_call_pair_is_ordered():
+    """The minimal loop: exactly one complete, correctly-ordered pair."""
+    t = _up_to_retrieval(_rec())
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
+            prompt_version="v3", citation_ids=["c1"])
+
+    assert t.is_ordered()
+
+
+def test_provider_call_before_any_decision_is_rejected():
+    """A provider_call with nothing open to close — either it is the very
+    first loop event, or it follows a pair that already closed cleanly.
+    Either way, a call must always be preceded by its own, still-open,
+    decision."""
+    t = _up_to_retrieval(_rec())
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+
+    assert not t.is_ordered()
+
+
+def test_consecutive_agent_decisions_are_rejected():
+    """Two decisions with no provider_call closing the first in between —
+    the first decision is left dangling."""
+    t = _up_to_retrieval(_rec())
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.agent_decision(tool_name="search_documents", turn=2, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+
+    assert not t.is_ordered()
+
+
+def test_consecutive_provider_calls_are_rejected():
+    """A complete pair, then a SECOND provider_call with no new decision to
+    close — the second call has nothing open."""
+    t = _up_to_retrieval(_rec())
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+
+    assert not t.is_ordered()
+
+
+def test_draft_after_an_unfinished_pair_is_rejected():
+    """An agent_decision with no provider_call ever closing it before draft —
+    the draft would rest on a decision the trace never shows being acted on."""
+    t = _up_to_retrieval(_rec())
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
+            prompt_version="v3", citation_ids=["c1"])
+
+    assert not t.is_ordered()
+
+
+def test_a_second_unfinished_pair_after_a_complete_one_is_still_rejected():
+    """One clean pair followed by a dangling decision — the first pair being
+    well-formed must not paper over the second, unfinished one."""
+    t = _up_to_retrieval(_rec())
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.agent_decision(tool_name="search_documents", turn=2, stop_reason="tool_use")
+    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
+            prompt_version="v3", citation_ids=["c1"])
+
+    assert not t.is_ordered()
+
+
 @pytest.mark.parametrize("loop_stage", ["agent_decision", "provider_call"])
 def test_a_loop_stage_repeating_after_draft_is_rejected(loop_stage):
     """A repeat of the loop AFTER draft would mean the drafted version was not

@@ -233,25 +233,47 @@ class TraceRecorder:
         actually has:
 
         `agent_decision` and `provider_call` may repeat — but ONLY before the
-        (unique) `draft` event, and only after `retrieval` has already
-        occurred. That is the actual shape of a bounded tool-calling loop:
-        gather evidence, decide, call the model, maybe loop again, THEN draft.
-        A repeat of either stage after draft has occurred means the loop ran
-        again post-hoc — which would mean the drafted version was not
-        actually produced by the evidence/decisions the trace claims preceded
-        it, so this is treated as an ordering failure, not a tolerated retry.
+        (unique) `draft` event, only after `retrieval` has already occurred,
+        and only as one or more COMPLETE, STRICTLY ALTERNATING pairs starting
+        with `agent_decision` and closed by `provider_call`. That is the
+        actual shape of a bounded tool-calling loop: decide, call the model,
+        maybe decide-and-call again, THEN draft — never a call with no
+        decision behind it, never two decisions or two calls back to back,
+        and never a draft produced while a decision is still awaiting the
+        call that was supposed to act on it. Concretely, this rejects:
+
+          * a `provider_call` with no preceding, not-yet-closed
+            `agent_decision` (covers both "provider before any decision" and
+            "two provider_calls in a row" — the second has nothing open to
+            close);
+          * an `agent_decision` while a previous one is still open, i.e. two
+            decisions with no `provider_call` closing the first in between;
+          * `draft` while a decision is still open (an "unfinished pair") —
+            the draft would then rest on a decision the trace never shows
+            being acted on.
+
+        A repeat of either loop stage after `draft` has occurred means the
+        loop ran again post-hoc — which would mean the drafted version was
+        not actually produced by the evidence/decisions the trace claims
+        preceded it, so this is treated as an ordering failure too, not a
+        tolerated retry.
 
         Every OTHER stage (request, retrieval, draft, validation, review,
         display) must occur at most once, and the stages that do occur must
         be in non-decreasing canonical rank — the same "no going backward"
-        rule as before, just no longer silently permissive about repeats of
-        stages this loop exception was never meant to cover.
+        rule as before.
         """
         canonical = list(Stage)
         retrieval_rank = canonical.index(Stage.RETRIEVAL)
         seen_once: set = set()
         draft_seen = False
         last_once_rank = -1
+        # Pairing state for the loop segment. True = no decision is currently
+        # open — the next loop event, if any, must be a fresh agent_decision
+        # (or there may be none at all: the loop is a whole number of pairs).
+        # False = an agent_decision is open, awaiting the provider_call that
+        # closes it.
+        awaiting_decision = True
 
         for event in self.events:
             stage = event.stage
@@ -260,6 +282,15 @@ class TraceRecorder:
                     return False  # loop stage recurring after draft: invalid
                 if last_once_rank < retrieval_rank:
                     return False  # loop stage before retrieval has occurred: invalid
+
+                if stage is Stage.AGENT_DECISION:
+                    if not awaiting_decision:
+                        return False  # consecutive decisions: prior one still open
+                    awaiting_decision = False
+                else:  # Stage.PROVIDER_CALL
+                    if awaiting_decision:
+                        return False  # provider-before-decision, or two calls in a row
+                    awaiting_decision = True
                 continue
 
             if stage in seen_once:
@@ -271,6 +302,8 @@ class TraceRecorder:
                 return False  # went backward relative to prior stages
             last_once_rank = rank
             if stage is Stage.DRAFT:
+                if not awaiting_decision:
+                    return False  # draft while a decision is still unpaired
                 draft_seen = True
 
         return True
