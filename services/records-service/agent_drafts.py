@@ -13,6 +13,17 @@ produced, with the label saying where it came from (`real`, `fixture`,
 Bedrock, which matters because the region and model id have not arrived and the
 freeze has not moved.
 
+It also does not emit `retrieval`, `provider_call` or `agent_decision` trace
+stages, on the SAME grounds: this module persists what an orchestration layer
+already decided and produced, it does not perform or re-narrate that work.
+Only whichever runtime actually ran the model call and the tool lookups may
+honestly emit those three stages — see `libs/agent_provenance.Stage`'s
+docstring for the exact shape, grounded in
+`libs/eligibility_agent/runtimes/raw_bedrock.py` /`langchain_runtime.py`. Every
+function below emits at most the ONE stage its own transition corresponds to
+(`create_draft` -> `draft`, `record_validation` -> `validation`, `decide` ->
+`review`, `approved_draft` -> `display`).
+
 ⚠️ `generated_text` is PERSISTED PHI and currently UNENCRYPTED (encryption is
 tracked separately and has not landed). Synthetic data only. Nothing here may
 pass draft text to a logger, a span, or a prompt — `libs.agent_provenance`
@@ -94,6 +105,8 @@ def create_draft(
         # text — the exact confusion the labels exist to prevent.
         raise DraftError("a fallback draft must not name a model_id")
 
+    cite_list = list(citations)  # materialize once: used for both the DB rows and the trace
+
     draft = AgentDraftProvenance(
         patient_id=patient_id,
         version=next_version(db, patient_id),
@@ -107,7 +120,7 @@ def create_draft(
     db.add(draft)
     db.flush()  # assign draft.id before the citations reference it
 
-    for c in citations:
+    for c in cite_list:
         db.add(
             AgentDraftCitation(
                 draft_id=draft.id,
@@ -123,19 +136,27 @@ def create_draft(
         correlation_id, patient_id, draft.version, provenance_label,
     )
     if trace is not None:
-        # Citation ids and counts, never the citations' content and never the
-        # draft text — libs.agent_provenance raises if either is attempted, so
-        # this call is also a live assertion that we are not leaking.
-        cite_list = list(citations)
-        trace.retrieval(
-            document_count=len({c["source_id"] for c in cite_list}),
-            citation_ids=[c["citation_id"] for c in cite_list],
-            categories=sorted({c.get("category") for c in cite_list if c.get("category")}),
-        )
-        trace.provider_call(
+        # ONLY the draft stage — by reference (version, label, model/prompt
+        # version, citation ids), never the text.
+        #
+        # This function does NOT emit retrieval, provider_call or
+        # agent_decision. Those stages belong to whichever orchestration or
+        # runtime actually performed the model call and the document
+        # lookups — libs/eligibility_agent/runtimes/raw_bedrock.py and
+        # langchain_runtime.py are the reference shape (see
+        # libs/agent_provenance.Stage's docstring) — and that work happens
+        # strictly BEFORE this function is ever invoked. create_draft is a
+        # persistence step, not the agent loop; it must not fabricate stages
+        # for work it did not itself do. An earlier version of this function
+        # emitted retrieval/provider_call here, which double-counted (or
+        # invented, when called from a context with no real retrieval at
+        # all) stages that the caller's own orchestration is responsible for.
+        trace.draft(
+            draft_version=draft.version,
             label=ProvenanceLabel(provenance_label),
             model_id=model_id,
             prompt_version=prompt_version,
+            citation_ids=[c["citation_id"] for c in cite_list],
         )
     return draft
 

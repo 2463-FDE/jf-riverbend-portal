@@ -22,7 +22,7 @@ from conftest import load_module
 # separately would register `patients` twice in the same MetaData.
 drafts = load_module("services/records-service/agent_drafts.py", "agent_drafts_mod")
 
-from libs.agent_provenance import ForbiddenPayload, Stage, TraceRecorder  # noqa: E402
+from libs.agent_provenance import ForbiddenPayload, ProvenanceLabel, Stage, TraceRecorder  # noqa: E402
 
 TEXT_V1 = "Your A1c is 6.2%, down from 7.5% in March."
 TEXT_V2 = "Your A1c is 6.2%, down 1.3 points since March."
@@ -245,11 +245,23 @@ def test_the_provenance_label_reaches_the_displayed_version(db, label, model):
 
 # --- the trace, threaded through the real transitions ----------------------- #
 #
-# The client requires ONE privacy-safe trace covering request, agent decisions,
-# retrieval outcome, provider call, validation, draft version, review decision
-# and approved display. These assert it against the actual write path rather
-# than against a hand-built recorder, because a trace that only holds together
-# in a unit test is not evidence.
+# Each write-path function emits AT MOST the one stage its own transition
+# corresponds to: create_draft -> draft, record_validation -> validation,
+# decide -> review, approved_draft -> display. It does NOT emit retrieval,
+# provider_call or agent_decision — those belong to whichever orchestration
+# or runtime actually performed the model call and the document lookups,
+# strictly before create_draft is ever invoked (see agent_drafts.py's module
+# docstring and libs/agent_provenance.Stage's docstring for the real shape,
+# grounded in libs/eligibility_agent/runtimes/raw_bedrock.py /
+# langchain_runtime.py).
+#
+# NONE of the tests in this section are end-to-end D6 evidence. D6 requires a
+# real agent runtime producing the request/provider_call/agent_decision/
+# retrieval stages; no such runtime is wired to records-service yet (see
+# w8-planner D1/D6). Where a test below constructs those upstream stages by
+# hand to show the write path's OWN four stages compose correctly with a
+# correctly-shaped sequence, that upstream sequence is an explicit STAND-IN,
+# not a claim that the real orchestration exists or has been exercised.
 
 CITES = [
     {"source_id": "doc-1", "source_version": "v2", "citation_id": "c1", "category": "lab"},
@@ -258,39 +270,38 @@ CITES = [
 ]
 
 
-def test_one_trace_covers_all_seven_stages_through_the_real_path(db):
+def test_create_draft_emits_only_the_draft_stage(db):
+    """The direct regression test for the fix: create_draft must never emit
+    retrieval, provider_call or agent_decision on its own behalf, no matter
+    how many citations it is given. Exactly one event, and it is `draft`."""
     trace = TraceRecorder(correlation_id=CORR)
-    trace.request(actor_role="patient")
-    trace.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
-
-    draft = drafts.create_draft(
+    drafts.create_draft(
         db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
         provenance_label=drafts.LABEL_REAL, model_id="model-x", prompt_version="v1",
         citations=CITES, trace=trace,
     )
-    drafts.record_validation(db, draft, passed=True, trace=trace)
-    drafts.decide(db, draft, approve=True, reviewed_by=13, trace=trace)
-    drafts.approved_draft(db, 1042, trace=trace)
 
-    assert trace.is_complete(), f"missing stages: {trace.missing_stages()}"
+    assert len(trace.events) == 1
+    assert trace.events[0].stage is Stage.DRAFT
 
 
-def test_the_trace_carries_citation_ids_and_counts_not_content(db):
+def test_the_draft_stage_carries_citation_ids_not_content(db):
     trace = TraceRecorder(correlation_id=CORR)
     drafts.create_draft(
         db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
         provenance_label=drafts.LABEL_REAL, model_id="model-x", citations=CITES, trace=trace,
     )
 
-    retrieval = next(e for e in trace.events if e.stage is Stage.RETRIEVAL)
-    assert retrieval.attributes["citation_ids"] == ["c1", "c2", "c3"]
-    assert retrieval.attributes["document_count"] == 2, "two distinct sources, three citations"
-    assert retrieval.attributes["categories"] == ["lab", "vitals"]
+    event = trace.events[0]
+    assert event.stage is Stage.DRAFT
+    assert event.attributes["citation_ids"] == ["c1", "c2", "c3"]
+    assert "category" not in event.attributes and "categories" not in event.attributes
 
 
 def test_no_stage_of_the_real_path_ever_carries_the_draft_text(db):
-    """The boundary, asserted end to end. The text is in the database; it is not
-    in the trace, and the guard would have raised if any stage tried."""
+    """The boundary, asserted across the write path's own four stages. The
+    text is in the database; it is not in the trace, and the guard would
+    have raised if any stage tried."""
     trace = TraceRecorder(correlation_id=CORR)
     draft = drafts.create_draft(
         db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
@@ -303,6 +314,38 @@ def test_no_stage_of_the_real_path_ever_carries_the_draft_text(db):
     serialised = repr([e.attributes for e in trace.events])
     assert TEXT_V1 not in serialised
     assert "A1c" not in serialised, "not even a fragment of the clinical text"
+
+
+def test_the_write_paths_own_stages_compose_with_a_stand_in_upstream_sequence(db):
+    """NOT end-to-end D6 evidence — see this section's header comment. This
+    proves only that create_draft/record_validation/decide/approved_draft's
+    four stages (draft, validation, review, display) slot correctly into the
+    tail of the real required-path grammar (libs/agent_provenance.Stage) when
+    a CORRECTLY-SHAPED upstream sequence precedes them. The
+    request/provider_call/agent_decision/retrieval events below are
+    hand-assembled stand-ins for an orchestration layer that does not exist
+    yet; they are not produced by any runtime this test exercises."""
+    trace = TraceRecorder(correlation_id=CORR)
+    trace.request(actor_role="patient")
+    trace.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    trace.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    trace.retrieval(document_count=2, citation_ids=["c1", "c2", "c3"], categories=["lab", "vitals"])
+    trace.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    trace.agent_decision(tool_name=None, turn=2, stop_reason="end_turn")
+
+    draft = drafts.create_draft(
+        db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
+        provenance_label=drafts.LABEL_REAL, model_id="model-x", prompt_version="v1",
+        citations=CITES, trace=trace,
+    )
+    drafts.record_validation(db, draft, passed=True, trace=trace)
+    drafts.decide(db, draft, approve=True, reviewed_by=13, trace=trace)
+    drafts.approved_draft(db, 1042, trace=trace)
+
+    assert trace.is_complete(), f"missing stages: {trace.missing_stages()}"
+    assert trace.is_ordered()
+    assert trace.is_grounded()
+    assert trace.is_acceptable()
 
 
 def test_the_display_stage_names_the_version_that_was_shown(db):
@@ -339,7 +382,7 @@ def test_a_refusal_is_traced_with_its_code_and_no_review_follows(db):
     assert not any(e.stage is Stage.REVIEW for e in trace.events)
 
 
-def test_the_provider_stage_records_the_prompt_version_not_the_prompt(db):
+def test_the_draft_stage_records_the_prompt_version_not_the_prompt(db):
     trace = TraceRecorder(correlation_id=CORR)
     drafts.create_draft(
         db, patient_id=1042, generated_text=TEXT_V1, correlation_id=CORR,
@@ -347,10 +390,11 @@ def test_the_provider_stage_records_the_prompt_version_not_the_prompt(db):
         trace=trace,
     )
 
-    call = next(e for e in trace.events if e.stage is Stage.PROVIDER_CALL)
-    assert call.attributes["prompt_version"] == "v3"
-    assert call.attributes["model_id"] == "model-x"
-    assert "prompt" not in call.attributes
+    event = trace.events[0]
+    assert event.stage is Stage.DRAFT
+    assert event.attributes["prompt_version"] == "v3"
+    assert event.attributes["model_id"] == "model-x"
+    assert "prompt" not in event.attributes
 
 
 def test_a_fallback_draft_traces_as_fallback_with_no_model(db):
@@ -360,9 +404,10 @@ def test_a_fallback_draft_traces_as_fallback_with_no_model(db):
         provenance_label=drafts.LABEL_FALLBACK, model_id=None, trace=trace,
     )
 
-    call = next(e for e in trace.events if e.stage is Stage.PROVIDER_CALL)
-    assert call.attributes["provenance_label"] == "fallback"
-    assert call.attributes["model_id"] is None
+    event = trace.events[0]
+    assert event.stage is Stage.DRAFT
+    assert event.attributes["provenance_label"] == "fallback"
+    assert event.attributes["model_id"] is None
 
 
 def test_the_write_path_works_without_a_trace_at_all(db):
