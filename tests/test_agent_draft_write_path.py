@@ -103,6 +103,32 @@ def test_validation_passing_makes_a_draft_decidable(db):
     assert draft.status == drafts.VALIDATED
 
 
+def test_a_passing_validation_always_records_the_pass_code(db):
+    """migration 020's agent_draft_validation_code_consistent CHECK requires
+    validation_code == 'PASS' for every non-refused post-validation status.
+    Leaving this caller-supplied (or defaulting to None, as this once did)
+    would either drift from the constant or write NULL — both rejected by the
+    real constraint, not just an in-memory assumption."""
+    draft = drafts.record_validation(db, _create(db), passed=True)
+
+    assert draft.validation_code == drafts.VALIDATION_PASS_CODE == "PASS"
+
+
+def test_a_differing_code_on_a_passing_validation_is_rejected(db):
+    with pytest.raises(drafts.DraftError, match="PASS"):
+        drafts.record_validation(db, _create(db), passed=True, validation_code="ALMOST")
+
+
+def test_a_refusal_without_a_code_is_rejected(db):
+    with pytest.raises(drafts.DraftError, match="refusal"):
+        drafts.record_validation(db, _create(db), passed=False)
+
+
+def test_a_refusal_cannot_reuse_the_pass_code(db):
+    with pytest.raises(drafts.DraftError, match="PASS"):
+        drafts.record_validation(db, _create(db), passed=False, validation_code="PASS")
+
+
 def test_a_refused_draft_records_its_reason_code(db):
     draft = drafts.record_validation(db, _create(db), passed=False,
                                      validation_code="UNSUPPORTED_CLAIM")

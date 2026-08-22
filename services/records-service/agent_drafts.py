@@ -45,6 +45,12 @@ LABEL_FIXTURE = "fixture"
 LABEL_FALLBACK = "fallback"
 LABELS = (LABEL_REAL, LABEL_FIXTURE, LABEL_FALLBACK)
 
+# The one machine-readable code every non-refused post-validation status
+# carries, per migration 020's agent_draft_validation_code_consistent CHECK.
+# Named here so record_validation branches on a constant, not a literal that
+# can drift from the constraint.
+VALIDATION_PASS_CODE = "PASS"
+
 
 class DraftError(Exception):
     """A refused transition. Carries no draft text, deliberately."""
@@ -142,22 +148,45 @@ def record_validation(db: Session, draft: AgentDraftProvenance, *, passed: bool,
     A refusal is terminal for that version: `refused` is not a state a review can
     approve out of. Regenerating produces a new version, which is the point of
     versioning.
+
+    `validation_code` is only meaningful for a REFUSAL: a passing validation
+    always records `VALIDATION_PASS_CODE` (migration 020's
+    agent_draft_validation_code_consistent CHECK requires exactly this for
+    every non-refused post-validation status, and leaving it caller-supplied —
+    or defaulting to None, as this used to — either drifts from that constant
+    or writes NULL, both of which the constraint now rejects outright). A
+    refusal must carry its own specific, non-blank, non-PASS reason code, or
+    "refused, no reason" would reach the review queue unexplained.
     """
     if draft.status != DRAFT:
         raise DraftError(
             f"only a {DRAFT!r} draft can be validated; version {draft.version} is {draft.status!r}"
         )
+    if passed:
+        if validation_code is not None and validation_code != VALIDATION_PASS_CODE:
+            raise DraftError(
+                f"a passing validation always records {VALIDATION_PASS_CODE!r}; "
+                f"got {validation_code!r} — do not pass a differing code"
+            )
+        code = VALIDATION_PASS_CODE
+    else:
+        if not validation_code or not validation_code.strip():
+            raise DraftError("a refusal must carry a specific, non-blank refusal code")
+        if validation_code == VALIDATION_PASS_CODE:
+            raise DraftError(f"a refusal code cannot be {VALIDATION_PASS_CODE!r}")
+        code = validation_code
+
     draft.status = VALIDATED if passed else REFUSED
-    draft.validation_code = validation_code
+    draft.validation_code = code
     db.flush()
     log.info(
         "agent draft validation (correlation_id=%s version=%s passed=%s code=%s)",
-        draft.correlation_id, draft.version, passed, validation_code,
+        draft.correlation_id, draft.version, passed, code,
     )
     if trace is not None:
         trace.validation(
             passed=passed,
-            validation_code=validation_code,
+            validation_code=code,
             citation_ids=[c.citation_id for c in citations_for(db, draft.id)],
         )
     return draft
