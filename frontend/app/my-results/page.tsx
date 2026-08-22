@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import AgentSummaryPanel from "../components/AgentSummaryPanel";
 import { apiFetch, getUser } from "../lib/session";
 
 /**
@@ -187,6 +188,10 @@ export default function MyResultsPage() {
           ))}
         </ul>
       ) : null}
+
+      {/* Separate panel, below the results the report itself printed. The
+          deterministic list above is unchanged by this feature. */}
+      <AgentSummaryPanel />
 
       {user ? <p className="rb-results-signed-in">Signed in as {user.username}</p> : null}
     </main>
