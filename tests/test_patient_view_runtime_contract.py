@@ -13,6 +13,7 @@ runtimes/langgraph_runtime.py's own control flow against a documented shape
 of LangGraph's StateGraph/conditional-edges API, not compatibility with the
 real library.
 """
+import contextlib
 import logging
 import sys
 import types
@@ -45,6 +46,34 @@ FIXED_CID = "corrid-contract"
 # uses LangChain message/chat-model types — composer.py calls libs.llm_client
 # directly, not a bound chat model).
 # --------------------------------------------------------------------------- #
+
+
+@contextlib.contextmanager
+def _langgraph_unimportable():
+    """Make `import langgraph` raise, exactly as real absence does.
+
+    requirements-dev.txt now carries langchain (the Week-8 agent's tests run the
+    real create_agent graph) and langchain depends on langgraph, so the three
+    tests below can no longer rely on ambient absence. Blocking is NOT faking: a
+    fake makes the import succeed and proves nothing, while this raises the same
+    ModuleNotFoundError an uninstalled package does.
+    """
+    class _Blocker:
+        def find_spec(self, name, path=None, target=None):
+            if name.split(".")[0] == "langgraph":
+                raise ModuleNotFoundError(f"No module named {name!r}")
+            return None
+
+    evicted = {k: v for k, v in sys.modules.items() if k.split(".")[0] == "langgraph"}
+    for key in evicted:
+        del sys.modules[key]
+    blocker = _Blocker()
+    sys.meta_path.insert(0, blocker)
+    try:
+        yield
+    finally:
+        sys.meta_path.remove(blocker)
+        sys.modules.update(evicted)
 
 
 def _install_fake_langgraph(monkeypatch):
@@ -465,15 +494,14 @@ def test_langgraph_runtime_denies_before_importing_langgraph_at_all():
     # test in this file) — it proves the real import order against the real
     # absence of the package, which a faked sys.modules entry can never
     # exercise (the import always "succeeds" against a fake).
-    assert "langgraph" not in sys.modules, "langgraph must not already be imported for this test to mean anything"
     repo = fresh_repo()
     authorizer = make_authorizer({"clinician": {1042}})
 
-    with pytest.raises(AuthorizationDenied):
-        build_runtime("langgraph").run(req(patient=9999), authorizer=authorizer, repository=repo)
-
+    with _langgraph_unimportable():
+        with pytest.raises(AuthorizationDenied):
+            build_runtime("langgraph").run(req(patient=9999), authorizer=authorizer, repository=repo)
+        assert "langgraph" not in sys.modules  # denial short-circuited before the import ran
     assert repo.load_calls == 0
-    assert "langgraph" not in sys.modules  # denial short-circuited before the import ever ran
 
 
 def test_langgraph_runtime_degrades_safely_for_an_authorized_request_when_langgraph_is_absent():
@@ -484,18 +512,18 @@ def test_langgraph_runtime_degrades_safely_for_an_authorized_request_when_langgr
     # raise downstream of authorization" promise. This deliberately does NOT
     # fake langgraph, proving the real, uninstalled case degrades to a safe
     # ESCALATED result instead of raising.
-    assert "langgraph" not in sys.modules, "langgraph must not already be imported for this test to mean anything"
     repo = fresh_repo()
     authorizer = make_authorizer({"clinician": {1042}})  # this patient IS authorized
 
-    result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+    with _langgraph_unimportable():
+        result = build_runtime("langgraph").run(req(patient=1042), authorizer=authorizer, repository=repo)
+        assert "langgraph" not in sys.modules
 
     assert result.outcome == PatientViewOutcome.ESCALATED
     assert result.escalation is True
     assert ViewReason.RUNTIME_UNAVAILABLE in result.reasons
     assert result.evidence_ids == []
     assert repo.load_calls == 0  # the import failed before any specialist ran
-    assert "langgraph" not in sys.modules
 
 
 def _install_fake_langgraph_with_broken_compile(monkeypatch):
@@ -654,10 +682,9 @@ def test_build_runtime_defaults_to_custom(monkeypatch):
 
 
 def test_langgraph_runtime_is_never_imported_when_custom_is_selected():
-    # Importing/selecting "custom" must not require langgraph installed —
-    # proven by NOT faking it here and confirming build_runtime("custom")
-    # still works.
-    assert sys.modules.get("langgraph") is None
-    runtime_obj = build_runtime("custom")
-    result = runtime_obj.run(req(patient=1042), authorizer=make_authorizer(), repository=fresh_repo())
+    # Selecting "custom" must not require langgraph installed — proven by making
+    # it unimportable and confirming build_runtime("custom") still works.
+    with _langgraph_unimportable():
+        runtime_obj = build_runtime("custom")
+        result = runtime_obj.run(req(patient=1042), authorizer=make_authorizer(), repository=fresh_repo())
     assert result.outcome == PatientViewOutcome.COMPLETED
