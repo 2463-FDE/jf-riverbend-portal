@@ -88,7 +88,7 @@ def _computation(citation_id, a, b, result):
 
 
 GROUNDED_CLAIMS = [_quote(POL, POL_SENTENCE), _computation(TRN, "7.5", "6.2", "1.3")]
-GROUNDED_SUMMARY = '"%s". Your A1c fell 1.3 points, from 7.5 to 6.2.' % POL_SENTENCE
+GROUNDED_SUMMARY = '"%s". The difference between 7.5 and 6.2 is 1.3.' % POL_SENTENCE
 
 
 @pytest.fixture
@@ -254,6 +254,20 @@ def test_an_unsupported_summary_sentence_is_refused_despite_a_valid_claim(db):
     # patient would read as clinical reassurance.
     outcome = _generate(db, [_tool_call(), _final(
         '"%s". %s' % (POL_SENTENCE, INJECTED_SENTENCE), [_quote(POL, POL_SENTENCE)])])
+
+    assert not outcome.accepted
+    assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE
+    assert outcome.draft.status == drafts.REFUSED
+    assert drafts.approved_draft(db, PATIENT) is None
+
+
+def test_a_sentence_reusing_the_computed_number_is_refused(db):
+    # Same valid computation claim as the accepted path, and the number is even
+    # correct — but "fell 1.3 points" is an interpretation the source never
+    # printed. Sharing a number is not sharing a meaning, so only the sentence
+    # the claim itself generates counts as backed by it.
+    outcome = _generate(db, [_tool_call(), _final(
+        '"%s". Your A1c fell 1.3 points.' % POL_SENTENCE, GROUNDED_CLAIMS)])
 
     assert not outcome.accepted
     assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE

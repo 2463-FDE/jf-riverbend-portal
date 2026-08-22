@@ -65,6 +65,21 @@ def _normalize(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+def _computation_sentence(claim: ComputationClaim) -> str:
+    """The one sentence a computation claim licenses, generated from the claim.
+
+    A sentence merely CONTAINING the right number is not evidence of anything:
+    "Your A1c fell 1.3 points" and "The difference between 7.5 and 6.2 is 1.3"
+    share a number and not a meaning, and only the second is what the arithmetic
+    established. The first reads as a clinical interpretation the source never
+    made. So the claim generates its sentence and the draft has to match it,
+    rather than the draft asserting freely and the claim loosely corroborating.
+    """
+    left, right = (str(o) for o in claim.operands)
+    verb = "difference between" if claim.operator == "subtract" else "sum of"
+    return f"The {verb} {left} and {right} is {claim.result}."
+
+
 def _is_instruction_shaped(text: str) -> bool:
     return any(p.search(text) for p in _INSTRUCTION_PATTERNS)
 
@@ -118,19 +133,19 @@ def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> Validatio
     # marks. An unquoted assertion is how an unsupported claim rides along in a
     # draft whose other claims are perfectly valid — the prompt already requires
     # "every statement backed by a claim", and this is that rule enforced rather
-    # than requested. A sentence counts as supported when it contains a
-    # validated quote or one of a validated computation's own numbers, or is
-    # itself a fragment of a validated quote.
-    evidence = list(validated_quotes)
-    for claim in draft.claims:
-        if isinstance(claim, ComputationClaim):
-            evidence.extend(str(o) for o in claim.operands)
-            evidence.append(str(claim.result))
+    # than requested. A quote-backed sentence has to contain its validated quote
+    # (or be a fragment of one); a computation-backed sentence has to BE the
+    # sentence its claim generates, exactly.
+    templates = {_normalize(_computation_sentence(c)) for c in draft.claims
+                 if isinstance(c, ComputationClaim)}
     for sentence in _SENTENCE_END.split(draft.summary):
         normalized = _normalize(sentence)
         if not _HAS_CONTENT.search(normalized):
             continue  # punctuation or quote marks left over by the split
-        if not any(e and (e in normalized or normalized in e) for e in evidence):
-            return ValidationOutcome(False, CODE_UNSUPPORTED_SUMMARY_SENTENCE)
+        if normalized in templates:
+            continue
+        if any(q and (q in normalized or normalized in q) for q in validated_quotes):
+            continue
+        return ValidationOutcome(False, CODE_UNSUPPORTED_SUMMARY_SENTENCE)
 
     return ValidationOutcome(True, None)

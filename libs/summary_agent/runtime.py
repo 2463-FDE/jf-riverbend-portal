@@ -50,8 +50,14 @@ or
    "result": "<the answer>"}
 
 Every statement in the summary must be backed by a claim. Copy quotes character
-for character, use numbers exactly as the document prints them, and leave out
-anything the evidence does not support."""
+for character and use numbers exactly as the document prints them.
+
+A sentence reporting a computation must be written in exactly this form, with
+nothing added: "The difference between 7.5 and 6.2 is 1.3." (subtract) or "The
+sum of 7.5 and 6.2 is 13.7." (add). Do not interpret the number — "your A1c
+fell 1.3 points" is a claim the document did not make and will be refused.
+
+Leave out anything the evidence does not support."""
 
 
 class ProviderNotConfigured(RuntimeError):
