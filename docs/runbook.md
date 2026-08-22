@@ -252,15 +252,23 @@ re-checks `is_active` per request and `SqlPatientAccessGate` joins it).
 
 ## Demo accounts
 
-All seeded users share password `portal123`. Twelve carry the deprecated flat
-`staff` role — `frontdesk`, `rdelgado`, `drnguyen`, `roiclerk`, `mokonkwo` and
-so on — because migrating real accounts onto the nine-role grid is separate,
-roster-gated work.
+All seeded STAFF accounts share password `portal123`. Eleven carry the
+deprecated flat `staff` role — `frontdesk`, `rdelgado`, `roiclerk`,
+`mokonkwo` and so on — because migrating real accounts onto the nine-role
+grid is separate, roster-gated work.
 
-**One exception: `drkim` carries role `clinician`.** It is the only account
-that holds `summary_review.decide`, so it is the only account that can reach
-the review queue. Without it the clinician half of the demo is unreachable by
-anyone. (Full list: `db/seed/generate_seed.py`.)
+**Two exceptions: `drkim` and `drnguyen` (promoted 2026-08-22) carry role
+`clinician`.** They are the only accounts that hold `summary_review.decide`,
+so they are the only accounts that can reach the review queue. Deliberately
+two, not one: patient 1738 is granted to BOTH, so the shared-queue case (two
+independent reviewers, one chart) is demonstrable — a single clinician
+account could only ever prove exclusive access. `drkim` holds 1042, 1737 and
+1738; `drnguyen` holds 1738 and 1739. Neither is granted the other's
+exclusive patient. (Full list: `db/seed/generate_seed.py`.)
+
+**Seeded PATIENT accounts (1738, 1739) use a different password,
+`portalportal123`** (12-char activation floor) — not the staff `portal123`.
+1042 and 1737 have no seeded patient account; they start invite-ready.
 
 ## Running the patient-portal demo
 
@@ -270,9 +278,11 @@ Three prerequisites, each of which silently breaks the demo if skipped.
 without it and compose refuses to interpolate — see the top of this file.
 Never commit the value.
 
-**2. The database must be seeded from the CURRENT seed file.** `drkim` and the
-demo A1c trend exist only there. On a fresh volume this is automatic; on an
-existing one, `docker compose down -v && make up`.
+**2. The database must be seeded from the CURRENT seed file.** The four
+canonical demo patients — 1042 (Maria Gonzalez), 1737 (Priya Khan), 1738
+(Thomas Johnson), 1739 (Aisha Taylor) — and their trends, appointments and
+(for 1738/1739) pre-activated portal accounts exist only there. On a fresh
+volume this is automatic; on an existing one, `docker compose down -v && make up`.
 
 **3. Reset between rehearsals — the demo is not repeatable without it.**
 
@@ -282,22 +292,48 @@ make demo-reset
 
 Review decisions are durable by design: a rejected record is never re-queued
 and an approved one stays released. So every rehearsal, and every run of the
-integration suite, consumes demo state. After one full run the demo patient
-has an approval, a rejection and one remaining case; after two the review
-queue is empty and the clinician beat cannot be shown. `make demo-reset`
-returns patient 1737 to a clean pre-demo state and re-asserts the reviewer's
-grant. It prints what it restored:
+integration suite, consumes demo state. `make demo-reset` (2026-08-22, covers
+all four canonical patients and both clinician accounts) returns 1042 and 1737
+to invite-ready (no portal account — the demo starts from "front desk issues a
+code"), restores 1738's and 1739's pre-activated accounts to active if a
+rehearsal deactivated one, restores `drkim`/`drnguyen` to active if either was
+deactivated, and re-asserts every grant the four charts need — including the
+deliberate two-clinician overlap on 1738. It prints one row per patient:
 
 ```
-reviews=0   portal_account=none   reviewer_grant=active   a1c_results=2
+ patient_id |      name      | portal_account | coverage | encounters | records | trend_results | appointments | pending_reviews | active_reviewers |       other_active_grants
+------------+----------------+----------------+----------+------------+---------+---------------+--------------+-----------------+------------------+----------------------------------
+       1042 | Maria Gonzalez | none           | active   |          4 |       4 |             2 |            3 |               0 | drkim            | frontdesk, rdelgado
+       1737 | Priya Khan     | none           | active   |          3 |       5 |             2 |            2 |               0 | drkim            | frontdesk
+       1738 | Thomas Johnson | patient-1738   | active   |          3 |       3 |             2 |            2 |               0 | drkim, drnguyen  | drpatel, frontdesk, patient-1738
+       1739 | Aisha Taylor   | patient-1739   | active   |          3 |       4 |             2 |            2 |               0 | drnguyen         | frontdesk, patient-1739
 ```
 
-`reviewer_grant` is the one to read. It asserts the *gate's own* predicate —
-the account is active, the grant is unrevoked and unexpired — rather than
-merely that `drkim` exists, because a revoked grant leaves the review queue
-empty while the account looks perfectly fine. `INACTIVE` there, or
-`a1c_results` other than 2, means the database predates the current seed:
-re-seed with `docker compose down -v && make up`.
+`active_reviewers` is the column that answers "who can actually decide a case
+for this patient" — accounts on the `clinician`/`nursing_ma` role holding an
+active grant, listed separately from `other_active_grants` (front desk,
+registration, treating-provider, self) so the two kinds of access are never
+read as one mixed list. 1738's two names are the deliberate overlap: both
+`drkim` and `drnguyen` can review it independently, and neither can silently
+overwrite the other's decision (`review_queue.py`'s pending-case transition
+guard). A missing expected name in `active_reviewers`, `portal_account`
+reading `none` for 1738/1739, or `trend_results` under 2 for any row, means
+the database predates the current seed: re-seed with
+`docker compose down -v && make up`.
+
+**`pending_reviews` reads 0 for every row immediately after a reset — this is
+correct, not a partial reset.** `patient_summary_reviews` rows are created
+lazily, the first time the deterministic results/summary path for that
+specific patient is actually read (records-service's
+`review_queue.enqueue_refusals`, called from `get_patient_summary`). To
+populate a patient's queue: activate/sign in as that patient and load
+`/my-results` (or call `GET /patient/me/summary`) — nothing else does it, and
+nothing in `make demo-reset` ever inserts into `patient_summary_reviews`.
+
+A real Bedrock call against any of these charts also writes an immutable
+`agent_draft_provenance` row that this reset never deletes (by design) — a
+genuinely virgin agent-draft demonstration needs a fresh-volume re-seed, not
+merely a reset.
 
 ### Keep these two OFF the primary demo path
 

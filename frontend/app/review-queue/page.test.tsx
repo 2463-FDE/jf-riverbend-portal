@@ -30,9 +30,17 @@ function queue(items: unknown[]) {
 function decided(patient_visible: boolean) {
   return { ok: true, status: 200, json: async () => ({ patient_visible }) } as Response;
 }
+function identity(name: string) {
+  return { ok: true, status: 200, json: async () => ({ name }) } as Response;
+}
 
 async function renderWithOneCase() {
-  vi.mocked(apiFetch).mockResolvedValueOnce(queue([CASE]));
+  // Two calls for one rendered case: the queue itself, then the case card's
+  // own identity lookup (2026-08-22 — the combined "{Name} — Patient ID {id}"
+  // display every case now shows).
+  vi.mocked(apiFetch)
+    .mockResolvedValueOnce(queue([CASE]))
+    .mockResolvedValueOnce(identity("Priya Khan"));
   render(<ReviewQueuePage />);
   return screen.findByText(CASE.record_body);
 }
@@ -52,8 +60,9 @@ describe("deciding a case", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /release to patient/i }));
 
-    // One call so far: the initial load. Nothing has been decided.
-    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+    // Two calls so far: the initial load and the case's identity lookup.
+    // Nothing has been decided.
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
   });
 
@@ -77,7 +86,7 @@ describe("deciding a case", () => {
     fireEvent.click(await screen.findByRole("button", { name: /cancel/i }));
 
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
-    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(2);
   });
 
   it("sends the decision only after confirmation", async () => {

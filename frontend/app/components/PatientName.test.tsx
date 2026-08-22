@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
-// The name sits beside a bare patient ID on two staff screens. What matters is
-// not that it renders — it is that it never renders the WRONG patient's name,
-// and that a denied lookup reads as a boundary rather than a broken screen.
+// The identity box renders "{Name} — Patient ID {id}" — the combined format
+// required everywhere a patient is identified (2026-08-22). What matters is
+// not that it renders — it is that it never renders the WRONG patient's
+// identity, and that a denied lookup reads as a boundary rather than a broken
+// screen.
 
 vi.mock("../lib/session", () => ({ apiFetch: vi.fn() }));
 
@@ -25,7 +27,7 @@ describe("the patient name beside the ID", () => {
 
     render(<PatientName patientId="1042" />);
 
-    expect(await screen.findByText("Maria Alvarez")).toBeInTheDocument();
+    expect(await screen.findByText("Maria Alvarez — Patient ID 1042")).toBeInTheDocument();
   });
 
   it("fetches nothing at all when there is no loaded id", () => {
@@ -71,23 +73,32 @@ describe("the patient name beside the ID", () => {
     rerender(<PatientName patientId="1330" />);
     releaseFirst(ok({ id: 1042, name: "Maria Alvarez" }));
 
-    expect(await screen.findByText("Daniel Cho")).toBeInTheDocument();
+    expect(await screen.findByText("Daniel Cho — Patient ID 1330")).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.queryByText("Maria Alvarez")).not.toBeInTheDocument()
+      expect(screen.queryByText(/Maria Alvarez/)).not.toBeInTheDocument()
     );
   });
 
   it("clears the previous name before the next one loads", async () => {
     vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1042, name: "Maria Alvarez" }));
     const { rerender } = render(<PatientName patientId="1042" />);
-    await screen.findByText("Maria Alvarez");
+    await screen.findByText("Maria Alvarez — Patient ID 1042");
 
-    // A stale name surviving the clear is the failure this guards: both
+    // A stale identity surviving the clear is the failure this guards: both
     // callers pass "" on an id change precisely so nothing is left behind.
     rerender(<PatientName patientId="" />);
 
-    expect(screen.queryByText("Maria Alvarez")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Maria Alvarez/)).not.toBeInTheDocument();
     expect(screen.getByTestId("patient-name")).toHaveTextContent(/patient name/i);
+  });
+
+  it("combines name and id into one string, never the name alone", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1738, name: "Thomas Johnson" }));
+
+    render(<PatientName patientId="1738" />);
+
+    const box = await screen.findByTestId("patient-name");
+    expect(box).toHaveTextContent("Thomas Johnson — Patient ID 1738");
   });
 
   it("does not treat a 200 with no name as a name", async () => {
@@ -96,5 +107,32 @@ describe("the patient name beside the ID", () => {
     render(<PatientName patientId="1042" />);
 
     expect(await screen.findByText(/name unavailable/i)).toBeInTheDocument();
+  });
+
+  it("shows only the name when nameOnly is set (records/appointments)", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1738, name: "Thomas Johnson" }));
+
+    render(<PatientName patientId="1738" nameOnly />);
+
+    const box = await screen.findByTestId("patient-name");
+    expect(box).toHaveTextContent("Thomas Johnson");
+    expect(box).not.toHaveTextContent(/Patient ID/);
+  });
+
+  it("nameOnly still falls back to the same placeholder text on denial", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(err(403, { error: "name unavailable" }));
+
+    render(<PatientName patientId="1739" nameOnly />);
+
+    expect(await screen.findByText(/name unavailable/i)).toBeInTheDocument();
+  });
+
+  it("defaults to combined when nameOnly is omitted (review cards, results, summaries)", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(ok({ id: 1738, name: "Thomas Johnson" }));
+
+    render(<PatientName patientId="1738" />);
+
+    const box = await screen.findByTestId("patient-name");
+    expect(box).toHaveTextContent("Thomas Johnson — Patient ID 1738");
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import PatientName from "./PatientName";
 import { apiFetch } from "../lib/session";
 
 /**
@@ -35,6 +36,11 @@ interface Draft {
 
 export default function AgentDraftPanel() {
   const [patientId, setPatientId] = useState("1737");
+  // The identity box needs the LOADED id, same rule as records/appointments:
+  // it only advances once Load/Generate actually runs, never on a keystroke —
+  // and starts EMPTY, not "1737", so this panel makes no patient-specific
+  // request at all until a clinician actually presses one of those buttons.
+  const [loadedPatientId, setLoadedPatientId] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -97,17 +103,23 @@ export default function AgentDraftPanel() {
             }}
             inputMode="numeric"
           />
-          <button type="button" className="rb-btn" disabled={busy} onClick={() => void call(base)}>
+          <button
+            type="button"
+            className="rb-btn"
+            disabled={busy}
+            onClick={() => { setLoadedPatientId(patientId); void call(base); }}
+          >
             Load
           </button>
           <button
             type="button"
             className="rb-btn rb-btn--primary"
             disabled={busy}
-            onClick={() => void call(base, { method: "POST" })}
+            onClick={() => { setLoadedPatientId(patientId); void call(base, { method: "POST" }); }}
           >
             Generate
           </button>
+          <PatientName patientId={loadedPatientId} />
         </div>
       </div>
 

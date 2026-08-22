@@ -141,10 +141,16 @@ export default function IntakePage() {
         });
       } else {
         setEligibilityJobId(data.eligibility_job_id ?? null);
+        // The name is the form's OWN just-submitted values, not a round trip —
+        // it is what was authoritatively written to patients.name a moment ago
+        // (intake-service composes `name` from first_name/last_name the same
+        // way), so there is nothing to look up. Matches the "{Name} — Patient
+        // ID {id}" format required everywhere a patient is identified.
+        const submittedName = [demo.first_name, demo.last_name].filter(Boolean).join(" ");
         setResult({
           ok: true,
           text: data.patient_id
-            ? `Intake submitted. Your patient ID is ${data.patient_id}.`
+            ? `Intake submitted. ${submittedName} — Patient ID ${data.patient_id}.`
             : "Intake submitted successfully.",
         });
       }

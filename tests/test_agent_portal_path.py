@@ -179,3 +179,81 @@ def test_a_patient_can_request_their_own_summary_and_not_another_patients(client
     theirs = api.post(f"/patients/{OTHER_PATIENT}/agent-summary/request", headers=PATIENT_H)
     assert theirs.status_code == 403, "a patient holds a grant for exactly one chart"
     assert app_mod._latest_draft(db, OTHER_PATIENT) is None, "and nothing was generated for it"
+
+
+# --- two clinicians, deliberately overlapping on one patient ---------------- #
+#
+# Mirrors the real seed's matrix (db/seed/generate_seed.py, 2026-08-22):
+# drkim holds {1042, 1737, 1738}, drnguyen holds {1738, 1739} — 1738 is the
+# deliberate overlap so a shared-queue case is demonstrable, and each is
+# excluded from the other's exclusive patient. Applied here to the AGENT-DRAFT
+# path specifically (generation/read/decision), which is a SEPARATE review
+# surface from the deterministic record-review queue
+# (services/records-service/review_queue.py) — both are gated the same way,
+# through the same permission and the same patient_access_gate, but a draft
+# approved/rejected here has no effect on a record decided there, and vice
+# versa. Reuses the fixture's existing PATIENT/OTHER_PATIENT ids as the shared
+# and exclusive patients respectively, so this does not need its own schema.
+
+SECOND_CLINICIAN_ID = 903
+
+
+@pytest.fixture
+def two_clinician_client(client):
+    api, db = client
+    # A second clinician, granted the SAME chart (PATIENT) as CLINICIAN_ID —
+    # the overlap — and nothing else.
+    db.add(app_mod.User(id=SECOND_CLINICIAN_ID, username="drnguyen", role="clinician", is_active=True))
+    db.flush()
+    db.add(models.PatientAccessGrant(user_id=SECOND_CLINICIAN_ID, patient_id=PATIENT))
+    db.commit()
+    return api, db
+
+
+def _headers_for(uid, uname):
+    return {"X-Internal-Token": TOKEN, "X-Actor-Id": str(uid), "X-Actor-Name": uname}
+
+
+SECOND_CLINICIAN = _headers_for(SECOND_CLINICIAN_ID, "drnguyen")
+
+
+def test_two_clinicians_can_each_generate_and_read_a_shared_patients_draft(two_clinician_client):
+    api, db = two_clinician_client
+
+    generated = api.post(f"/patients/{PATIENT}/agent-draft", headers=CLINICIAN)
+    assert generated.status_code == 201
+
+    seen_by_first = api.get(f"/patients/{PATIENT}/agent-draft", headers=CLINICIAN)
+    seen_by_second = api.get(f"/patients/{PATIENT}/agent-draft", headers=SECOND_CLINICIAN)
+    assert seen_by_first.status_code == 200 and seen_by_second.status_code == 200
+    assert seen_by_first.json()["generated_text"] == seen_by_second.json()["generated_text"]
+
+
+def test_the_second_clinician_cannot_decide_a_draft_the_first_already_decided(two_clinician_client):
+    """The agent-draft equivalent of the record-review queue's own
+    cannot-overwrite guarantee: a shared grant means both can attempt a
+    decision, not that either attempt is free to ignore the other's."""
+    api, db = two_clinician_client
+    draft = api.post(f"/patients/{PATIENT}/agent-draft", headers=CLINICIAN).json()
+
+    first = api.post(f"/agent-drafts/{draft['id']}/decision", json={"decision": "approved"},
+                     headers=CLINICIAN)
+    assert first.status_code == 200
+
+    second = api.post(f"/agent-drafts/{draft['id']}/decision", json={"decision": "rejected"},
+                      headers=SECOND_CLINICIAN)
+    assert second.status_code == 409, "an already-decided draft must not be overwritable by anyone"
+
+    final = api.get(f"/patients/{PATIENT}/agent-summary", headers=PATIENT_H).json()
+    assert final["available"] is True, "the first clinician's approval must stand"
+
+
+def test_a_clinician_ungranted_for_a_patient_cannot_reach_its_draft_even_if_generated_by_another(two_clinician_client):
+    """drnguyen is not granted OTHER_PATIENT — the exclusive-patient half of
+    the overlap test. Generating a draft under one clinician's own grant must
+    not become readable by a second clinician who was never granted it."""
+    api, db = two_clinician_client
+    api.post(f"/patients/{OTHER_PATIENT}/agent-draft", headers=CLINICIAN)
+
+    denied = api.get(f"/patients/{OTHER_PATIENT}/agent-draft", headers=SECOND_CLINICIAN)
+    assert denied.status_code == 403

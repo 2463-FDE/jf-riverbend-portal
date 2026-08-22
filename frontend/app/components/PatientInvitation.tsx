@@ -14,6 +14,10 @@ import { apiFetch } from "../lib/session";
  * a copy button so it does not have to be retyped.
  */
 export default function PatientInvitation({ patientId }: { patientId: string }) {
+  // Blank or non-numeric — this component has no id of its own to validate
+  // against, only whatever the records screen's Patient ID field currently
+  // holds, which starts empty now that screen has no default (2026-08-22).
+  const validId = /^\d+$/.test(patientId.trim());
   const [code, setCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -23,6 +27,7 @@ export default function PatientInvitation({ patientId }: { patientId: string }) 
   const [blocked, setBlocked] = useState(false);
 
   async function issue() {
+    if (!validId) return;
     setError(null);
     setBusy(true);
     try {
@@ -31,15 +36,24 @@ export default function PatientInvitation({ patientId }: { patientId: string }) 
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        // 409 is the useful one: this patient already has an unexpired
-        // invitation. Say what to do about it rather than showing a status
-        // code, and offer the action that does it.
-        setBlocked(res.status === 409);
-        setError(
-          res.status === 409
-            ? "This patient already has an unexpired invitation. Revoke it before issuing another."
-            : body?.detail || "Could not issue an invitation. Please try again."
-        );
+        // Branch on the machine-readable reason, never on the English
+        // message — a 409 is not ONE thing. LIVE_INVITATION means a revoke
+        // control is the useful next action; ACTIVE_PORTAL_ACCOUNT means
+        // there is no invitation to revoke at all, and offering that button
+        // would be an action with nothing behind it.
+        const reason = body?.detail?.reason;
+        setBlocked(reason === "LIVE_INVITATION");
+        if (reason === "LIVE_INVITATION") {
+          setError("This patient already has an unexpired invitation.");
+        } else if (reason === "ACTIVE_PORTAL_ACCOUNT") {
+          setError("This patient already has an active portal account.");
+        } else {
+          setError(
+            typeof body?.detail === "string"
+              ? body.detail
+              : body?.detail?.message || "Could not issue an invitation. Please try again."
+          );
+        }
         return;
       }
       setBlocked(false);
@@ -140,7 +154,7 @@ export default function PatientInvitation({ patientId }: { patientId: string }) 
         </p>
       )}
       <div className="rb-invite__actions">
-        <button type="button" onClick={issue} disabled={busy} className="rb-btn">
+        <button type="button" onClick={issue} disabled={busy || !validId} className="rb-btn">
           {busy ? "Issuing…" : "Issue invitation"}
         </button>
         {blocked && (
