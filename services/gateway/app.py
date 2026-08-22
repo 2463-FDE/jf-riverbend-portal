@@ -1079,3 +1079,108 @@ def proxy_review_decision(
         headers=headers,
         forward_status=True,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Week 8 agent draft.
+#
+# The three clinician routes are gated exactly like the review queue
+# (summary_review.decide AND records.read) because they ARE the review: the
+# draft read returns unapproved text, and generation puts a case in front of
+# whoever decides. The patient route is a separate function on own_record.read,
+# resolving the chart from the SESSION and never from the path, so a patient
+# cannot name someone else's patient_id at all.
+# --------------------------------------------------------------------------- #
+
+
+def _agent_headers(session: dict) -> dict:
+    headers = _correlation_headers()
+    headers["X-Actor-Id"] = session.get("user_id") or ""
+    headers["X-Actor-Name"] = session.get("username") or ""
+    headers["X-Internal-Token"] = settings.internal_service_token
+    return headers
+
+
+@app.post("/patients/{patient_id}/agent-draft", status_code=201)
+def proxy_generate_agent_draft(
+    patient_id: int,
+    session: dict = Depends(require_permission("summary_review.decide")),
+    _read: dict = Depends(require_permission("records.read")),
+):
+    return _post("records", f"/patients/{patient_id}/agent-draft", {},
+                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.get("/patients/{patient_id}/agent-draft")
+def proxy_get_agent_draft(
+    patient_id: int,
+    session: dict = Depends(require_permission("summary_review.decide")),
+    _read: dict = Depends(require_permission("records.read")),
+):
+    return _get("records", f"/patients/{patient_id}/agent-draft",
+                headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/agent-drafts/{draft_id}/decision")
+def proxy_decide_agent_draft(
+    draft_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("summary_review.decide")),
+    _read: dict = Depends(require_permission("records.read")),
+):
+    return _post("records", f"/agent-drafts/{draft_id}/decision", payload,
+                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.get("/patient/me/agent-summary")
+def proxy_own_agent_summary(
+    session: dict = Depends(require_permission("own_record.read")),
+    db: Session = Depends(get_db),
+):
+    """The signed-in patient's approved summary. Chart resolved from the
+    session, mirroring /patient/me/summary — the path carries no patient id, so
+    there is nothing for a caller to substitute."""
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("agent summary: account store unreadable for user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient_id is None:
+        log.warning("agent summary: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+    return _get("records", f"/patients/{patient_id}/agent-summary",
+                headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/patient/me/agent-summary/request", status_code=201)
+def proxy_request_own_agent_summary(
+    session: dict = Depends(require_permission("own_record.read")),
+    db: Session = Depends(get_db),
+):
+    """The patient asks for a summary of their own chart.
+
+    Like /patient/me/summary, the chart is resolved from the SESSION and the
+    path carries no patient id — there is nothing for the browser to name, so
+    there is nothing for it to substitute. Returns a receipt (version, status,
+    label, citations, correlation id) and never draft text.
+    """
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("agent summary request: account store unreadable user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient_id is None:
+        log.warning("agent summary request: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+    return _post("records", f"/patients/{patient_id}/agent-summary/request", {},
+                 headers=_agent_headers(session), forward_status=True)

@@ -230,3 +230,70 @@ class ReviewDecisionOut(BaseModel):
     record_id: int
     state: str
     patient_visible: bool  # stated outright so the consequence is never implicit
+
+
+# --- Week 8 agent draft: generate -> review -> approved-only display -------- #
+
+
+class AgentDraftCitationOut(BaseModel):
+    """A citation pinned to the source VERSION the draft actually cited."""
+
+    source_id: str
+    source_version: str
+    citation_id: str
+    category: str | None = None
+
+
+class AgentDraftOut(BaseModel):
+    """A draft as a clinician reviews it — the full text, never a summary of it.
+
+    `provenance_label` is required on the wire, not optional, because a screen
+    that can render a draft without knowing whether a model produced it is a
+    screen that will eventually present a fallback as model output.
+    """
+
+    id: int
+    patient_id: int
+    version: int
+    status: str
+    provenance_label: str          # "real" | "fixture" | "fallback"
+    model_id: str | None = None
+    validation_code: str | None = None
+    generated_text: str
+    citations: list[AgentDraftCitationOut] = []
+
+
+class AgentDraftDecisionRequest(BaseModel):
+    decision: str                  # "approved" | "rejected"
+
+
+class AgentSummaryOut(BaseModel):
+    """What a patient may see: the ONE approved version, exactly as stored.
+
+    `available` is explicit so "nothing approved yet" is a state the UI renders
+    deliberately rather than inferring from a null it might forget to check.
+    """
+
+    available: bool
+    patient_id: int
+    version: int | None = None
+    provenance_label: str | None = None
+    generated_text: str | None = None
+    citations: list[AgentDraftCitationOut] = []
+
+
+class AgentSummaryRequestOut(BaseModel):
+    """The receipt a patient gets for asking. Carries NO draft text.
+
+    A patient may know that a summary exists, which version it is, what state it
+    is in and where its evidence came from — none of that is the summary. The
+    text itself stays behind the clinician gate until it is approved, and the
+    only route that returns it to a patient is the approved-only one.
+    """
+
+    patient_id: int
+    version: int
+    status: str
+    provenance_label: str
+    correlation_id: str
+    citations: list[AgentDraftCitationOut] = []

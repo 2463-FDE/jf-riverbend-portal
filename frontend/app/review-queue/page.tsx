@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import AgentDraftPanel from "../components/AgentDraftPanel";
 import { apiFetch } from "../lib/session";
 
 /**
@@ -211,6 +212,10 @@ export default function ReviewQueuePage() {
           ))}
         </ul>
       ) : null}
+
+      {/* A separate decision on a separate artifact: the queue above releases a
+          record's own words, this releases a generated summary. */}
+      <AgentDraftPanel />
     </main>
   );
 }

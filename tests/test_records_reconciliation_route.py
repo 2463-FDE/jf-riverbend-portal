@@ -33,7 +33,6 @@ from conftest import load_module
 
 app_mod = load_module("services/records-service/app.py", "records_app_reconciliation")
 
-from models import PatientAccessGrant  # noqa: E402
 
 TEST_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
@@ -168,8 +167,19 @@ class FakeSession:
         return next((p for p in self.patients if p.id == pk), None)
 
     def execute(self, stmt, _params=None):
+        # Dispatch on the mapped class NAME, not its identity. conftest's
+        # load_module evicts a stale same-named sibling per service, so
+        # `models` can be re-imported while `patient_access_gate` — cached from
+        # an earlier records-service load and not a sibling of the service that
+        # evicted it — keeps emitting select() against the PREVIOUS
+        # PatientAccessGrant class. Both classes map the same table and the same
+        # columns; only their object identity differs, and identity is the one
+        # thing this fake was reading. Which module instance wins depends on
+        # which test files ran first, so an `is` comparison here makes these
+        # tests pass or fail on collection order.
         entity = stmt.column_descriptions[0]["entity"]
-        if entity is app_mod.Patient:
+        name = getattr(entity, "__name__", None)
+        if name == "Patient":
             # Round 5 review: find_ssn_match_ids now filters on ssn_digits in
             # SQL (migration 015), not an unfiltered scan — its query compiles
             # a scalar `ssn_digits_1` (the equality) and a scalar `id_1` (the
@@ -192,10 +202,10 @@ class FakeSession:
                 wanted = set(id_filter) if isinstance(id_filter, (list, set, tuple)) else {id_filter}
                 return _FakeQueryResult([p for p in self.patients if p.id in wanted])
             return _FakeQueryResult(self.patients)
-        if entity is app_mod.Encounter:
+        if name == "Encounter":
             patient_id = stmt.whereclause.right.value
             return _FakeQueryResult([e for e in self.encounters if e.patient_id == patient_id])
-        if entity is PatientAccessGrant:
+        if name == "PatientAccessGrant":
             # Bound-parameter extraction (not WHERE-clause structure
             # inspection) so this doesn't care whether the caller is
             # SqlPatientAccessGate's single .first() lookup (the requested
@@ -218,7 +228,7 @@ class FakeSession:
             else:
                 matched_ids = [requested_ids] if requested_ids in allowed else []
             return _FakeQueryResult(matched_ids)
-        if entity is app_mod.User:
+        if name == "User":
             # The actor role/is_active lookup added when permission
             # enforcement moved into this service. Returns the legacy `staff`
             # role by default so these grant-focused tests keep testing grants.

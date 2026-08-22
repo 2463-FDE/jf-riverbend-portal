@@ -40,17 +40,26 @@ from libs.patient_view_agent import (
     run_patient_view,
 )
 from logging_config import configure
-from models import AuditLog, Encounter, Patient, PatientSummaryReview, Record, User
+from models import AgentDraftProvenance, AuditLog, Encounter, Patient, PatientSummaryReview, Record, User
 from patient_access_gate import (
     SqlPatientAccessGate,
     active_patient_ids_query,
     parse_user_id,
 )
+import agent_drafts
 import patient_summary
 import review_queue
+import summary_agent_path
+from libs.agent_provenance import ProvenanceLabel, TraceRecorder
+from libs.tracing.spans import new_correlation_id
 from patient_view_repository import SqlChartRepository
 from reconciliation import build_reconciliation_result
 from schemas import (
+    AgentDraftCitationOut,
+    AgentDraftDecisionRequest,
+    AgentDraftOut,
+    AgentSummaryOut,
+    AgentSummaryRequestOut,
     EncounterOut,
     EncounterWithRecords,
     PatientChart,
@@ -1279,4 +1288,280 @@ def decide_review(
         record_id=record_id,
         state=state,
         patient_visible=(state == review_queue.APPROVED),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Week 8 agent draft: generate -> clinician review -> approved-only display.
+#
+# One correlation id spans all three. Generation issues it and it is persisted
+# on the draft, so review and display reuse `draft.correlation_id` rather than
+# minting their own — two ids would turn the client's one eight-stage trace
+# into two traces of four, which is exactly the thing the trace exists to be.
+#
+# The patient route below returns the approved version or nothing. There is no
+# parameter, and no status branch, by which pending or rejected text reaches it:
+# `agent_drafts.approved_draft` filters on `status == APPROVED` in SQL, so
+# unapproved text is never loaded rather than loaded and then hidden.
+# --------------------------------------------------------------------------- #
+
+
+def _draft_out(db: Session, draft: AgentDraftProvenance) -> AgentDraftOut:
+    return AgentDraftOut(
+        id=draft.id,
+        patient_id=draft.patient_id,
+        version=draft.version,
+        status=draft.status,
+        provenance_label=draft.provenance_label,
+        model_id=draft.model_id,
+        validation_code=draft.validation_code,
+        generated_text=draft.generated_text,
+        citations=[
+            AgentDraftCitationOut(
+                source_id=c.source_id, source_version=c.source_version,
+                citation_id=c.citation_id, category=c.category,
+            )
+            for c in agent_drafts.citations_for(db, draft.id)
+        ],
+    )
+
+
+def _actor_role(db: Session, actor_id: Optional[int]) -> str:
+    if actor_id is None:
+        return "unknown"
+    row = db.execute(select(User.role).where(User.id == actor_id)).scalar_one_or_none()
+    return row or "unknown"
+
+
+def _latest_draft(db: Session, patient_id: int) -> Optional[AgentDraftProvenance]:
+    return db.execute(
+        select(AgentDraftProvenance)
+        .where(AgentDraftProvenance.patient_id == patient_id)
+        .order_by(AgentDraftProvenance.version.desc())
+        .limit(1)
+    ).scalars().first()
+
+
+@app.post("/patients/{patient_id}/agent-draft", response_model=AgentDraftOut, status_code=201)
+def generate_agent_draft(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Run the agent for this patient and persist the resulting version.
+
+    Gated on `summary_review.decide` AND a grant for this patient: generating a
+    draft is the first half of the review a clinician is about to perform, and
+    nobody who may not decide should be able to put a case in front of someone
+    who can.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
+        patient_id=patient_id, required_permission="summary_review.decide",
+        audit_action="agent_draft_generate",
+    )
+    actor_id = parse_user_id(x_actor_id)
+    correlation_id = x_request_id or new_correlation_id()
+
+    try:
+        outcome = summary_agent_path.generate_draft(
+            db, patient_id=patient_id, actor_role=_actor_role(db, actor_id),
+            correlation_id=correlation_id,
+        )
+        _write_audit(
+            db, actor=_actor_label(x_actor_name, x_actor_id),
+            message=(f"agent_draft_generate patient_id={patient_id} "
+                     f"version={outcome.draft.version} label={outcome.label} "
+                     f"passed={outcome.accepted} correlation_id={correlation_id}"),
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("agent draft: generation failed for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="could not generate a draft right now")
+    return _draft_out(db, outcome.draft)
+
+
+@app.get("/patients/{patient_id}/agent-draft", response_model=AgentDraftOut)
+def get_agent_draft(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """The latest draft, whatever its status — the clinician-only view.
+
+    This is the ONE route that may return unapproved draft text, and it is
+    gated on the decide permission plus a grant. The patient route is a
+    different function returning a different model, so there is no shared code
+    path along which pending text could reach a patient.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
+        patient_id=patient_id, required_permission="summary_review.decide",
+        audit_action="agent_draft_read",
+    )
+    draft = _latest_draft(db, patient_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="no draft for this patient")
+    return _draft_out(db, draft)
+
+
+@app.post("/agent-drafts/{draft_id}/decision", response_model=AgentDraftOut)
+def decide_agent_draft(
+    draft_id: int,
+    req: AgentDraftDecisionRequest,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Approve or reject a version. This is what changes what a patient sees."""
+    _verify_internal_token(x_internal_token)
+    actor_id = _authorize_reviewer(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, audit_action="agent_draft_decide"
+    )
+    if req.decision not in (agent_drafts.APPROVED, agent_drafts.REJECTED):
+        raise HTTPException(status_code=400, detail="decision must be approved or rejected")
+
+    # Grant-scoped IN THE QUERY: a draft for a patient this reviewer does not
+    # hold is never loaded, so it cannot be decided and its existence is not
+    # disclosed by a distinguishable error.
+    draft = db.execute(
+        select(AgentDraftProvenance).where(
+            AgentDraftProvenance.id == draft_id,
+            AgentDraftProvenance.patient_id.in_(active_patient_ids_query(actor_id)),
+        )
+    ).scalars().one_or_none()
+    if draft is None:
+        raise HTTPException(status_code=404, detail="no such draft")
+
+    try:
+        agent_drafts.decide(
+            db, draft, approve=req.decision == agent_drafts.APPROVED, reviewed_by=actor_id,
+            trace=TraceRecorder(draft.correlation_id),  # the draft's own id, never a new one
+        )
+        _write_audit(
+            db, actor=_actor_label(x_actor_name, x_actor_id),
+            message=(f"agent_draft_decide draft_id={draft.id} version={draft.version} "
+                     f"decision={req.decision} correlation_id={draft.correlation_id}"),
+        )
+        db.commit()
+    except agent_drafts.DraftError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("agent draft: decision failed draft_id=%s", draft_id)
+        raise HTTPException(status_code=503, detail="could not record the decision")
+    return _draft_out(db, draft)
+
+
+@app.get("/patients/{patient_id}/agent-summary", response_model=AgentSummaryOut)
+def get_agent_summary(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """The patient's own approved summary, or `available=false`.
+
+    Gated on `own_record.read` — the permission only the `patient` role holds —
+    plus the grant, exactly like `/patients/{id}/summary`. A pending version 2
+    changes nothing here: `approved_draft` returns the one APPROVED row, so an
+    approved version 1 keeps displaying until a later version is itself
+    approved and supersedes it.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
+        patient_id=patient_id, required_permission="own_record.read",
+        audit_action="agent_summary_access",
+    )
+    try:
+        draft = agent_drafts.approved_draft(db, patient_id)
+        if draft is None:
+            return AgentSummaryOut(available=False, patient_id=patient_id)
+        # Display is the eighth stage, recorded under the draft's OWN
+        # correlation id — which is only knowable after the row is read, so the
+        # stage is emitted here rather than passed into the read above.
+        TraceRecorder(draft.correlation_id).display(
+            draft_version=draft.version, label=ProvenanceLabel(draft.provenance_label),
+        )
+        detail = _draft_out(db, draft)
+    except SQLAlchemyError:
+        log.exception("agent summary: unreadable for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+
+    return AgentSummaryOut(
+        available=True, patient_id=patient_id, version=detail.version,
+        provenance_label=detail.provenance_label,
+        generated_text=detail.generated_text, citations=detail.citations,
+    )
+
+
+@app.post("/patients/{patient_id}/agent-summary/request",
+          response_model=AgentSummaryRequestOut, status_code=201)
+def request_agent_summary(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """A patient asks for a summary of their own chart.
+
+    The demo's first move is the patient asking, so generation cannot be
+    clinician-only — but a patient initiating it must not become a patient
+    reading it. This returns a RECEIPT: version, status, label, citations and
+    the correlation id, and no draft text at all. `AgentSummaryRequestOut` has
+    no text field, so there is no branch here that could be made to emit one.
+
+    Gated on `own_record.read` — the permission only the `patient` role holds —
+    plus the grant, which a patient holds for exactly one chart. The gateway
+    resolves the id from the session rather than the request, so the browser
+    never names a patient; this check is what makes that hold even if something
+    upstream ever did.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
+        patient_id=patient_id, required_permission="own_record.read",
+        audit_action="agent_summary_request",
+    )
+    actor_id = parse_user_id(x_actor_id)
+    correlation_id = x_request_id or new_correlation_id()
+
+    try:
+        outcome = summary_agent_path.generate_draft(
+            db, patient_id=patient_id, actor_role=_actor_role(db, actor_id),
+            correlation_id=correlation_id,
+        )
+        _write_audit(
+            db, actor=_actor_label(x_actor_name, x_actor_id),
+            message=(f"agent_summary_request patient_id={patient_id} "
+                     f"version={outcome.draft.version} label={outcome.label} "
+                     f"passed={outcome.accepted} correlation_id={correlation_id}"),
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("agent summary request: generation failed patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="could not request a summary right now")
+
+    detail = _draft_out(db, outcome.draft)
+    return AgentSummaryRequestOut(
+        patient_id=patient_id, version=detail.version, status=detail.status,
+        provenance_label=detail.provenance_label, correlation_id=outcome.draft.correlation_id,
+        citations=detail.citations,
     )

@@ -12,6 +12,12 @@ vi.mock("../lib/session", () => ({
   getUser: () => ({ username: "patient-1737", role: "patient" }),
 }));
 
+// The approved-summary panel is a separate panel with its own fetch and its own
+// tests (components/AgentSummaryPanel.test.tsx). Stubbed here so these keep
+// asserting the deterministic results path alone, which this feature does not
+// change — an extra apiFetch would otherwise consume the mocks below.
+vi.mock("../components/AgentSummaryPanel", () => ({ default: () => null }));
+
 import MyResultsPage from "./page";
 import { apiFetch } from "../lib/session";
 
