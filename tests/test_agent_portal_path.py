@@ -154,3 +154,28 @@ def test_a_pending_version_2_does_not_replace_an_approved_version_1(client):
     api.post(f"/agent-drafts/{v2.id}/decision", json={"decision": "approved"}, headers=CLINICIAN)
     now_v2 = api.get(f"/patients/{PATIENT}/agent-summary", headers=PATIENT_H).json()
     assert now_v2["version"] == 2 and now_v2["generated_text"] == V2_TEXT
+
+
+def test_a_patient_can_request_their_own_summary_and_not_another_patients(client):
+    """Asking is the demo's first move, and it must not become reading.
+
+    This one runs the real generation path (no Bedrock configured, so it takes
+    the deterministic fallback), because the point is what the RESPONSE carries
+    back to the patient who asked.
+    """
+    api, db = client
+
+    mine = api.post(f"/patients/{PATIENT}/agent-summary/request", headers=PATIENT_H)
+    assert mine.status_code == 201
+    body = mine.json()
+    assert body["patient_id"] == PATIENT and body["version"] == 1
+    assert body["correlation_id"], "the receipt names the trace this request started"
+    assert "generated_text" not in body, "asking is not reading"
+    assert "Riverbend releases laboratory results" not in mine.text, "no draft text, anywhere"
+
+    # The draft it created is not displayable to them yet.
+    assert api.get(f"/patients/{PATIENT}/agent-summary", headers=PATIENT_H).json()["available"] is False
+
+    theirs = api.post(f"/patients/{OTHER_PATIENT}/agent-summary/request", headers=PATIENT_H)
+    assert theirs.status_code == 403, "a patient holds a grant for exactly one chart"
+    assert app_mod._latest_draft(db, OTHER_PATIENT) is None, "and nothing was generated for it"

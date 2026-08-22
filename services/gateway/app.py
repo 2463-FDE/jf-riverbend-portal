@@ -1155,3 +1155,32 @@ def proxy_own_agent_summary(
         raise HTTPException(status_code=403, detail="not authorized")
     return _get("records", f"/patients/{patient_id}/agent-summary",
                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/patient/me/agent-summary/request", status_code=201)
+def proxy_request_own_agent_summary(
+    session: dict = Depends(require_permission("own_record.read")),
+    db: Session = Depends(get_db),
+):
+    """The patient asks for a summary of their own chart.
+
+    Like /patient/me/summary, the chart is resolved from the SESSION and the
+    path carries no patient id — there is nothing for the browser to name, so
+    there is nothing for it to substitute. Returns a receipt (version, status,
+    label, citations, correlation id) and never draft text.
+    """
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("agent summary request: account store unreadable user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient_id is None:
+        log.warning("agent summary request: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+    return _post("records", f"/patients/{patient_id}/agent-summary/request", {},
+                 headers=_agent_headers(session), forward_status=True)

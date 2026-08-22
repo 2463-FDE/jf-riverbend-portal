@@ -280,3 +280,20 @@ class AgentSummaryOut(BaseModel):
     provenance_label: str | None = None
     generated_text: str | None = None
     citations: list[AgentDraftCitationOut] = []
+
+
+class AgentSummaryRequestOut(BaseModel):
+    """The receipt a patient gets for asking. Carries NO draft text.
+
+    A patient may know that a summary exists, which version it is, what state it
+    is in and where its evidence came from — none of that is the summary. The
+    text itself stays behind the clinician gate until it is approved, and the
+    only route that returns it to a patient is the approved-only one.
+    """
+
+    patient_id: int
+    version: int
+    status: str
+    provenance_label: str
+    correlation_id: str
+    citations: list[AgentDraftCitationOut] = []

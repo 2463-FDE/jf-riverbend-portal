@@ -59,6 +59,7 @@ from schemas import (
     AgentDraftDecisionRequest,
     AgentDraftOut,
     AgentSummaryOut,
+    AgentSummaryRequestOut,
     EncounterOut,
     EncounterWithRecords,
     PatientChart,
@@ -1505,4 +1506,62 @@ def get_agent_summary(
         available=True, patient_id=patient_id, version=detail.version,
         provenance_label=detail.provenance_label,
         generated_text=detail.generated_text, citations=detail.citations,
+    )
+
+
+@app.post("/patients/{patient_id}/agent-summary/request",
+          response_model=AgentSummaryRequestOut, status_code=201)
+def request_agent_summary(
+    patient_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """A patient asks for a summary of their own chart.
+
+    The demo's first move is the patient asking, so generation cannot be
+    clinician-only — but a patient initiating it must not become a patient
+    reading it. This returns a RECEIPT: version, status, label, citations and
+    the correlation id, and no draft text at all. `AgentSummaryRequestOut` has
+    no text field, so there is no branch here that could be made to emit one.
+
+    Gated on `own_record.read` — the permission only the `patient` role holds —
+    plus the grant, which a patient holds for exactly one chart. The gateway
+    resolves the id from the session rather than the request, so the browser
+    never names a patient; this check is what makes that hold even if something
+    upstream ever did.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
+        patient_id=patient_id, required_permission="own_record.read",
+        audit_action="agent_summary_request",
+    )
+    actor_id = parse_user_id(x_actor_id)
+    correlation_id = x_request_id or new_correlation_id()
+
+    try:
+        outcome = summary_agent_path.generate_draft(
+            db, patient_id=patient_id, actor_role=_actor_role(db, actor_id),
+            correlation_id=correlation_id,
+        )
+        _write_audit(
+            db, actor=_actor_label(x_actor_name, x_actor_id),
+            message=(f"agent_summary_request patient_id={patient_id} "
+                     f"version={outcome.draft.version} label={outcome.label} "
+                     f"passed={outcome.accepted} correlation_id={correlation_id}"),
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("agent summary request: generation failed patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="could not request a summary right now")
+
+    detail = _draft_out(db, outcome.draft)
+    return AgentSummaryRequestOut(
+        patient_id=patient_id, version=detail.version, status=detail.status,
+        provenance_label=detail.provenance_label, correlation_id=outcome.draft.correlation_id,
+        citations=detail.citations,
     )

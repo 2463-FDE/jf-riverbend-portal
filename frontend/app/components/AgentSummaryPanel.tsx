@@ -39,9 +39,18 @@ const PROVENANCE_TEXT: Record<string, string> = {
     "Written directly from your care team's own approved documents — not by the AI assistant — then approved by your care team.",
 };
 
+interface RequestReceipt {
+  version: number;
+  status: string;
+  provenance_label: string;
+  correlation_id: string;
+}
+
 export default function AgentSummaryPanel() {
   const [summary, setSummary] = useState<AgentSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<RequestReceipt | null>(null);
+  const [requesting, setRequesting] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -66,6 +75,45 @@ export default function AgentSummaryPanel() {
     void load();
   }, [load]);
 
+  // Asking is not reading. The receipt says a summary was made and which
+  // version it is; the text stays behind the clinician gate until approved, and
+  // the response has no text field for it to arrive in.
+  async function request() {
+    setRequesting(true);
+    setError(null);
+    setReceipt(null);
+    try {
+      const res = await apiFetch("/api/patient/agent-summary/request", { method: "POST" });
+      if (res.status === 401 || res.status === 403) {
+        setError("You are not signed in to a patient account.");
+        return;
+      }
+      if (!res.ok) {
+        setError("We could not request a summary just now.");
+        return;
+      }
+      setReceipt((await res.json()) as RequestReceipt);
+    } catch {
+      setError("We could not reach the server.");
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  const requestAction = (
+    <>
+      <button type="button" className="rb-btn" disabled={requesting} onClick={() => void request()}>
+        {requesting ? "Requesting…" : "Request summary"}
+      </button>
+      {receipt && (
+        <p className="rb-agent-receipt" role="status">
+          Requested. Version {receipt.version} is {receipt.status} and is waiting for a clinician
+          to review it. You will see it here once it is approved.
+        </p>
+      )}
+    </>
+  );
+
   if (error) {
     return (
       <section className="rb-agent-summary" aria-labelledby="agent-summary-heading">
@@ -83,6 +131,7 @@ export default function AgentSummaryPanel() {
           There is no approved summary on your record yet. One appears here only after a
           clinician has reviewed and approved it.
         </p>
+        {requestAction}
       </section>
     );
   }
@@ -117,6 +166,8 @@ export default function AgentSummaryPanel() {
           </ul>
         </>
       )}
+
+      {requestAction}
     </section>
   );
 }
