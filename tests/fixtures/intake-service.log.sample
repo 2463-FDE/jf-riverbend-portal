@@ -1,0 +1,18 @@
+# SCRUBBED SAMPLE — not a runtime log, never written to by any service.
+#
+# Quote this when an example of the intake log is needed. The live
+# logs/intake-service.log is untracked (see .gitignore) and must not be pasted
+# into a document, a ticket or a report, even though its contents are synthetic.
+#
+# This shows the CURRENT shape. `summary=` is built by _intake_log_summary from
+# an ALLOWLIST of exactly two keys — correlation_id and created_via — so no
+# field added to the request schema later can widen it. Identifiers below are
+# placeholders, not values any system ever emitted.
+
+2026-01-01 09:00:00 INFO  intake-service started on :8071 env=development
+2026-01-01 09:00:00 INFO  connected to postgres host=postgres db=riverbend
+2026-01-01 09:00:07 INFO  GET /healthz 200 0.4ms
+2026-01-01 09:01:12 INFO  POST /intake summary={"correlation_id":"<CORRELATION-ID>","created_via":"portal"}
+2026-01-01 09:01:12 INFO  POST /intake 201 38.2ms
+2026-01-01 09:02:41 INFO  POST /intake summary={"correlation_id":"<CORRELATION-ID>","created_via":"front_desk"}
+2026-01-01 09:02:41 WARNING  intake insert failed error_type=IntegrityError
