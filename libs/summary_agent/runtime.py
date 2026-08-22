@@ -52,6 +52,13 @@ or
 Every statement in the summary must be backed by a claim. Copy quotes character
 for character and use numbers exactly as the document prints them.
 
+Build the summary as a sequence of whole sentences, each one either a sentence
+copied WORD FOR WORD from a retrieved document (with a matching quote claim) or
+exactly the computation sentence described below. Do not paraphrase, do not
+merge two documents into one sentence, and do not add connective openings such
+as "Regarding X," or "In summary," — a sentence that is not word for word from a
+document, and is not exactly the computation sentence, will be refused.
+
 A sentence reporting a computation must be written in exactly this form, with
 nothing added: "The difference between 7.5 and 6.2 is 1.3." (subtract) or "The
 sum of 7.5 and 6.2 is 13.7." (add). Do not interpret the number — "your A1c
