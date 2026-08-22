@@ -14,8 +14,8 @@ dist/
 # Untracked 2026-08-22. As with `.env` below, history was NOT rewritten: the old
 # lines remain in every past commit. The controls are that the data is synthetic
 # and that `_intake_log_summary` now logs an allowlist of two keys, so nothing
-# new of this shape is written. See tests/fixtures/ for a scrubbed sample to
-# quote when an example is needed — never the live file.
+# new of this shape is written. When an example of the log format is needed,
+# quote docs/runbook.md's "Logs & PHI warning" section — never the live file.
 *.log
 logs/
 .venv/
