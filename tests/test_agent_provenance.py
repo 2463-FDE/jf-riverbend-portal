@@ -27,10 +27,17 @@ def _rec():
 
 
 def _full(t):
+    """The REAL, grounded path — one tool cycle, exactly the shape
+    raw_bedrock.py/langchain_runtime.py actually produce: a provider_call
+    always precedes the agent_decision derived from its response; retrieval
+    follows only a tool_use decision; a second provider_call/agent_decision
+    pair (this one final) closes the loop before drafting."""
     t.request(actor_role="patient")
-    t.retrieval(document_count=2, citation_ids=["c1", "c2"], categories=["lab"], excluded_count=1)
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x", latency_ms=120)
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.retrieval(document_count=2, citation_ids=["c1", "c2"], categories=["lab"], excluded_count=1)
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x", latency_ms=95)
+    t.agent_decision(tool_name=None, turn=2, stop_reason="end_turn")
     t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
             prompt_version="v3", citation_ids=["c1"])
     # migration 020's agent_draft_validation_code_consistent CHECK requires
@@ -110,13 +117,14 @@ def test_forbidden_keys_does_not_accidentally_ban_permitted_names():
 # --- what the stages carry -------------------------------------------------- #
 
 
-def test_one_trace_covers_all_eight_stages_in_order():
+def test_one_trace_covers_the_real_grounded_path_in_order():
     """The client requires ONE trace across the whole path, so a partial trace
     is a failed acceptance criterion rather than a partial success."""
     t = _full(_rec())
 
     assert t.is_complete()
     assert t.is_ordered()
+    assert t.is_grounded()
     assert t.is_acceptable()
     assert t.missing_stages() == []
     assert len(STAGES) == 8
@@ -143,150 +151,165 @@ def test_stages_out_of_canonical_order_are_detected():
     assert not t.is_acceptable()
 
 
-# --- the loop exception: only agent_decision/provider_call may repeat, and
-# only before draft ----------------------------------------------------------- #
+# --- the real loop grammar, grounded in raw_bedrock.py / langchain_runtime.py:
+# request -> {provider_call -> agent_decision(tool_use) -> retrieval}* ->
+# provider_call -> agent_decision(final) -> draft -> validation -> review ->
+# display ---------------------------------------------------------------- #
 
 
-def test_a_genuine_tool_loop_repeating_before_draft_is_ordered():
-    """A bounded tool-calling loop can decide and call the model more than
-    once while gathering evidence — that is the actual shape of the required
-    path, not a violation of it."""
-    t = _rec()
-    t.request(actor_role="patient")
-    t.retrieval(document_count=2, citation_ids=["c1"], categories=["lab"])
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+def _tool_cycle(t, *, turn: int):
+    """One (provider_call, agent_decision(tool_use), retrieval) cycle — the
+    unit that repeats zero or more bounded times before the closing, final
+    decision."""
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
-    t.agent_decision(tool_name="search_documents", turn=2, stop_reason="tool_use")
+    t.agent_decision(tool_name="search_documents", turn=turn, stop_reason="tool_use")
+    t.retrieval(document_count=1, citation_ids=[f"c{turn}"], categories=["lab"])
+    return t
+
+
+def _final_decision_through_display(t, *, turn: int):
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.agent_decision(tool_name=None, turn=turn, stop_reason="end_turn")
     t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
             prompt_version="v3", citation_ids=["c1"])
     t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])
     t.review(decision="approved", draft_version=1, decided_by_user_id=13)
     t.display(draft_version=1, label=ProvenanceLabel.REAL)
-
-    assert t.is_ordered()
-    assert t.is_acceptable()
-
-
-def _up_to_retrieval(t):
-    t.request(actor_role="patient")
-    t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])
     return t
 
 
-def test_a_single_decision_then_call_pair_is_ordered():
-    """The minimal loop: exactly one complete, correctly-ordered pair."""
-    t = _up_to_retrieval(_rec())
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
-    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
-    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
-            prompt_version="v3", citation_ids=["c1"])
+def test_one_tool_call_success():
+    """Jorge's canonical example, exactly: request -> provider_call ->
+    agent_decision(tool_use) -> retrieval -> provider_call ->
+    agent_decision(final) -> draft -> validation -> review -> display."""
+    t = _rec()
+    t.request(actor_role="patient")
+    _tool_cycle(t, turn=1)
+    _final_decision_through_display(t, turn=2)
 
     assert t.is_ordered()
+    assert t.is_grounded()
+    assert t.is_acceptable()
 
 
-def test_provider_call_before_any_decision_is_rejected():
-    """A provider_call with nothing open to close — either it is the very
-    first loop event, or it follows a pair that already closed cleanly.
-    Either way, a call must always be preceded by its own, still-open,
-    decision."""
-    t = _up_to_retrieval(_rec())
-    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+def test_multi_tool_call_success():
+    """Bounded, repeated (provider_call, agent_decision(tool_use), retrieval)
+    cycles are the actual shape of a multi-turn tool loop — not a violation."""
+    t = _rec()
+    t.request(actor_role="patient")
+    _tool_cycle(t, turn=1)
+    _tool_cycle(t, turn=2)
+    _tool_cycle(t, turn=3)
+    _final_decision_through_display(t, turn=4)
+
+    assert t.is_ordered()
+    assert t.is_grounded()
+    assert t.is_acceptable()
+
+
+def test_provider_call_must_precede_every_decision():
+    """An agent_decision can never legitimately appear without the
+    provider_call whose response it was derived from — raw_bedrock.py's
+    decision literally comes FROM `response.tool_calls`, so there is no path
+    in the real loop where a decision has no preceding call. Skipping straight
+    from request to a decision is rejected."""
+    t = _rec()
+    t.request(actor_role="patient")
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
 
     assert not t.is_ordered()
 
 
-def test_consecutive_agent_decisions_are_rejected():
-    """Two decisions with no provider_call closing the first in between —
-    the first decision is left dangling."""
-    t = _up_to_retrieval(_rec())
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
-    t.agent_decision(tool_name="search_documents", turn=2, stop_reason="tool_use")
+def test_missing_retrieval_after_a_tool_use_decision_is_rejected():
+    """A decision to call a tool with no record of that tool ever running —
+    the loop always executes the selected tool before calling the model
+    again; skipping straight to the next provider_call is invalid."""
+    t = _rec()
+    t.request(actor_role="patient")
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")  # retrieval skipped
 
     assert not t.is_ordered()
 
 
-def test_consecutive_provider_calls_are_rejected():
-    """A complete pair, then a SECOND provider_call with no new decision to
-    close — the second call has nothing open."""
-    t = _up_to_retrieval(_rec())
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
-    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
-    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
-
-    assert not t.is_ordered()
-
-
-def test_draft_after_an_unfinished_pair_is_rejected():
-    """An agent_decision with no provider_call ever closing it before draft —
-    the draft would rest on a decision the trace never shows being acted on."""
-    t = _up_to_retrieval(_rec())
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+def test_unfinished_tool_cycle_before_draft_is_rejected():
+    """After a retrieval, the loop always calls the model again to learn
+    whether another tool is needed or the answer is final — going straight
+    from retrieval to draft skips that closing call+decision entirely."""
+    t = _rec()
+    t.request(actor_role="patient")
+    _tool_cycle(t, turn=1)
     t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
             prompt_version="v3", citation_ids=["c1"])
 
     assert not t.is_ordered()
 
 
-def test_a_second_unfinished_pair_after_a_complete_one_is_still_rejected():
-    """One clean pair followed by a dangling decision — the first pair being
-    well-formed must not paper over the second, unfinished one."""
-    t = _up_to_retrieval(_rec())
-    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+@pytest.mark.parametrize("next_event", ["provider_call", "retrieval"])
+def test_final_answer_not_immediately_followed_by_draft_is_rejected(next_event):
+    """A decision classified FINAL (no tool selected) must be followed by
+    draft, not by more loop activity — either would mean the loop kept going
+    after the model had already signalled it was done."""
+    t = _rec()
+    t.request(actor_role="patient")
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
-    t.agent_decision(tool_name="search_documents", turn=2, stop_reason="tool_use")
-    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
-            prompt_version="v3", citation_ids=["c1"])
-
-    assert not t.is_ordered()
-
-
-@pytest.mark.parametrize("loop_stage", ["agent_decision", "provider_call"])
-def test_a_loop_stage_repeating_after_draft_is_rejected(loop_stage):
-    """A repeat of the loop AFTER draft would mean the drafted version was not
-    actually produced by the evidence/decisions the trace claims preceded it —
-    an ordering failure, not a tolerated retry."""
-    t = _full(_rec())
-    if loop_stage == "agent_decision":
-        t.agent_decision(tool_name="search_documents", turn=3, stop_reason="tool_use")
-    else:
+    t.agent_decision(tool_name=None, turn=1, stop_reason="end_turn")
+    if next_event == "provider_call":
         t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    else:
+        t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])
+
+    assert not t.is_ordered()
+
+
+@pytest.mark.parametrize("loop_stage,call", [
+    ("provider_call", lambda t: t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")),
+    ("agent_decision", lambda t: t.agent_decision(tool_name="search_documents", turn=9, stop_reason="tool_use")),
+    ("retrieval", lambda t: t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])),
+])
+def test_post_draft_agent_activity_is_rejected(loop_stage, call):
+    """Once `draft` has occurred, no further provider_call/agent_decision/
+    retrieval may appear anywhere downstream — the drafted version must rest
+    on evidence and decisions gathered strictly before it, not after."""
+    t = _full(_rec())
+    call(t)
 
     assert not t.is_ordered()
     assert not t.is_acceptable()
 
 
-@pytest.mark.parametrize("loop_stage", ["agent_decision", "provider_call"])
-def test_a_loop_stage_before_retrieval_is_rejected(loop_stage):
-    """The loop exception only covers the actual loop position — after
-    retrieval, before draft. A loop stage as the very first event (before
-    retrieval has even happened) is out of place, not an early iteration."""
-    t = _rec()
-    if loop_stage == "agent_decision":
-        t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
-    else:
-        t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
-    t.request(actor_role="patient")
-    t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])
-
-    assert not t.is_ordered()
-
-
 @pytest.mark.parametrize("repeated_stage,call", [
-    ("retrieval", lambda t: t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])),
     ("validation", lambda t: t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])),
     ("review", lambda t: t.review(decision="approved", draft_version=1, decided_by_user_id=13)),
     ("display", lambda t: t.display(draft_version=1, label=ProvenanceLabel.REAL)),
 ])
-def test_a_non_loop_stage_repeating_is_rejected_even_in_order(repeated_stage, call):
-    """Only agent_decision/provider_call are allowed to repeat. A second
-    retrieval, validation, review or display — even appended at the END,
-    where a naive first-seen-order check would have missed it — is invalid."""
+def test_a_terminal_stage_repeating_is_rejected(repeated_stage, call):
+    """draft/validation/review/display each occur exactly once — a repeat of
+    any of them, even appended at the very end, is invalid."""
     t = _full(_rec())
     call(t)
 
     assert not t.is_ordered()
+    assert not t.is_acceptable()
+
+
+# --- is_grounded: ordering can be structurally correct with zero evidence --- #
+
+
+def test_a_correctly_ordered_but_ungrounded_trace_is_not_acceptable():
+    """A trace that goes straight from request to a FINAL decision — never
+    calling a tool at all — is not malformed by is_ordered()'s state machine
+    (nothing about its sequence is wrong), but it is not the real, evidence-
+    grounded path the client requires. This is why is_grounded() is a
+    separate check: "wrong shape" and "right shape, no evidence" are
+    different failures with different fixes."""
+    t = _rec()
+    t.request(actor_role="patient")
+    _final_decision_through_display(t, turn=1)
+
+    assert t.is_ordered()
+    assert not t.is_grounded()
     assert not t.is_acceptable()
 
 
@@ -359,7 +382,9 @@ def test_the_correlation_id_is_one_value_for_the_whole_request():
     t = _full(_rec())
 
     assert t.correlation_id == "corr-1"
-    assert len(t.events) == 8
+    # 8 distinct stages, but provider_call and agent_decision each occur
+    # twice in one tool cycle (see _full) — 10 events total.
+    assert len(t.events) == 10
 
 
 # --- the persistence boundary (adr/0010, decision A) ------------------------ #

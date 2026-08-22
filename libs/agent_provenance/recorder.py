@@ -24,6 +24,22 @@ predictable rule: these names never appear in a trace, whatever they hold.
 `libs.tracing.spans` already sets the pattern — `record_exception_type` records
 an exception's TYPE and not its message, precisely so a provider error string
 cannot ride out inside telemetry. This module generalises that.
+
+WHAT "ORDERED" MEANS, AND WHAT IT DELIBERATELY DOES NOT COVER
+
+`is_ordered`/`is_grounded`/`is_acceptable` model the REAL, successful,
+evidence-grounded path only — see `Stage`'s docstring for the exact shape,
+taken from the actual agent-loop runtimes this repo runs. A fallback or
+provider-error trace is a genuinely different, much shorter shape (in the
+real runtimes, a `PROVIDER_ERROR`/`MAX_TURNS` termination returns a safe
+canned reply immediately — it never reaches `draft`, `validation` or
+`review` at all). Do not expect a fallback/error trace to satisfy
+`is_ordered()`/`is_complete()`/`is_acceptable()`; judge it only by whatever
+minimal shape the caller actually needs from it (e.g. that `display` is
+present and correctly labelled `fallback`, never presented as model output).
+Conflating the two shapes into one grammar would either reject every
+legitimate fallback or silently loosen the real path's guarantees to
+accommodate one — this module keeps them separate on purpose.
 """
 from __future__ import annotations
 
@@ -33,16 +49,43 @@ from typing import Any, Mapping, Optional
 
 
 class Stage(str, Enum):
-    """The eight stages the client requires one trace to cover, declared in the
-    canonical order they must occur along the required path:
-    request -> retrieval -> agent_decision -> provider_call -> draft ->
-    validation -> review -> display. Enum member order IS the canonical order
-    (see is_ordered)."""
+    """The eight stages the client requires one trace to cover.
+
+    Declaration order matches the REAL successful path, grounded in the two
+    actual agent-loop implementations this repo runs today —
+    `libs/eligibility_agent/runtimes/raw_bedrock.py` and
+    `.../langchain_runtime.py` — not an invented abstract sequence. Both
+    agree on the same shape, because a bounded Bedrock tool-calling loop only
+    has one shape:
+
+        request
+        { provider_call -> agent_decision(tool_use) -> retrieval }  x0-or-more
+        provider_call -> agent_decision(final)
+        draft -> validation -> review -> display
+
+    `provider_call` is the actual Converse round-trip; its RESPONSE is what
+    determines the agent_decision that follows it — raw_bedrock.py branches
+    on `if not response.tool_calls`, langchain_runtime.py's
+    `route_after_agent` branches on the same emptiness check on the model
+    message's `tool_calls`. So the decision is always downstream of a call,
+    never the other way around — an `agent_decision` with no preceding
+    `provider_call` cannot happen in the real loop, and is not accepted here.
+
+    `retrieval` happens only when a decision selected a tool (raw_bedrock.py
+    then runs `tool.invoke(...)`; langchain_runtime.py's `tools_node` does the
+    same) — it never happens before the first `agent_decision`, and it never
+    happens after a FINAL decision, because a final decision is exactly the
+    case where there is no tool call to execute.
+
+    See `TraceRecorder.is_ordered` for the state machine that enforces this
+    shape, and `is_grounded` for why at least one `retrieval` is additionally
+    required of the REAL path specifically (a fallback/error trace is judged
+    separately — see the module-level note below)."""
 
     REQUEST = "request"
-    RETRIEVAL = "retrieval"
-    AGENT_DECISION = "agent_decision"
     PROVIDER_CALL = "provider_call"
+    AGENT_DECISION = "agent_decision"
+    RETRIEVAL = "retrieval"
     DRAFT = "draft"
     VALIDATION = "validation"
     REVIEW = "review"
@@ -140,27 +183,14 @@ class TraceRecorder:
     def request(self, *, actor_role: str) -> StageEvent:
         return self.record(Stage.REQUEST, actor_role=actor_role)
 
-    def retrieval(self, *, document_count: int, citation_ids: list,
-                  categories: list, excluded_count: int = 0) -> StageEvent:
-        """Counts, ids and categories — never the documents themselves."""
-        return self.record(
-            Stage.RETRIEVAL,
-            document_count=document_count,
-            citation_ids=list(citation_ids),
-            categories=list(categories),
-            excluded_count=excluded_count,
-        )
-
-    def agent_decision(self, *, tool_name: Optional[str], turn: int,
-                       stop_reason: Optional[str] = None) -> StageEvent:
-        """Which tool the model chose and when — not what it said about it."""
-        return self.record(Stage.AGENT_DECISION, tool_name=tool_name,
-                           turn=turn, stop_reason=stop_reason)
-
     def provider_call(self, *, label: ProvenanceLabel, model_id: Optional[str],
                       latency_ms: Optional[int] = None,
                       error_type: Optional[str] = None) -> StageEvent:
-        """`error_type` is a class name. A provider's error MESSAGE can quote the
+        """The actual Converse round-trip (raw_bedrock.py's
+        `self._model.converse(...)`; langchain_runtime.py's
+        `bound_model.invoke(...)`). Its response is what the FOLLOWING
+        `agent_decision` is derived from — record this first.
+        `error_type` is a class name. A provider's error MESSAGE can quote the
         payload that caused it, which is why only the type is accepted."""
         return self.record(
             Stage.PROVIDER_CALL,
@@ -168,6 +198,41 @@ class TraceRecorder:
             model_id=model_id,
             latency_ms=latency_ms,
             error_type=error_type,
+        )
+
+    def agent_decision(self, *, tool_name: Optional[str], turn: int,
+                       stop_reason: Optional[str] = None) -> StageEvent:
+        """The decision the PRECEDING `provider_call`'s response revealed —
+        never call this before the `provider_call` it describes.
+
+        `tool_name` set (or `stop_reason == "tool_use"`) means the model chose
+        a tool: raw_bedrock.py's `if response.tool_calls:` /
+        langchain_runtime.py's `route_after_agent` returning `"tools"`. A
+        `retrieval` event recording that tool's actual execution must follow
+        immediately.
+
+        `tool_name=None` (and `stop_reason` anything other than `"tool_use"`,
+        typically Bedrock's own `"end_turn"`) means the FINAL decision — the
+        model had no more tool calls (`if not response.tool_calls:` /
+        `route_after_agent` returning `"end"`). No `retrieval` follows a final
+        decision; `draft` must come next."""
+        return self.record(Stage.AGENT_DECISION, tool_name=tool_name,
+                           turn=turn, stop_reason=stop_reason)
+
+    def retrieval(self, *, document_count: int, citation_ids: list,
+                  categories: list, excluded_count: int = 0) -> StageEvent:
+        """The tool call the immediately preceding `agent_decision` selected,
+        actually executed (raw_bedrock.py's `tool.invoke(...)`;
+        langchain_runtime.py's `tools_node`). Never a general "gather
+        evidence" step at the top of the trace — it only ever follows a
+        tool-use decision. Counts, ids and categories — never the documents
+        themselves."""
+        return self.record(
+            Stage.RETRIEVAL,
+            document_count=document_count,
+            citation_ids=list(citation_ids),
+            categories=list(categories),
+            excluded_count=excluded_count,
         )
 
     def draft(self, *, draft_version: int, label: ProvenanceLabel,
@@ -221,94 +286,137 @@ class TraceRecorder:
     def missing_stages(self) -> list:
         return [s.value for s in Stage if s not in self.stages_covered()]
 
-    # Only these two stages may occur more than once, and only because a
-    # bounded tool-calling loop can genuinely call the model and decide on a
-    # tool several times before it has enough evidence to draft. Every other
-    # stage marks a point the required path passes through exactly once.
-    _REPEATABLE_STAGES = frozenset({Stage.AGENT_DECISION, Stage.PROVIDER_CALL})
+    # Internal states for is_ordered()'s walk. Named for what comes NEXT, not
+    # what already happened — "_AWAIT_PROVIDER_CALL" is the state in which the
+    # next event, if any, must be a provider_call.
+    _AWAIT_REQUEST = "await_request"
+    _AWAIT_PROVIDER_CALL = "await_provider_call"
+    _AWAIT_DECISION = "await_decision"
+    _AWAIT_RETRIEVAL = "await_retrieval"
+    _AWAIT_DRAFT = "await_draft"
+    _AWAIT_VALIDATION = "await_validation"
+    _AWAIT_REVIEW = "await_review"
+    _AWAIT_DISPLAY = "await_display"
+    _DONE = "done"
+
+    @staticmethod
+    def _is_tool_decision(event: StageEvent) -> bool:
+        """True for a decision to call a tool, false for the FINAL decision
+        that ends the loop. `tool_name` set is the authoritative signal — it
+        mirrors `if response.tool_calls:` in raw_bedrock.py exactly.
+        `stop_reason == "tool_use"` (Bedrock's own Converse `stopReason`) is
+        accepted as an alternative signal for a caller that has it but not
+        yet a resolved tool name."""
+        return (
+            event.attributes.get("tool_name") is not None
+            or event.attributes.get("stop_reason") == "tool_use"
+        )
 
     def is_ordered(self) -> bool:
-        """True when the trace follows the canonical Stage order with no
-        stage out of place, under the one narrow exception the required path
-        actually has:
+        """True when the trace follows the REAL required path exactly (see
+        `Stage`'s docstring): a walk through an explicit state machine, not a
+        generic "canonical rank" comparison — the loop segment is a genuine
+        cycle (provider_call -> agent_decision -> maybe retrieval -> back to
+        provider_call), not a linearly-ranked sequence, so no single rank
+        ordering could describe it correctly.
 
-        `agent_decision` and `provider_call` may repeat — but ONLY before the
-        (unique) `draft` event, only after `retrieval` has already occurred,
-        and only as one or more COMPLETE, STRICTLY ALTERNATING pairs starting
-        with `agent_decision` and closed by `provider_call`. That is the
-        actual shape of a bounded tool-calling loop: decide, call the model,
-        maybe decide-and-call again, THEN draft — never a call with no
-        decision behind it, never two decisions or two calls back to back,
-        and never a draft produced while a decision is still awaiting the
-        call that was supposed to act on it. Concretely, this rejects:
+        request
+          -> provider_call -> agent_decision
+               -> [tool_use]  -> retrieval -> back to provider_call
+               -> [final]     -> draft -> validation -> review -> display
 
-          * a `provider_call` with no preceding, not-yet-closed
-            `agent_decision` (covers both "provider before any decision" and
-            "two provider_calls in a row" — the second has nothing open to
-            close);
-          * an `agent_decision` while a previous one is still open, i.e. two
-            decisions with no `provider_call` closing the first in between;
-          * `draft` while a decision is still open (an "unfinished pair") —
-            the draft would then rest on a decision the trace never shows
-            being acted on.
+        Concretely, this rejects (among other malformed shapes):
 
-        A repeat of either loop stage after `draft` has occurred means the
-        loop ran again post-hoc — which would mean the drafted version was
-        not actually produced by the evidence/decisions the trace claims
-        preceded it, so this is treated as an ordering failure too, not a
-        tolerated retry.
+          * anything before the FIRST event other than `request`, or anything
+            after `request` other than `provider_call` — an `agent_decision`
+            with no preceding `provider_call` cannot happen in the real loop
+            ("provider-before-decision": the call always comes first);
+          * an `agent_decision` classified `tool_use` NOT immediately followed
+            by `retrieval` (a decision to call a tool with no record of that
+            tool ever running — "missing retrieval");
+          * anything other than a fresh `provider_call` immediately after a
+            `retrieval` — the loop always closes a tool cycle by calling the
+            model again, never by going straight to `draft` ("unfinished tool
+            cycle");
+          * an `agent_decision` classified FINAL not immediately followed by
+            `draft` ("final-answer-before-draft") — including a further
+            `provider_call`/`retrieval` after it, which would mean the loop
+            kept going after supposedly finishing;
+          * any loop-stage event (`provider_call`, `agent_decision`,
+            `retrieval`) once `draft` has occurred ("post-draft agent
+            activity");
+          * a repeat of `draft`, `validation`, `review` or `display` — each
+            occurs at most once, in that exact order.
 
-        Every OTHER stage (request, retrieval, draft, validation, review,
-        display) must occur at most once, and the stages that do occur must
-        be in non-decreasing canonical rank — the same "no going backward"
-        rule as before.
+        Silently accepts a trace that simply stops partway through a
+        well-formed prefix (e.g. just `[request, provider_call]`) — that is
+        `is_complete()`'s job to flag as missing stages, not this one's.
         """
-        canonical = list(Stage)
-        retrieval_rank = canonical.index(Stage.RETRIEVAL)
-        seen_once: set = set()
-        draft_seen = False
-        last_once_rank = -1
-        # Pairing state for the loop segment. True = no decision is currently
-        # open — the next loop event, if any, must be a fresh agent_decision
-        # (or there may be none at all: the loop is a whole number of pairs).
-        # False = an agent_decision is open, awaiting the provider_call that
-        # closes it.
-        awaiting_decision = True
+        state = self._AWAIT_REQUEST
 
         for event in self.events:
             stage = event.stage
-            if stage in self._REPEATABLE_STAGES:
-                if draft_seen:
-                    return False  # loop stage recurring after draft: invalid
-                if last_once_rank < retrieval_rank:
-                    return False  # loop stage before retrieval has occurred: invalid
 
-                if stage is Stage.AGENT_DECISION:
-                    if not awaiting_decision:
-                        return False  # consecutive decisions: prior one still open
-                    awaiting_decision = False
-                else:  # Stage.PROVIDER_CALL
-                    if awaiting_decision:
-                        return False  # provider-before-decision, or two calls in a row
-                    awaiting_decision = True
-                continue
+            if state == self._AWAIT_REQUEST:
+                if stage is not Stage.REQUEST:
+                    return False
+                state = self._AWAIT_PROVIDER_CALL
 
-            if stage in seen_once:
-                return False  # a non-loop stage may only occur once
-            seen_once.add(stage)
+            elif state == self._AWAIT_PROVIDER_CALL:
+                if stage is not Stage.PROVIDER_CALL:
+                    return False
+                state = self._AWAIT_DECISION
 
-            rank = canonical.index(stage)
-            if rank < last_once_rank:
-                return False  # went backward relative to prior stages
-            last_once_rank = rank
-            if stage is Stage.DRAFT:
-                if not awaiting_decision:
-                    return False  # draft while a decision is still unpaired
-                draft_seen = True
+            elif state == self._AWAIT_DECISION:
+                if stage is not Stage.AGENT_DECISION:
+                    return False
+                state = self._AWAIT_RETRIEVAL if self._is_tool_decision(event) else self._AWAIT_DRAFT
+
+            elif state == self._AWAIT_RETRIEVAL:
+                if stage is not Stage.RETRIEVAL:
+                    return False
+                state = self._AWAIT_PROVIDER_CALL
+
+            elif state == self._AWAIT_DRAFT:
+                if stage is not Stage.DRAFT:
+                    return False
+                state = self._AWAIT_VALIDATION
+
+            elif state == self._AWAIT_VALIDATION:
+                if stage is not Stage.VALIDATION:
+                    return False
+                state = self._AWAIT_REVIEW
+
+            elif state == self._AWAIT_REVIEW:
+                if stage is not Stage.REVIEW:
+                    return False
+                state = self._AWAIT_DISPLAY
+
+            elif state == self._AWAIT_DISPLAY:
+                if stage is not Stage.DISPLAY:
+                    return False
+                state = self._DONE
+
+            else:  # self._DONE — nothing may follow display
+                return False
 
         return True
 
+    def is_grounded(self) -> bool:
+        """True when at least one `retrieval` occurred. The required path is
+        evidence-grounded by construction: a "successful" run that answered
+        without ever calling a tool (a real, structurally valid zero-iteration
+        walk through `is_ordered`'s state machine — request straight to a
+        FINAL decision) is not the real, grounded path the client requires,
+        even though nothing about its ordering is wrong. This is checked
+        separately from `is_ordered` so a test/caller can tell "wrong shape"
+        apart from "right shape, no evidence" — two different failures with
+        two different fixes."""
+        return any(e.stage is Stage.RETRIEVAL for e in self.events)
+
     def is_acceptable(self) -> bool:
-        """The acceptance bar for one end-to-end trace: all eight stages present
-        AND in canonical order (loop stages repeatable only before draft)."""
-        return self.is_complete() and self.is_ordered()
+        """The acceptance bar for one end-to-end REAL/grounded trace: all
+        eight stages present, in the exact required order, with at least one
+        retrieval. Does not apply to a fallback/error trace — see the module
+        docstring."""
+        return self.is_complete() and self.is_ordered() and self.is_grounded()
