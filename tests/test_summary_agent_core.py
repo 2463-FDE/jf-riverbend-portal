@@ -88,7 +88,7 @@ def _computation(citation_id, a, b, result):
 
 
 GROUNDED_CLAIMS = [_quote(POL, POL_SENTENCE), _computation(TRN, "7.5", "6.2", "1.3")]
-GROUNDED_SUMMARY = 'Your care team reviews results before release. "%s". Your A1c fell 1.3 points.' % POL_SENTENCE
+GROUNDED_SUMMARY = '"%s". Your A1c fell 1.3 points, from 7.5 to 6.2.' % POL_SENTENCE
 
 
 @pytest.fixture
@@ -101,11 +101,11 @@ def db():
     session.close()
 
 
-def _generate(db, script, raises=None, trace=None, audience="patient"):
+def _generate(db, script, raises=None, trace=None, audience="patient", limits=None):
     return path.generate_draft(
         db, patient_id=PATIENT, actor_role="clinician", correlation_id=CORR,
         audience=audience, model=ScriptedChatModel(script, raises=raises),
-        label=ProvenanceLabel.FIXTURE, trace=trace,
+        label=ProvenanceLabel.FIXTURE, trace=trace, limits=limits,
     )
 
 
@@ -218,3 +218,44 @@ def test_trace_carries_no_prompt_document_text_model_output_or_raw_error(db):
     assert outcome.label == ProvenanceLabel.FALLBACK.value
     assert outcome.draft.model_id is None, "a fallback never names a model"
     assert outcome.accepted, "the deterministic fallback is held to the same grounding bar"
+
+
+def test_a_fallback_names_neither_a_model_nor_a_prompt_version(db):
+    # A fallback sent no prompt, so recording PROMPT_VERSION alongside it would
+    # attribute the text to a prompt that never ran — the same misattribution
+    # the model_id rule already forbids, in the neighbouring column.
+    outcome = _generate(db, [], raises=RuntimeError("bedrock is down"))
+
+    assert outcome.label == ProvenanceLabel.FALLBACK.value
+    assert outcome.draft.model_id is None
+    assert outcome.draft.prompt_version is None
+    assert outcome.accepted, "the fallback still has to be grounded to persist as validated"
+
+
+def test_a_quote_beyond_the_retrieved_character_cap_cannot_validate(db):
+    # POL_SENTENCE is genuinely in POL-001 but well past character 40, so a
+    # 40-character read never showed it to the model. Validation checks the
+    # ledger, which now holds what was RETURNED rather than the whole document.
+    outcome = _generate(
+        db, [_tool_call(), _final('"%s".' % POL_SENTENCE, [_quote(POL, POL_SENTENCE)])],
+        limits=RetrievalLimits(max_documents=1, max_characters=40),
+    )
+
+    assert not outcome.accepted
+    # Not CITATION_NOT_RETRIEVED: the document WAS retrieved, only truncated.
+    assert outcome.validation.code == V.CODE_QUOTE_NOT_IN_SOURCE
+    assert outcome.draft.status == drafts.REFUSED
+    assert drafts.approved_draft(db, PATIENT) is None
+
+
+def test_an_unsupported_summary_sentence_is_refused_despite_a_valid_claim(db):
+    # One perfectly good quote claim, and one extra sentence backed by nothing.
+    # A draft is not partially publishable: the unsupported sentence is what a
+    # patient would read as clinical reassurance.
+    outcome = _generate(db, [_tool_call(), _final(
+        '"%s". %s' % (POL_SENTENCE, INJECTED_SENTENCE), [_quote(POL, POL_SENTENCE)])])
+
+    assert not outcome.accepted
+    assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE
+    assert outcome.draft.status == drafts.REFUSED
+    assert drafts.approved_draft(db, PATIENT) is None

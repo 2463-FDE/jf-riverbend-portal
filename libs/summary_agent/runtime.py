@@ -115,8 +115,8 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
     quotes, claims = [], []
     for citation_id in ledger.citation_ids:
         text = ledger.get(citation_id).text
-        head, _, _ = text.partition(". ")
-        sentence = head if head.endswith(".") else head + "."
+        head, separator, _ = text.partition(". ")
+        sentence = head + "." if separator else head
         quotes.append(f'"{sentence}"')
         claims.append(QuoteClaim(kind="quote", citation_id=citation_id, quote=sentence))
     return StructuredDraft(
@@ -133,8 +133,10 @@ def _fallback(corpus, *, audience, ledger, limits, trace, error_type) -> AgentRu
     draft = deterministic_draft(ledger)
     return AgentRunResult(
         draft=draft, label=ProvenanceLabel.FALLBACK, ledger=ledger,
-        model_id=None,  # create_draft refuses a fallback that names a model
-        prompt_version=PROMPT_VERSION, provider_error_type=error_type,
+        # Neither a model nor a prompt: naming PROMPT_VERSION here would
+        # attribute the text to a prompt that was never sent, which is the same
+        # misattribution create_draft already refuses for model_id.
+        model_id=None, prompt_version=None, provider_error_type=error_type,
         citations=ledger.citations_for_persistence(draft.citation_ids()),
     )
 

@@ -21,6 +21,7 @@ CODE_QUOTE_NOT_IN_SOURCE = "REFUSED_QUOTE_NOT_IN_SOURCE"
 CODE_COMPUTATION_MISMATCH = "REFUSED_COMPUTATION_MISMATCH"
 CODE_OPERAND_NOT_IN_SOURCE = "REFUSED_COMPUTATION_OPERAND_NOT_IN_SOURCE"
 CODE_UNSUPPORTED_QUOTE_IN_SUMMARY = "REFUSED_UNSUPPORTED_QUOTE_IN_SUMMARY"
+CODE_UNSUPPORTED_SUMMARY_SENTENCE = "REFUSED_UNSUPPORTED_SUMMARY_SENTENCE"
 CODE_INSTRUCTION_SHAPED = "REFUSED_INSTRUCTION_SHAPED_CLAIM"
 
 # Instruction-shaped text: the register of a document giving orders rather than
@@ -42,6 +43,11 @@ _INSTRUCTION_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
 
 _QUOTED_IN_SUMMARY = re.compile(r'"([^"]{4,})"')
 _WHITESPACE = re.compile(r"\s+")
+# A sentence ends at .!? followed by whitespace or end-of-string, optionally
+# through a closing quote mark. Splitting on the punctuation alone would cut
+# "1.3" in half and lose the very number a computation claim supports.
+_SENTENCE_END = re.compile(r'(?<=[.!?])["”]?\s+')
+_HAS_CONTENT = re.compile(r"[A-Za-z0-9]")
 
 
 @dataclass(frozen=True)
@@ -107,5 +113,24 @@ def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> Validatio
         normalized = _normalize(quoted)
         if not any(normalized in q or q in normalized for q in validated_quotes):
             return ValidationOutcome(False, CODE_UNSUPPORTED_QUOTE_IN_SUMMARY)
+
+    # ...and every SENTENCE must carry evidence, not only the ones in quotation
+    # marks. An unquoted assertion is how an unsupported claim rides along in a
+    # draft whose other claims are perfectly valid — the prompt already requires
+    # "every statement backed by a claim", and this is that rule enforced rather
+    # than requested. A sentence counts as supported when it contains a
+    # validated quote or one of a validated computation's own numbers, or is
+    # itself a fragment of a validated quote.
+    evidence = list(validated_quotes)
+    for claim in draft.claims:
+        if isinstance(claim, ComputationClaim):
+            evidence.extend(str(o) for o in claim.operands)
+            evidence.append(str(claim.result))
+    for sentence in _SENTENCE_END.split(draft.summary):
+        normalized = _normalize(sentence)
+        if not _HAS_CONTENT.search(normalized):
+            continue  # punctuation or quote marks left over by the split
+        if not any(e and (e in normalized or normalized in e) for e in evidence):
+            return ValidationOutcome(False, CODE_UNSUPPORTED_SUMMARY_SENTENCE)
 
     return ValidationOutcome(True, None)

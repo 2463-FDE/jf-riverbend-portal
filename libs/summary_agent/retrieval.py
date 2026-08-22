@@ -10,7 +10,7 @@ Document text reaches the model and the in-memory `RetrievalLedger` (so quotes
 can be checked against their source) but is never persisted or traced.
 """
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from libs.agent_provenance import TraceRecorder
@@ -79,7 +79,10 @@ def retrieve(
     for doc in selected:
         text = doc.text[:budget]
         budget -= len(text)
-        ledger.add(doc)
+        # The TRUNCATED text, not the document. The ledger is what validation
+        # checks quotes against, so holding the full text here would let a draft
+        # quote past the character cap — words the model was never shown.
+        ledger.add(replace(doc, text=text))
         payload.append({
             "citation_id": doc.citation_id, "source_id": doc.source_id,
             "source_version": doc.source_version, "category": doc.category,
