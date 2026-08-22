@@ -33,7 +33,11 @@ def _full(t):
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x", latency_ms=120)
     t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
             prompt_version="v3", citation_ids=["c1"])
-    t.validation(passed=True, validation_code=None, citation_ids=["c1"])
+    # migration 020's agent_draft_validation_code_consistent CHECK requires
+    # exactly 'PASS' for every non-refused post-validation status — a fixture
+    # that used None here (as this once did) would model a state the real
+    # schema now rejects outright.
+    t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])
     t.review(decision="approved", draft_version=1, decided_by_user_id=13)
     t.display(draft_version=1, label=ProvenanceLabel.REAL)
     return t
@@ -134,6 +138,79 @@ def test_stages_out_of_canonical_order_are_detected():
     t = _rec()
     t.display(draft_version=1, label=ProvenanceLabel.REAL)
     t.request(actor_role="patient")
+
+    assert not t.is_ordered()
+    assert not t.is_acceptable()
+
+
+# --- the loop exception: only agent_decision/provider_call may repeat, and
+# only before draft ----------------------------------------------------------- #
+
+
+def test_a_genuine_tool_loop_repeating_before_draft_is_ordered():
+    """A bounded tool-calling loop can decide and call the model more than
+    once while gathering evidence — that is the actual shape of the required
+    path, not a violation of it."""
+    t = _rec()
+    t.request(actor_role="patient")
+    t.retrieval(document_count=2, citation_ids=["c1"], categories=["lab"])
+    t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.agent_decision(tool_name="search_documents", turn=2, stop_reason="tool_use")
+    t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
+            prompt_version="v3", citation_ids=["c1"])
+    t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])
+    t.review(decision="approved", draft_version=1, decided_by_user_id=13)
+    t.display(draft_version=1, label=ProvenanceLabel.REAL)
+
+    assert t.is_ordered()
+    assert t.is_acceptable()
+
+
+@pytest.mark.parametrize("loop_stage", ["agent_decision", "provider_call"])
+def test_a_loop_stage_repeating_after_draft_is_rejected(loop_stage):
+    """A repeat of the loop AFTER draft would mean the drafted version was not
+    actually produced by the evidence/decisions the trace claims preceded it —
+    an ordering failure, not a tolerated retry."""
+    t = _full(_rec())
+    if loop_stage == "agent_decision":
+        t.agent_decision(tool_name="search_documents", turn=3, stop_reason="tool_use")
+    else:
+        t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+
+    assert not t.is_ordered()
+    assert not t.is_acceptable()
+
+
+@pytest.mark.parametrize("loop_stage", ["agent_decision", "provider_call"])
+def test_a_loop_stage_before_retrieval_is_rejected(loop_stage):
+    """The loop exception only covers the actual loop position — after
+    retrieval, before draft. A loop stage as the very first event (before
+    retrieval has even happened) is out of place, not an early iteration."""
+    t = _rec()
+    if loop_stage == "agent_decision":
+        t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
+    else:
+        t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x")
+    t.request(actor_role="patient")
+    t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])
+
+    assert not t.is_ordered()
+
+
+@pytest.mark.parametrize("repeated_stage,call", [
+    ("retrieval", lambda t: t.retrieval(document_count=1, citation_ids=["c1"], categories=["lab"])),
+    ("validation", lambda t: t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])),
+    ("review", lambda t: t.review(decision="approved", draft_version=1, decided_by_user_id=13)),
+    ("display", lambda t: t.display(draft_version=1, label=ProvenanceLabel.REAL)),
+])
+def test_a_non_loop_stage_repeating_is_rejected_even_in_order(repeated_stage, call):
+    """Only agent_decision/provider_call are allowed to repeat. A second
+    retrieval, validation, review or display — even appended at the END,
+    where a naive first-seen-order check would have missed it — is invalid."""
+    t = _full(_rec())
+    call(t)
 
     assert not t.is_ordered()
     assert not t.is_acceptable()

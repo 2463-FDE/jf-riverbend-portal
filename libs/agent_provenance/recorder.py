@@ -221,20 +221,61 @@ class TraceRecorder:
     def missing_stages(self) -> list:
         return [s.value for s in Stage if s not in self.stages_covered()]
 
+    # Only these two stages may occur more than once, and only because a
+    # bounded tool-calling loop can genuinely call the model and decide on a
+    # tool several times before it has enough evidence to draft. Every other
+    # stage marks a point the required path passes through exactly once.
+    _REPEATABLE_STAGES = frozenset({Stage.AGENT_DECISION, Stage.PROVIDER_CALL})
+
     def is_ordered(self) -> bool:
-        """True when each stage's FIRST appearance follows the canonical Stage
-        order. agent_decision and provider_call may repeat (a bounded tool-
-        calling loop), so this checks the order stages are first entered, not
-        that each occurs exactly once."""
+        """True when the trace follows the canonical Stage order with no
+        stage out of place, under the one narrow exception the required path
+        actually has:
+
+        `agent_decision` and `provider_call` may repeat — but ONLY before the
+        (unique) `draft` event, and only after `retrieval` has already
+        occurred. That is the actual shape of a bounded tool-calling loop:
+        gather evidence, decide, call the model, maybe loop again, THEN draft.
+        A repeat of either stage after draft has occurred means the loop ran
+        again post-hoc — which would mean the drafted version was not
+        actually produced by the evidence/decisions the trace claims preceded
+        it, so this is treated as an ordering failure, not a tolerated retry.
+
+        Every OTHER stage (request, retrieval, draft, validation, review,
+        display) must occur at most once, and the stages that do occur must
+        be in non-decreasing canonical rank — the same "no going backward"
+        rule as before, just no longer silently permissive about repeats of
+        stages this loop exception was never meant to cover.
+        """
         canonical = list(Stage)
-        first_seen: list = []
+        retrieval_rank = canonical.index(Stage.RETRIEVAL)
+        seen_once: set = set()
+        draft_seen = False
+        last_once_rank = -1
+
         for event in self.events:
-            if event.stage not in first_seen:
-                first_seen.append(event.stage)
-        ranks = [canonical.index(s) for s in first_seen]
-        return ranks == sorted(ranks)
+            stage = event.stage
+            if stage in self._REPEATABLE_STAGES:
+                if draft_seen:
+                    return False  # loop stage recurring after draft: invalid
+                if last_once_rank < retrieval_rank:
+                    return False  # loop stage before retrieval has occurred: invalid
+                continue
+
+            if stage in seen_once:
+                return False  # a non-loop stage may only occur once
+            seen_once.add(stage)
+
+            rank = canonical.index(stage)
+            if rank < last_once_rank:
+                return False  # went backward relative to prior stages
+            last_once_rank = rank
+            if stage is Stage.DRAFT:
+                draft_seen = True
+
+        return True
 
     def is_acceptable(self) -> bool:
         """The acceptance bar for one end-to-end trace: all eight stages present
-        AND first entered in canonical order."""
+        AND in canonical order (loop stages repeatable only before draft)."""
         return self.is_complete() and self.is_ordered()
