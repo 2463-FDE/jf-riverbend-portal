@@ -78,6 +78,37 @@ def find_authorized_appointment(db: Session, *, user_id: int, appointment_id: in
     )
 
 
+def has_active_grant(db: Session, *, user_id: int, patient_id: int) -> bool:
+    """Whether `user_id` currently holds an active, non-expired grant for
+    `patient_id`. Same shape as `find_authorized_appointment` above (same
+    table, same active-grant filter, same active-user join) but answers a
+    plain boolean rather than resolving a row — used where the caller already
+    has the patient_id and just needs to know they may act on it (e.g. issuing
+    a portal invitation), not where it needs deriving from something else.
+    Uses the module-level Appointment/PatientAccessGrant/User imports above,
+    not a local re-import: a deferred `from models import ...` inside a
+    function body resolves `models` from sys.modules at CALL time rather than
+    at this module's own load time, which under this repo's test loader
+    (conftest.load_module, no shared service package — adr/0001) can silently
+    bind to a DIFFERENT service's same-named `models` module left cached from
+    an earlier test file in the same pytest session."""
+    return (
+        db.execute(
+            select(PatientAccessGrant.id)
+            .join(User, User.id == PatientAccessGrant.user_id)
+            .where(
+                PatientAccessGrant.user_id == user_id,
+                PatientAccessGrant.patient_id == patient_id,
+                PatientAccessGrant.revoked_at.is_(None),
+                (PatientAccessGrant.expires_at.is_(None)) | (PatientAccessGrant.expires_at > func.now()),
+                User.is_active.is_(True),
+            )
+        )
+        .scalars()
+        .first()
+    ) is not None
+
+
 def latest_insurance_member_id(db: Session, *, patient_id: int) -> Optional[str]:
     """The patient's most recently recorded insurance member_id, or `None` if
     they have none on file. This — never a caller-supplied value — is the

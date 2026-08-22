@@ -50,9 +50,9 @@ import roles_config
 from config import settings
 from db import get_db
 from logging_config import configure
-from models import PatientAccessGrant, PatientInvitation, User
+from models import Patient, PatientAccessGrant, PatientInvitation, User
 from security import create_session, destroy_session, get_session, hash_password, verify_password
-from visit_authorization import find_authorized_appointment, latest_insurance_member_id, parse_user_id
+from visit_authorization import find_authorized_appointment, has_active_grant, latest_insurance_member_id, parse_user_id
 
 log = configure(settings.service_name)
 
@@ -313,6 +313,14 @@ def issue_patient_invitation(
     not a new permission: inventing one would mean nobody holds it until the
     grid is amended.
 
+    patients.write alone says nothing about THIS patient — it is a role-wide
+    permission, not a per-chart one. Everything else this route reads (existing
+    account, existing invitation) is scoped by patient_id, so authorization has
+    to be too: the issuer must additionally hold an active grant for this
+    specific chart, the same fact that gates reading it. Reused rather than a
+    new check invented for this route: `has_active_grant` is the identical
+    active-grant/active-user query `find_authorized_appointment` already runs.
+
     The code is returned exactly once, in this response, and never stored. If it
     is lost the invitation is revoked and reissued; there is no path that reads
     an existing code back, because none should exist.
@@ -320,6 +328,30 @@ def issue_patient_invitation(
     issuer_id = parse_user_id(session.get("user_id"))
     if issuer_id is None:
         raise HTTPException(status_code=403, detail="not authorized")
+
+    # Fail closed before anything else: a patient_id that resolves to nothing
+    # is not a lookup failure the caller should be able to turn into an
+    # invitation. Checked before the grant query below for the same reason
+    # `_authorize_or_deny` checks a grant before the patient's own row exists
+    # to be read — a nonexistent patient and an ungranted one both refuse the
+    # same way, so this route is not an existence oracle either.
+    if db.execute(select(Patient.id).where(Patient.id == patient_id)).scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="no such patient")
+
+    if not has_active_grant(db, user_id=issuer_id, patient_id=patient_id):
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    # An account already exists for this chart (users.patient_id is unique —
+    # migration 017) — issuing a second invitation would let a second password
+    # be set on the same chart via a different invitation later, or simply
+    # confuse "invited" with "already has access". One portal account per
+    # chart is the invariant; this is where it is enforced on the issuing side
+    # (activation enforces it from the other side via that same unique index).
+    existing_account = db.execute(
+        select(User.id).where(User.patient_id == patient_id, User.is_active.is_(True))
+    ).scalar_one_or_none()
+    if existing_account is not None:
+        raise HTTPException(status_code=409, detail="this patient already has an active portal account")
 
     code = patient_invitations.generate_code()
     invitation = PatientInvitation(
@@ -465,6 +497,16 @@ def _activate_invitation(db: Session, invitation, password: str) -> User:
     the loser sees zero rows updated and is rejected. All of it commits as one
     transaction: an account without its grant would be a patient who can sign in
     and see nothing, and a grant without an account is an orphan.
+
+    The patient row is loaded HERE, inside this same transaction, and is what
+    `full_name` is set from. It used to be left `None` — nothing populated it,
+    ever, so every activated account showed no name anywhere the portal
+    displays one, indistinguishable from a real lookup failure. `patients` is
+    the authoritative source of a patient's name (records-service's table,
+    mirrored read-only above as `Patient`); an invitation whose patient_id no
+    longer resolves there is claimed and useless, so this fails the same
+    generic way every other activation failure does — an invitation is not an
+    oracle for whether a patient_id exists.
     """
     claimed = db.execute(
         update(PatientInvitation)
@@ -480,10 +522,17 @@ def _activate_invitation(db: Session, invitation, password: str) -> User:
         db.rollback()
         raise HTTPException(status_code=400, detail="invalid or expired invitation code")
 
+    patient = db.execute(
+        select(Patient).where(Patient.id == invitation.patient_id)
+    ).scalar_one_or_none()
+    if patient is None:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="invalid or expired invitation code")
+
     account = User(
         username=patient_invitations.username_for_patient(invitation.patient_id),
         password_hash=hash_password(password),
-        full_name=None,
+        full_name=patient.name,
         role="patient",
         patient_id=invitation.patient_id,
         is_active=True,
@@ -995,6 +1044,46 @@ def _safe_json(response: httpx.Response):
 # apart means "a patient read their own record" and "a clinician read a
 # patient's record" never collapse into the same audit line.
 # --------------------------------------------------------------------------- #
+@app.get("/patient/me/identity")
+def proxy_own_identity(
+    session: dict = Depends(require_permission("own_record.read")),
+    db: Session = Depends(get_db),
+):
+    """The signed-in patient's own name and id — nothing else.
+
+    Same resolution as /patient/me/summary below (session -> users.patient_id
+    -> the chart), so this can never return a name for any chart other than
+    the one the caller's own account is linked to. `patients.name` (the
+    authoritative source per the mirror model above) is what /my-results and
+    the approved agent-summary display both read to render the "{Name} —
+    Patient ID {id}" format on the patient's own screens, the same string
+    shape the staff-side /patients/{id}/name lookup already produces.
+    """
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("own identity: account store unreadable for user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient_id is None:
+        log.warning("own identity: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    try:
+        patient = db.execute(select(Patient).where(Patient.id == patient_id)).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("own identity: patient store unreadable for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    return {"patient_id": patient_id, "name": patient.name}
+
+
 @app.get("/patient/me/summary")
 def proxy_own_results_summary(
     session: dict = Depends(require_permission("own_record.read")),

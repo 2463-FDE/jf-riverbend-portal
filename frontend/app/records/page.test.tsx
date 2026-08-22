@@ -82,6 +82,14 @@ describe("RecordsPage — stale patient panel regression", () => {
 
     render(<RecordsPage />);
 
+    // The screen starts with no patient id (2026-08-22) — set one explicitly,
+    // since there is no more implicit default. Leaving this out doesn't just
+    // fail THIS test: the guarded loader below returns early without ever
+    // calling apiFetch, so this test's queued mock response is never consumed
+    // and leaks into whichever test runs next (this file has no
+    // beforeEach(vi.clearAllMocks()), by design — see the other tests' single
+    // exact-shot mocks).
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
     fireEvent.click(screen.getByRole("button", { name: /check for related records/i }));
 
     await waitFor(() => expect(screen.getByText(/confirm existing patient information/i)).toBeInTheDocument());
@@ -96,12 +104,23 @@ describe("RecordsPage — stale patient panel regression", () => {
 
     render(<RecordsPage />);
 
+    // The screen starts with no patient id (2026-08-22) — set one explicitly,
+    // since there is no more implicit default.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
     fireEvent.click(screen.getByRole("button", { name: /check for related records/i }));
-    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+
+    // Two rows both start with "Maria Gonzalez" (the canonical chart and the
+    // "(possible match)" duplicate), and each TD's full textContent now also
+    // includes the id and source label (combined "{Name} — Patient ID {id}"
+    // format, 2026-08-22) — this checks AT LEAST one TD carries the name, not
+    // that exactly one node equals it exactly.
+    const gonzalezCell = (_: string, el: Element | null) =>
+      el?.tagName === "TD" && (el.textContent?.includes("Maria Gonzalez") ?? false);
+    await waitFor(() => expect(screen.getAllByText(gonzalezCell).length).toBeGreaterThan(0));
 
     fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "2001" } });
 
-    expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument();
+    expect(screen.queryAllByText(gonzalezCell).length).toBe(0);
   });
 
   it("clears an already-loaded AI chart view immediately when the Patient ID changes", async () => {
@@ -110,6 +129,10 @@ describe("RecordsPage — stale patient panel regression", () => {
     );
 
     render(<RecordsPage />);
+
+    // The screen starts with no patient id (2026-08-22) — set one
+    // explicitly, since there is no more implicit default.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
 
     fireEvent.click(screen.getByRole("button", { name: /generate ai chart view/i }));
     await waitFor(() =>
@@ -131,6 +154,10 @@ describe("RecordsPage — stale patient panel regression", () => {
 
     render(<RecordsPage />);
 
+    // The screen starts with no patient id (2026-08-22) — set one
+    // explicitly, since there is no more implicit default.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+
     // Kick off a reconciliation check for patient 1042, but never let its
     // fetch resolve yet — this is the in-flight-when-the-id-changes case.
     fireEvent.click(screen.getByRole("button", { name: /check for related records/i }));
@@ -144,7 +171,9 @@ describe("RecordsPage — stale patient panel regression", () => {
 
     // It must never render under patient 2001's heading.
     await new Promise((r) => setTimeout(r, 0));
-    expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument();
+    const gonzalezCellAfter = (_: string, el: Element | null) =>
+      el?.tagName === "TD" && (el.textContent?.includes("Maria Gonzalez") ?? false);
+    expect(screen.queryAllByText(gonzalezCellAfter).length).toBe(0);
   });
 });
 
@@ -180,5 +209,103 @@ describe("portal access from the records screen", () => {
         expect.objectContaining({ method: "POST" })
       )
     );
+  });
+});
+
+describe("Patient ID input — no default, no request until asked", () => {
+  it("starts with no value and the 'Patient ID' placeholder", () => {
+    render(<RecordsPage />);
+
+    const input = screen.getByLabelText(/patient id/i) as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Patient ID");
+  });
+
+  it("makes no patient-specific request on initial render", () => {
+    // This file has no beforeEach(vi.clearAllMocks()) — apiFetch's call count
+    // accumulates across every test in the run, by the existing file's own
+    // design — so this checks the DELTA across render(), not an absolute
+    // "never called", which would be meaningless after the first test.
+    const before = vi.mocked(apiFetch).mock.calls.length;
+    render(<RecordsPage />);
+
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(before);
+  });
+
+  it("entering 1042 and loading shows Maria Gonzalez's records", async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return jsonResponse({ id: 1042, name: "Maria Gonzalez" });
+      return jsonResponse({
+        patient_id: 1042,
+        encounters: [{
+          encounter: { id: 1, type: "office_visit", provider: "Dr. Patel", summary: "Follow-up" },
+          records: [{ id: 1, kind: "note", body: "Patient stable." }],
+        }],
+      });
+    });
+
+    render(<RecordsPage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Maria Gonzalez — Patient ID 1042")).toBeInTheDocument()
+    );
+    expect(apiFetch).toHaveBeenCalledWith(expect.stringContaining("patient_id=1042"));
+  });
+
+  it("clears Maria's information immediately when the id changes to another patient", async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return jsonResponse({ id: 1042, name: "Maria Gonzalez" });
+      return jsonResponse({
+        patient_id: 1042,
+        encounters: [{
+          encounter: { id: 1, type: "office_visit", provider: "Dr. Patel", summary: "Follow-up" },
+          records: [{ id: 1, kind: "note", body: "Patient stable." }],
+        }],
+      });
+    });
+
+    render(<RecordsPage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() =>
+      expect(screen.getByText("Maria Gonzalez — Patient ID 1042")).toBeInTheDocument()
+    );
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+
+    expect(screen.queryByText(/Maria Gonzalez/)).not.toBeInTheDocument();
+  });
+
+  it("a blank id cannot load records", () => {
+    render(<RecordsPage />);
+    const before = vi.mocked(apiFetch).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(before);
+  });
+
+  it("a non-numeric id cannot load records", () => {
+    render(<RecordsPage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "abc" } });
+    const before = vi.mocked(apiFetch).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(before);
+  });
+
+  it("a blank id cannot issue an invitation", () => {
+    render(<RecordsPage />);
+
+    const issueButton = screen.getByRole("button", { name: /issue invitation/i });
+    expect(issueButton).toBeDisabled();
+    const before = vi.mocked(apiFetch).mock.calls.length;
+
+    fireEvent.click(issueButton);
+
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(before);
   });
 });

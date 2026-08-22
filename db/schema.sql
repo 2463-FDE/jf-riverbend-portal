@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    -- For a patient-role account, backfilled from patients.name by migration
+    -- 021 for any row a pre-fix activation left NULL/blank; a fresh volume
+    -- never needs the backfill because activation (and the seed generator)
+    -- populate it directly.
     full_name     TEXT,
     -- No DEFAULT (016_users_role_no_default.sql): 'staff' is the deprecated
     -- legacy role and still carries every patient-data permission, so an

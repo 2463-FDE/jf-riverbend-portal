@@ -38,13 +38,19 @@ export default function RecordsPage() {
   // The id is a sequential integer and the backend does NOT check ownership
   // (IDOR — intentional teaching point; see docs/handover/portal.har). We pass
   // whatever id is entered straight through to /api/records.
-  const [patientId, setPatientId] = useState("1042");
+  const [patientId, setPatientId] = useState("");
   // Mirrors patientId for reads inside already-in-flight async callbacks —
   // state captured by a closure at call time can't see a later change, and
   // an in-flight fetch has to know if the id moved on before it applies its
   // response (see handlePatientIdChange below).
   const patientIdRef = useRef(patientId);
   patientIdRef.current = patientId;
+
+  // Blank or non-numeric input loads nothing, resolves no name, and issues no
+  // invitation (2026-08-22) — an empty string is also this screen's initial
+  // state now that there is no default id, so this is the normal state on
+  // first render, not merely a validation edge case.
+  const isValidPatientId = (id: string) => /^\d+$/.test(id.trim());
 
   // The id whose name is displayed beside the input. Set only by Load, never
   // by typing: each name lookup writes an audit row server-side.
@@ -92,6 +98,7 @@ export default function RecordsPage() {
   }
 
   async function loadReconciliation() {
+    if (!isValidPatientId(patientId)) return;
     const requestedId = patientId;
     setReconciliationBusy(true);
     setReconciliationStatus("");
@@ -119,6 +126,7 @@ export default function RecordsPage() {
   }
 
   async function loadAiView() {
+    if (!isValidPatientId(patientId)) return;
     const requestedId = patientId;
     setAiBusy(true);
     setAiStatus("");
@@ -144,6 +152,7 @@ export default function RecordsPage() {
   }
 
   async function load() {
+    if (!isValidPatientId(patientId)) return;
     const requestedId = patientId;
     setBusy(true);
     setStatus("");
@@ -202,6 +211,7 @@ export default function RecordsPage() {
               id="rec-patient"
               className="rb-input"
               style={{ flex: "0 1 160px" }}
+              placeholder="Patient ID"
               value={patientId}
               onChange={(e) => handlePatientIdChange(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && load()}
@@ -212,7 +222,7 @@ export default function RecordsPage() {
               {busy ? "Loading…" : <><IconSearch width={16} height={16} /> Load</>}
             </button>
           </div>
-          <span className="rb-field__hint">Demo patient ID defaults to 1042.</span>
+
         </div>
       </Card>
 
@@ -355,7 +365,6 @@ export default function RecordsPage() {
                   <thead>
                     <tr>
                       <th>Chart</th>
-                      <th>Name on file</th>
                       <th>Date of birth</th>
                       <th>Allergies</th>
                     </tr>
@@ -364,12 +373,15 @@ export default function RecordsPage() {
                     {reconciliation.source_records.map((r) => (
                       <tr key={r.patient_id}>
                         <td>
-                          {r.patient_id}
+                          {/* "{Name} — Patient ID {id}" — the identity format
+                              required everywhere a patient is identified
+                              (2026-08-22), same string shape as PatientName's
+                              box on the screens above this table. */}
+                          {r.name_on_file} — Patient ID {r.patient_id}
                           <div className="rb-muted" style={{ fontSize: "0.78rem" }}>
                             {r.source_label}
                           </div>
                         </td>
-                        <td>{r.name_on_file}</td>
                         <td>{formatConfirmationDob(r.dob)}</td>
                         <td>
                           {r.allergies.length === 0

@@ -80,6 +80,27 @@ USERS = [
     # Reviewer for the S3 queue — see the note above on why this one is not 'staff'.
     ("drkim",     "Dr. Grace Kim", "clinician"),
 ]
+
+# Pre-activated patient portal accounts (2026-08-22). Only 1738 and 1739 —
+# NOT 1042 or 1737, which stay invite-ready with no account. 1042 specifically
+# must stay account-less: tests/integration/test_patient_invitation_lifecycle.py
+# issues a fresh invitation against the LIVE seeded database for patient 1042,
+# and an already-active account there would trip issuance's own
+# already-has-an-account guard (services/gateway/app.py::issue_patient_invitation)
+# before the test's own scenario ever runs. 1737 stays invite-ready by the
+# fixture's own design — it is the patient the "front desk issues an
+# invitation" demo beat is built around.
+#
+# username_for_patient's format (patient-{id}) is duplicated here rather than
+# imported — this generator has no import path to services/gateway/
+# patient_invitations.py (adr/0001, no shared package) — so if that format
+# ever changes, this literal needs updating too.
+PATIENT_USERS = [
+    (1738, "Thomas Johnson"),
+    (1739, "Aisha Taylor"),
+]
+PATIENT_DEMO_PASSWORD = "portalportal123"  # documented in docs/runbook.md; meets the 12-char activation floor
+
 emit("INSERT INTO users (id, username, password_hash, full_name, role, created_at) VALUES")
 rows = []
 for i, entry in enumerate(USERS, start=1):
@@ -91,19 +112,47 @@ for i, entry in enumerate(USERS, start=1):
         f" ({i}, {sql_str(uname)}, {sql_str(h)}, {sql_str(full)}, {sql_str(role)}, now())"
     )
 emit(",\n".join(rows) + ";")
-emit(f"SELECT setval('users_id_seq', {len(USERS)}, true);")
+# The two patient-role accounts are inserted separately, AFTER the patients
+# table exists (below) — users.patient_id carries a real FOREIGN KEY to
+# patients(id) with no DEFERRABLE clause (db/schema.sql), so inserting a
+# patient_id here, before any patients row exists, would fail the load
+# outright rather than merely being out of order.
+next_user_id = len(USERS) + 1
+patient_user_id_of = {}
+for patient_id, full_name in PATIENT_USERS:
+    patient_user_id_of[patient_id] = next_user_id
+    next_user_id += 1
+emit(f"SELECT setval('users_id_seq', {next_user_id - 1}, true);")
 emit()
 
 # ---------------------------------------------------------------------------
 # patients — fixtures first, then ~250 generated
 # ---------------------------------------------------------------------------
 emit("INSERT INTO patients (id, mrn, name, dob, ssn, gender, address, phone, email, notes, created_via, created_at) VALUES")
+# Curated demo fixtures (2026-08-22): patients 1042/1737/1738/1739 are pinned
+# ids with fully hand-authored, deterministic charts backing the four demo
+# workflows (records, patient results, scheduling, review, agent-summary).
+# CURATED_IDS below excludes them from every RANDOM per-patient generation
+# loop that follows (encounters, records, insurance, appointments) so nothing
+# random ever gets layered onto a chart the demo depends on reading exactly
+# the same way every rehearsal. 1330/1588 are a DIFFERENT thing — Maria
+# Gonzalez duplicate-chart candidates — and are deliberately NOT curated: they
+# keep whatever random encounters/records they already got, because staying
+# incomplete is the point of them (RIV-160), not a gap to close.
+CURATED_IDS = frozenset({1042, 1737, 1738, 1739})
 fixture_patients = [
     (1042, "M4471", "Maria Gonzalez", "1971-03-02", "412-55-9981", "F", "118 Maple Ave, Beverly Hills, CA 90210", "310-555-0147", "maria.g@example.com", "Prefers morning appts.", "self_service", "2026-06-22 09:14:06"),
     (1043, "M5012", "James O'Brien",  "1958-11-19", "501-22-7734", "M", "42 Birch St, Riverbend, CA 90211", "310-555-0199", "jobrien@example.com", "Hard of hearing.", "self_service", "2026-06-22 09:17:27"),
     (1330, "M4471", "Maria Gonzales", "1971-03-02", "412-55-9981", "F", "118 Maple Ave, Beverly Hills, CA 90210", "310-555-0147", "maria.g@example.com", "PCN allergy noted at front desk.", "self_service", "2026-06-22 09:21:45"),
     (1588, "M4471", "M. Gonzalez",    "1971-02-03", "412-55-9981", "F", "118 Maple Ave, Beverly Hills, CA 90210", "310-555-0147", None, "", "self_service", "2026-06-22 09:55:06"),
     (1601, "M6620", "Aisha Khan",     "1989-07-14", "623-41-2210", "F", "900 Cedar Rd, Riverbend, CA 90211", "310-555-0210", "akhan@example.com", "", "front_desk", "2026-06-23 10:02:00"),
+    # Diabetes: the A1c 7.5%->6.2% trend below is this patient's own chart, not
+    # a coincidence with the synthetic agent corpus's illustrative numbers.
+    (1737, "M7370", "Priya Khan",     "1985-09-10", "701-22-3348", "F", "27 Sunset Blvd, Riverbend, CA 90211", "310-555-0731", "pkhan@example.com", "Type 2 diabetes, dietary counseling ongoing.", "self_service", "2026-03-05 08:40:00"),
+    # Hypertension: systolic BP 158->132 mmHg.
+    (1738, "M7381", "Thomas Johnson", "1962-04-22", "702-18-5591", "M", "615 Grand Ave, Pasadena, CA 91101", "310-555-0738", "tjohnson@example.com", "Hypertension, on lisinopril.", "front_desk", "2026-03-18 09:10:00"),
+    # Asthma: peak flow (quotable, non-arithmetic) + O2 saturation 90%->96%.
+    (1739, "M7392", "Aisha Taylor",   "1996-12-01", "703-44-2287", "F", "48 Pine St, Glendale, CA 91201", "310-555-0739", "ataylor@example.com", "Asthma, rescue inhaler prescribed.", "self_service", "2026-03-22 14:05:00"),
 ]
 FIRST = ["James","Mary","Robert","Patricia","John","Jennifer","Michael","Linda","David","Elizabeth",
          "William","Barbara","Richard","Susan","Joseph","Jessica","Thomas","Karen","Aisha","Wei",
@@ -126,7 +175,16 @@ for p in fixture_patients:
 
 gen_patient_ids = []
 pid = 1602
-for _ in range(250):
+generated_count = 0
+while generated_count < 250:
+    if pid in CURATED_IDS:
+        # A curated fixture already owns this id (a random patient would
+        # otherwise collide with it on insert) — skip the id WITHOUT drawing
+        # from the RNG, so every other generated patient's values are exactly
+        # what they would be if the curated ids simply weren't in this range.
+        pid += 1
+        continue
+    generated_count += 1
     first = random.choice(FIRST); last = random.choice(LAST)
     name = f"{first} {last}"
     year = random.randint(1940, 2007); month = random.randint(1,12); day = random.randint(1,28)
@@ -149,6 +207,22 @@ for _ in range(250):
 emit(",\n".join(prows) + ";")
 max_pid = pid - 1
 emit(f"SELECT setval('patients_id_seq', {max_pid}, true);")
+emit()
+
+# The two pre-activated patient portal accounts, now that their patients rows
+# exist. Deferred from the main users INSERT above — see that section's
+# comment for why (users.patient_id's FK cannot be satisfied any earlier).
+emit("INSERT INTO users (id, username, password_hash, full_name, role, patient_id, created_at) VALUES")
+purows = []
+for patient_id, full_name in PATIENT_USERS:
+    uid = patient_user_id_of[patient_id]
+    salt = f"riverbendp{patient_id}saltval"  # fixed -> deterministic output
+    h = hash_password(PATIENT_DEMO_PASSWORD, salt)
+    uname = f"patient-{patient_id}"
+    purows.append(
+        f" ({uid}, {sql_str(uname)}, {sql_str(h)}, {sql_str(full_name)}, 'patient', {patient_id}, now())"
+    )
+emit(",\n".join(purows) + ";")
 emit()
 
 all_patient_ids = [1042,1043,1330,1588,1601] + gen_patient_ids
@@ -203,8 +277,14 @@ irows = []
 for pid_ in (1042, 1330, 1588):
     irows.append(f" ({pid_}, 'Blue Cross Blue Shield', 'BCBS4471', 'GRP88', 'PPO', 'active', '2026-06-22 09:14:30')")
 irows.append(f" (1043, 'Aetna', 'AETNA9920', 'GRP12', 'PPO', 'active', '2026-06-22 09:17:50')")
+# Curated fixtures 1737/1738/1739 — active coverage, explicit and fixed, so a
+# rerun never lands one of them on 'unknown'/'inactive' (the requirement is
+# "active insurance and eligibility data", not "usually active").
+irows.append(" (1737, 'Kaiser', 'KAISER5591', 'GRP41', 'HMO', 'active', '2026-03-05 08:55:00')")
+irows.append(" (1738, 'Aetna', 'AETNA7381', 'GRP22', 'PPO', 'active', '2026-03-18 09:25:00')")
+irows.append(" (1739, 'UnitedHealthcare', 'UHC7392', 'GRP63', 'HMO', 'active', '2026-03-22 14:20:00')")
 for pid_ in all_patient_ids:
-    if pid_ in (1042,1330,1588,1043):
+    if pid_ in CURATED_IDS or pid_ in (1330, 1588, 1043):
         continue
     payer, plan = random.choice(PAYERS)
     if payer is None:
@@ -218,7 +298,8 @@ emit(",\n".join(irows) + ";")
 emit()
 
 # ---------------------------------------------------------------------------
-# encounters — fixtures (ids 1-5) then generated
+# encounters — fixtures (ids 1-5), then curated (1042/1737/1738/1739), then
+# generated for everyone else
 # ---------------------------------------------------------------------------
 emit("INSERT INTO encounters (id, patient_id, encounter_type, provider, reason, location, status, summary, allergies, medications, occurred_at) VALUES")
 erows = [
@@ -232,9 +313,84 @@ ETYPES = ["office_visit","office_visit","lab","imaging","telehealth"]
 REASONS = ["Annual physical","Follow-up","Acute visit","Lab draw","Imaging","Med refill","Consult"]
 ALLERGY_POOL = ["", "", "", "penicillin", "sulfa", "latex", "peanuts", "none known"]
 MED_POOL = ["", "", "lisinopril", "metformin", "atorvastatin", "albuterol", "levothyroxine", "amoxicillin"]
+
+# curated_encounter_ids tracks every encounter id the RANDOM records loop
+# below must never touch — the original 5 hand-authored fixtures (whose
+# records are also hand-authored, one each) plus every encounter the curated
+# blocks below create. Named as a set rather than reusing the old "e <= 5"
+# threshold: that threshold only worked because the 5 original fixtures
+# happened to be the lowest ids in the file, which stops being true the
+# moment new curated encounters exist above id 5.
+curated_encounter_ids = {1, 2, 3, 4, 5}
+
 enc_id = 6
 enc_by_patient = {}
+
+# --- curated encounters: 1042 (hyperlipidemia), 1737 (diabetes), 1738
+# (hypertension), 1739 (asthma). Three real visits each, none random, so a
+# demo run reads the same chart every rehearsal. Encounter dates walk forward
+# to match the two dated lab results each patient's records block adds below.
+CURATED_ENCOUNTERS = {
+    1042: [
+        ("office_visit", "Dr. Patel", "Hyperlipidemia follow-up", "Riverbend Main",
+         "Lipid panel reviewed. Started atorvastatin 20mg nightly.", "", "atorvastatin",
+         "2026-03-02 09:00:00"),
+        ("lab", "Lab Services", "Lipid panel draw", "Riverbend Main",
+         "Fasting lipid panel drawn for statin follow-up.", "", "atorvastatin",
+         "2026-05-14 08:30:00"),
+        ("office_visit", "Dr. Patel", "Hyperlipidemia follow-up", "Riverbend Main",
+         "LDL improved on atorvastatin. Continue current dose, recheck in 6 months.", "",
+         "atorvastatin", "2026-08-06 09:15:00"),
+    ],
+    1737: [
+        ("office_visit", "Dr. Nguyen", "Type 2 diabetes follow-up", "Riverbend Main",
+         "Diabetes follow-up. Discussed nutrition and exercise.", "", "metformin",
+         "2026-03-12 09:00:00"),
+        ("lab", "Lab Services", "A1c draw", "Riverbend Main",
+         "A1c drawn for diabetes management.", "", "metformin", "2026-06-02 08:20:00"),
+        ("office_visit", "Dr. Nguyen", "Type 2 diabetes follow-up", "Riverbend Main",
+         "A1c improved with dietary changes and metformin. Continue current plan, "
+         "recheck in 6 months.", "", "metformin", "2026-08-11 09:45:00"),
+    ],
+    1738: [
+        ("office_visit", "Dr. Patel", "Hypertension follow-up", "Riverbend Main",
+         "Hypertension follow-up. Started lisinopril 10mg daily.", "", "lisinopril",
+         "2026-03-18 09:30:00"),
+        ("lab", "Lab Services", "Basic metabolic panel draw", "Riverbend Main",
+         "Basic metabolic panel drawn for ACE-inhibitor follow-up.", "", "lisinopril",
+         "2026-06-09 08:10:00"),
+        ("office_visit", "Dr. Patel", "Hypertension follow-up", "Riverbend Main",
+         "Blood pressure improved on lisinopril. Continue current dose, recheck in "
+         "6 months.", "", "lisinopril", "2026-08-14 09:20:00"),
+    ],
+    1739: [
+        ("office_visit", "Dr. Nguyen", "Asthma follow-up", "Riverbend Main",
+         "Asthma follow-up. Reviewed inhaler technique.", "", "albuterol, fluticasone",
+         "2026-03-22 14:30:00"),
+        ("lab", "Lab Services", "Peak flow and pulse oximetry", "Riverbend Main",
+         "Peak flow and oxygen saturation measured for asthma follow-up.", "",
+         "albuterol, fluticasone", "2026-06-11 08:45:00"),
+        ("office_visit", "Dr. Nguyen", "Asthma follow-up", "Riverbend Main",
+         "Oxygen saturation improved with controller adherence. Continue current "
+         "plan, recheck in 6 months.", "", "albuterol, fluticasone", "2026-08-13 09:40:00"),
+    ],
+}
+curated_encounter_id_of = {}   # (patient_id, index) -> encounter id, for the records block below
+for pid_, visits in CURATED_ENCOUNTERS.items():
+    for idx, (etype, prov, reason, loc, summ, allergies, meds, occ) in enumerate(visits):
+        erows.append(
+            f" ({enc_id}, {pid_}, {sql_str(etype)}, {sql_str(prov)}, {sql_str(reason)}, "
+            f"{sql_str(loc)}, 'finished', {sql_str(summ)}, {sql_str(allergies)}, "
+            f"{sql_str(meds)}, {sql_str(occ)})"
+        )
+        enc_by_patient.setdefault(pid_, []).append(enc_id)
+        curated_encounter_ids.add(enc_id)
+        curated_encounter_id_of[(pid_, idx)] = enc_id
+        enc_id += 1
+
 for pid_ in all_patient_ids:
+    if pid_ in CURATED_IDS:
+        continue
     n_enc = random.choices([0,1,2,3,4],[1,4,4,2,1])[0]
     for _ in range(n_enc):
         prov = random.choice(PROVIDERS)
@@ -256,7 +412,8 @@ emit(f"SELECT setval('encounters_id_seq', {enc_id-1}, true);")
 emit()
 
 # ---------------------------------------------------------------------------
-# records — fixtures (ids 1-5) then generated (no index on body = full scan)
+# records — fixtures (ids 1-5), then curated, then generated (no index on
+# body = full scan)
 # ---------------------------------------------------------------------------
 emit("INSERT INTO records (id, encounter_id, patient_id, kind, title, body, status, reference_range, created_at) VALUES")
 rrows = [
@@ -272,9 +429,102 @@ LAB_TESTS = [("CBC panel","WBC 6.1, RBC 4.7, Hgb 14.2.","WBC 4.0-11.0; Hgb 13.5-
              ("Basic metabolic","Na 140, K 4.1, Cr 0.9.","Na 135-145; K 3.5-5.1"),
              ("TSH","2.3 mIU/L.","0.4-4.0 mIU/L")]
 rec_id = 6
+
+# --- curated records: two dated trend results + one narrative/unquotable
+# note per curated patient. Deliberately NOT random (see the A1c comment this
+# generalises, kept below): the demo has to read the same way every
+# rehearsal, and each trend pair is what proves the arithmetic path against a
+# real prior date rather than "unchanged 0.0" against now().
+#
+# quote+compute:  a single scalar value, a unit patient_summary.py's
+#                 _UNITS_SAFE_FOR_ARITHMETIC allows, at two dates.
+# narrative:      kind='note' — never in _QUOTABLE_KINDS, so it is UNQUOTABLE
+#                 by construction and exercises the refusal + clinician-review
+#                 path (review_queue.enqueue_refusals queues it on first read;
+#                 nothing here pre-approves it — the review starts clean).
+CURATED_TRENDS = {
+    # patient_id: (title, unit-bearing label, reference_range, [(index, value, date)])
+    1042: ("LDL", "LDL", "mg/dL", "LDL <130 mg/dL",
+           [(0, "162", "2026-03-02 09:20:00"), (2, "118", "2026-08-06 09:35:00")]),
+    1737: ("A1c", "", "%", "<5.7% normal; 5.7-6.4% prediabetes",
+           [(0, "7.5", "2026-03-12 09:15:00"), (2, "6.2", "2026-08-11 10:05:00")]),
+    1738: ("Systolic BP", "Systolic BP", "mmHg", "Normal <120 mmHg; Stage 2 >=140 mmHg",
+           [(0, "158", "2026-03-18 09:50:00"), (2, "132", "2026-08-14 09:40:00")]),
+    1739: ("SpO2", "SpO2", "%", "Normal 95-100%",
+           [(0, "90", "2026-03-22 14:50:00"), (2, "96", "2026-08-13 10:00:00")]),
+}
+CURATED_NARRATIVES = {
+    1042: "Discussed statin side effects and adherence. No muscle pain reported.",
+    1737: "Discussed insulin as a future option if A1c does not continue to improve. "
+          "Patient prefers to continue with diet and metformin for now.",
+    1738: "Discussed home blood pressure monitoring and low-sodium diet. Patient "
+          "using a home cuff twice weekly.",
+    1739: "Reviewed asthma action plan and rescue inhaler technique. Discussed "
+          "trigger avoidance at home.",
+}
+for pid_, (title, label, unit, ref_range, points) in CURATED_TRENDS.items():
+    for idx, value, created in points:
+        enc_id_for = curated_encounter_id_of[(pid_, idx)]
+        sep = "" if unit == "%" else " "
+        body = f"{label} {value}{sep}{unit}." if label else f"{value}{sep}{unit}."
+        rrows.append(
+            f" ({rec_id}, {enc_id_for}, {pid_}, 'lab_result', {sql_str(title)}, "
+            f"{sql_str(body)}, 'final', {sql_str(ref_range)}, {sql_str(created)})"
+        )
+        rec_id += 1
+    # The narrative sits on the middle (lab-draw) encounter — a real visit
+    # note alongside the two dated results, not a fourth encounter.
+    narrative_enc_id = curated_encounter_id_of[(pid_, 1)]
+    narrative_date = CURATED_ENCOUNTERS[pid_][1][-1]
+    rrows.append(
+        f" ({rec_id}, {narrative_enc_id}, {pid_}, 'note', 'Visit note', "
+        f"{sql_str(CURATED_NARRATIVES[pid_])}, 'final', NULL, {sql_str(narrative_date)})"
+    )
+    rec_id += 1
+
+# Peak flow (L/min is not in patient_summary's arithmetic allowlist, so this
+# quotes cleanly but never computes a change — asthma's SpO2 trend above is
+# the computable one; this is the additional quotable-only result the fixture
+# calls for).
+peak_flow_enc = curated_encounter_id_of[(1739, 1)]
+rrows.append(
+    f" ({rec_id}, {peak_flow_enc}, 1739, 'lab_result', 'Peak flow', "
+    f"'Peak flow 380 L/min.', 'final', 'Personal best 420 L/min', '2026-06-11 08:50:00')"
+)
+rec_id += 1
+
+# A multi-value PANEL on 1737, specifically. tests/integration/
+# test_patient_summary_flow.py::test_a_panel_result_still_shows_its_values and
+# test_patient_acceptance_e2e.py::test_negative_a_multi_value_panel_produces_no_inferred_delta
+# both require patient 1737's chart to contain a panel-shaped result — quoted,
+# but never carrying a computed change. Multiple comma-joined values is what
+# makes classify() call this a panel rather than a single_value.
+panel_enc = curated_encounter_id_of[(1737, 1)]
+rrows.append(
+    f" ({rec_id}, {panel_enc}, 1737, 'lab_result', 'Basic metabolic', "
+    f"'Na 140, K 4.1, Cr 0.9.', 'final', 'Na 135-145; K 3.5-5.1', '2026-06-02 08:25:00')"
+)
+rec_id += 1
+
+# A second unquotable note on 1737, specifically. 1737 is THE demo patient
+# (docs/runbook.md, tests/integration/test_demo_reset.py) and the rehearsal
+# regression test walks the review queue to at least 2 cases (approve one,
+# reject the other) to prove make demo-reset restores a genuinely consumed
+# state, not a still-untouched one. One narrative record is the floor every
+# curated patient meets; 1737 needs a second to be rehearsed against at all.
+third_enc = curated_encounter_id_of[(1737, 2)]
+rrows.append(
+    f" ({rec_id}, {third_enc}, 1737, 'note', 'Visit note', "
+    f"'Reviewed continuous glucose monitor data with patient. Discussed patterns "
+    f"around evening meals.', 'final', NULL, '2026-08-11 09:50:00')"
+)
+rec_id += 1
+
 for pid_, encs in enc_by_patient.items():
+    if pid_ in CURATED_IDS:
+        continue
     for e in encs:
-        if e <= 5:
+        if e in curated_encounter_ids:
             continue
         for _ in range(random.choices([1,1,2,3],[3,3,2,1])[0]):
             kind = random.choice(["note","note","lab_result","imaging","immunization"])
@@ -289,41 +539,11 @@ for pid_, encs in enc_by_patient.items():
             else:
                 rrows.append(f" ({rec_id}, {e}, {pid_}, 'note', 'Visit note', {sql_str(random.choice(['Patient stable.','Continue current plan.','Labs reviewed.','Counseled on diet/exercise.','RTC in 6 months.']))}, 'final', NULL, now())")
             rec_id += 1
-# --- demo fixture: a visible A1c trend on the demo patient's chart ----------
-#
-# Every generated lab above is written with created_at = now() and a fixed
-# value per analyte, so a repeated test produces a delta of exactly zero. The
-# patient summary then renders "unchanged 0.0", which proves the arithmetic
-# path works and demonstrates nothing — one of the client's four content rules
-# reduced to a rounding artifact on screen.
-#
-# These two rows give patient 1737 the same analyte at two real dates with
-# different values, so the summary shows "down 1.3" against a March source it
-# links to. Deliberately NOT a random pick: the demo has to look the same at
-# every rehearsal.
-#
-# The chart keeps its multi-value panel (Basic metabolic) alongside these, so
-# the same screen shows both halves of the rule — a single value trends, a
-# panel refuses to.
-DEMO_PATIENT = 1737
-DEMO_A1C_RANGE = "<5.7% normal; 5.7-6.4% prediabetes"
-_demo_encounters = enc_by_patient.get(DEMO_PATIENT, [])
-if len(_demo_encounters) >= 2:
-    _first, _last = _demo_encounters[0], _demo_encounters[-1]
-    rrows.append(
-        f" ({rec_id}, {_first}, {DEMO_PATIENT}, 'lab_result', 'A1c', '7.5%.', "
-        f"'abnormal', {sql_str(DEMO_A1C_RANGE)}, '2026-03-12 09:15:00')"
-    )
-    rec_id += 1
-    rrows.append(
-        f" ({rec_id}, {_last}, {DEMO_PATIENT}, 'lab_result', 'A1c', '6.2%.', "
-        f"'normal', {sql_str(DEMO_A1C_RANGE)}, '2026-08-11 10:05:00')"
-    )
-    rec_id += 1
 
 emit(",\n".join(rrows) + ";")
 emit(f"SELECT setval('records_id_seq', {rec_id-1}, true);")
 emit()
+
 
 # ---------------------------------------------------------------------------
 # appointments — fixtures (RIV-175 double-booking, reconciled) then generated
@@ -354,7 +574,29 @@ arows = [
     " (1043, 88240, 'Dr. Nguyen', 'Hearing follow-up', 'Riverbend Main', '2026-06-27 09:00:00', 'confirmed', '2026-06-22 10:05:00.000', NULL, NULL)",
 ]
 confirmed_slots_used = {88231, 88240}
+
+# Curated fixtures: one COMPLETED (past) and one upcoming CONFIRMED
+# appointment each, on fresh slot ids (90000+) well clear of both the random
+# pool above (88200-88319) and the RIV-175 double-booking fixture — so a
+# rerun can never collide with either, and every curated patient's scheduling
+# workflow has deterministic evidence.
+curated_slot_id = 90001
+for pid_ in (1042, 1737, 1738, 1739):
+    prov = PROVIDERS[0] if pid_ == 1042 else PROVIDERS[1]
+    arows.append(
+        f" ({pid_}, {curated_slot_id}, {sql_str(prov[1])}, 'Follow-up', {sql_str(prov[3])}, "
+        f"'2026-08-06 09:00:00', 'completed', '2026-08-01 09:00:00.000', NULL, NULL)"
+    )
+    curated_slot_id += 1
+    arows.append(
+        f" ({pid_}, {curated_slot_id}, {sql_str(prov[1])}, 'Follow-up', {sql_str(prov[3])}, "
+        f"'2026-09-10 09:00:00', 'confirmed', '2026-08-15 09:00:00.000', NULL, NULL)"
+    )
+    curated_slot_id += 1
+
 for pid_ in all_patient_ids:
+    if pid_ in CURATED_IDS:
+        continue
     for _ in range(random.choices([0,1,2],[2,3,1])[0]):
         prov = random.choice(PROVIDERS)
         reason = random.choice(REASONS)
@@ -389,6 +631,9 @@ emit("INSERT INTO consents (patient_id, kind, signed_at) VALUES")
 crows = [
     " (1042, 'npp_ack', now())", " (1042, 'treatment_consent', now())",
     " (1043, 'npp_ack', now())", " (1601, 'npp_ack', now())",
+    " (1737, 'npp_ack', now())", " (1737, 'treatment_consent', now())",
+    " (1738, 'npp_ack', now())", " (1738, 'treatment_consent', now())",
+    " (1739, 'npp_ack', now())", " (1739, 'treatment_consent', now())",
 ]
 for pid_ in gen_patient_ids:
     if random.random() < 0.85:
@@ -436,7 +681,41 @@ gwrows = [
     " (5, 1043)",                                             # drpatel
     " (6, 1330)", " (6, 1601)",                               # drnguyen
     " (13, 1737)",                                            # drkim (review queue)
+    # frontdesk (2026-08-22): tests/integration/test_patient_acceptance_e2e.py
+    # and test_patient_summary_flow.py both drive the invitation for 1737
+    # through the `frontdesk` account, and invitation issuance now requires an
+    # active grant for the specific chart (services/gateway/app.py's
+    # has_active_grant check), not merely the patients.write permission.
+    # Adding this does not weaken drkim's "granted 1737 only" isolation, which
+    # is about the REVIEW QUEUE (gated on summary_review.decide, a permission
+    # front_desk's role does not hold and never will) — a registration grant
+    # and review-queue visibility are two different authorizations, and
+    # tests/integration/test_review_queue_flow.py's own scoping assertion is
+    # about drnguyen/drpatel, not frontdesk.
+    " (2, 1737)",                                             # frontdesk
+    # frontdesk / 1629 (2026-08-22): same reasoning as 1737 above —
+    # tests/integration/test_patient_acceptance_e2e.py activates patient B
+    # (1629, "the other patient, used only to prove they cannot be reached")
+    # through frontdesk too, and now needs a grant to do it. 1629 stays
+    # ungranted for drkim/clinician purposes elsewhere; this is only a
+    # front-desk registration grant, same non-conflict as 1737's.
+    " (2, 1629)",                                             # frontdesk
+    # Curated fixtures (2026-08-22). drpatel treats 1738's hypertension
+    # (the same provider named on its curated encounters); drnguyen treats
+    # 1739's asthma likewise. frontdesk registers both, matching 1601's
+    # front_desk-registered pattern above. 1042 and 1737 already have staff
+    # grants from the rows above (frontdesk/rdelgado, drkim) and need no more.
+    " (5, 1738)",                                             # drpatel
+    " (2, 1738)",                                             # frontdesk
+    " (6, 1739)",                                             # drnguyen
+    " (2, 1739)",                                             # frontdesk
 ]
+# Self-grants for the two pre-activated patient accounts — the same fact and
+# the same table a real activation writes (services/gateway/app.py's
+# _activate_invitation), not a second authorization path. 1042 and 1737 have
+# no such row: neither has a seeded account.
+for patient_id, uid in patient_user_id_of.items():
+    gwrows.append(f" ({uid}, {patient_id})")
 emit(",\n".join(gwrows) + ";")
 emit()
 

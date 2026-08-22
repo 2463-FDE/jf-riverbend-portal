@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import AgentDraftPanel from "../components/AgentDraftPanel";
 import { apiFetch } from "../lib/session";
+import { identityLine, usePatientIdentity } from "../lib/usePatientIdentity";
 
 /**
  * The clinician review queue.
@@ -54,13 +55,22 @@ function CaseCard({
   onDecide: (id: number, decision: Decision) => void;
 }) {
   const [confirming, setConfirming] = useState<Decision | null>(null);
+  // The clinician already holds a grant for every case in THIS queue (it is
+  // grant-scoped server-side), so the lookup below always succeeds — but the
+  // fallback still degrades to the bare id rather than blocking the row on a
+  // slow or failed name fetch.
+  const { name } = usePatientIdentity(
+    `/api/patients/${item.patient_id}/name`,
+    String(item.patient_id)
+  );
+  const patientLabel = identityLine(name, item.patient_id) ?? `Patient ${item.patient_id}`;
 
   return (
     <li className="rb-review">
       <div className="rb-review-head">
         <h3 className="rb-review-title">{item.record_title ?? "Record"}</h3>
         <span className="rb-review-meta">
-          Patient {item.patient_id} · record #{item.record_id}
+          {patientLabel} · record #{item.record_id}
           {item.record_date ? ` · ${item.record_date}` : ""}
         </span>
       </div>

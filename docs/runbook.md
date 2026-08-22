@@ -270,9 +270,11 @@ Three prerequisites, each of which silently breaks the demo if skipped.
 without it and compose refuses to interpolate — see the top of this file.
 Never commit the value.
 
-**2. The database must be seeded from the CURRENT seed file.** `drkim` and the
-demo A1c trend exist only there. On a fresh volume this is automatic; on an
-existing one, `docker compose down -v && make up`.
+**2. The database must be seeded from the CURRENT seed file.** The four
+canonical demo patients — 1042 (Maria Gonzalez), 1737 (Priya Khan), 1738
+(Thomas Johnson), 1739 (Aisha Taylor) — and their trends, appointments and
+(for 1738/1739) pre-activated portal accounts exist only there. On a fresh
+volume this is automatic; on an existing one, `docker compose down -v && make up`.
 
 **3. Reset between rehearsals — the demo is not repeatable without it.**
 
@@ -282,22 +284,32 @@ make demo-reset
 
 Review decisions are durable by design: a rejected record is never re-queued
 and an approved one stays released. So every rehearsal, and every run of the
-integration suite, consumes demo state. After one full run the demo patient
-has an approval, a rejection and one remaining case; after two the review
-queue is empty and the clinician beat cannot be shown. `make demo-reset`
-returns patient 1737 to a clean pre-demo state and re-asserts the reviewer's
-grant. It prints what it restored:
+integration suite, consumes demo state. `make demo-reset` (2026-08-22, covers
+all four canonical patients) returns 1042 and 1737 to invite-ready (no portal
+account — the demo starts from "front desk issues a code"), restores 1738's
+and 1739's pre-activated accounts to active if a rehearsal deactivated one,
+and re-asserts every staff/clinician grant the four charts need. It prints one
+row per patient:
 
 ```
-reviews=0   portal_account=none   reviewer_grant=active   a1c_results=2
+ patient_id |      name      | portal_account | coverage | encounters | records | trend_results | appointments | pending_reviews |           active_grants
+------------+----------------+----------------+----------+------------+---------+---------------+--------------+-----------------+-----------------------------------
+       1042 | Maria Gonzalez | none           | active   |          4 |       4 |             2 |            5 |               0 | frontdesk, rdelgado
+       1737 | Priya Khan     | none           | active   |          3 |       5 |             2 |            2 |               0 | drkim, frontdesk
+       1738 | Thomas Johnson | patient-1738   | active   |          3 |       3 |             2 |            2 |               0 | drpatel, frontdesk, patient-1738
+       1739 | Aisha Taylor   | patient-1739   | active   |          3 |       4 |             2 |            2 |               0 | drnguyen, frontdesk, patient-1739
 ```
 
-`reviewer_grant` is the one to read. It asserts the *gate's own* predicate —
-the account is active, the grant is unrevoked and unexpired — rather than
-merely that `drkim` exists, because a revoked grant leaves the review queue
-empty while the account looks perfectly fine. `INACTIVE` there, or
-`a1c_results` other than 2, means the database predates the current seed:
-re-seed with `docker compose down -v && make up`.
+`active_grants` is the column to read for each row. It lists a grant only when
+it satisfies the *gate's own* predicate — the account active, the grant
+unrevoked and unexpired — never merely that a row exists, because a revoked or
+expired grant leaves the relevant queue/chart empty while the account looks
+perfectly fine. A missing expected name there, `portal_account` reading `none`
+for 1738/1739, or `trend_results` under 2 for any row, means the database
+predates the current seed: re-seed with `docker compose down -v && make up`. A
+real Bedrock call against 1737 also writes an immutable `agent_draft_provenance`
+row that this reset never deletes (by design) — a genuinely virgin agent-draft
+demonstration needs that fresh-volume re-seed, not merely a reset.
 
 ### Keep these two OFF the primary demo path
 

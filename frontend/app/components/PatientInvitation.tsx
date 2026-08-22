@@ -14,6 +14,10 @@ import { apiFetch } from "../lib/session";
  * a copy button so it does not have to be retyped.
  */
 export default function PatientInvitation({ patientId }: { patientId: string }) {
+  // Blank or non-numeric — this component has no id of its own to validate
+  // against, only whatever the records screen's Patient ID field currently
+  // holds, which starts empty now that screen has no default (2026-08-22).
+  const validId = /^\d+$/.test(patientId.trim());
   const [code, setCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -23,6 +27,7 @@ export default function PatientInvitation({ patientId }: { patientId: string }) 
   const [blocked, setBlocked] = useState(false);
 
   async function issue() {
+    if (!validId) return;
     setError(null);
     setBusy(true);
     try {
@@ -140,7 +145,7 @@ export default function PatientInvitation({ patientId }: { patientId: string }) 
         </p>
       )}
       <div className="rb-invite__actions">
-        <button type="button" onClick={issue} disabled={busy} className="rb-btn">
+        <button type="button" onClick={issue} disabled={busy || !validId} className="rb-btn">
           {busy ? "Issuing…" : "Issue invitation"}
         </button>
         {blocked && (

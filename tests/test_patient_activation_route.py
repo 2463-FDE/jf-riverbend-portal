@@ -45,6 +45,12 @@ def env(monkeypatch):
     client = TestClient(app_mod.app)
     with Session() as s:
         s.add(app_mod.User(id=2, username="frontdesk", password_hash="x", role="front_desk"))
+        # The authoritative patient row activation now reads full_name from,
+        # and the active grant issuance now requires of its caller — both
+        # added so issuance/activation match the client's least-privilege and
+        # identity requirements rather than trusting patients.write alone.
+        s.add(app_mod.Patient(id=1042, name="Maria Gonzalez"))
+        s.add(app_mod.PatientAccessGrant(user_id=2, patient_id=1042))
         s.commit()
     yield client, Session
     app_mod.app.dependency_overrides.clear()
@@ -102,14 +108,70 @@ def test_activation_creates_the_account_and_exactly_one_grant(env):
     assert resp.status_code == 200
     assert resp.json()["username"] == "patient-1042"
     with Session() as s:
-        account = s.execute(text("SELECT id, role, patient_id, is_active FROM users WHERE username='patient-1042'")).one()
+        account = s.execute(
+            text("SELECT id, role, patient_id, is_active, full_name FROM users WHERE username='patient-1042'")
+        ).one()
         assert account[1] == "patient"      # no staff permission whatsoever
         assert account[2] == 1042
+        # The root cause this fixes: full_name used to be left NULL — nothing
+        # ever populated it, so the account existed and could sign in, but
+        # every screen that displays a patient's own identity had nothing to
+        # show. It is read from `patients.name`, the authoritative source, not
+        # supplied by the caller anywhere in this flow.
+        assert account[4] == "Maria Gonzalez"
         grants = s.execute(text("SELECT patient_id FROM patient_access_grants WHERE user_id=:u"),
                            {"u": account[0]}).all()
     # THE grant: one row, their own chart. All scoping flows from this through
     # the same gate that scopes staff — no patient-specific authorization path.
     assert [g[0] for g in grants] == [1042]
+
+
+def test_activation_fails_closed_when_the_patient_row_no_longer_exists(env):
+    """An invitation's patient_id resolving to nothing is not a lookup gap the
+    caller should be able to turn into an account — same generic refusal as
+    every other activation failure, so this is not an oracle either."""
+    client, Session = env
+    code = client.post("/patients/1042/invitation", headers=_auth()).json()["code"]
+    with Session() as s:
+        s.execute(text("DELETE FROM patients WHERE id = 1042"))
+        s.commit()
+
+    resp = client.post("/patient/activate", json={"code": code, "password": "a-long-passphrase"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid or expired invitation code"
+    with Session() as s:
+        assert s.execute(text("SELECT count(*) FROM users WHERE username='patient-1042'")).scalar() == 0
+
+
+def test_issuing_requires_an_active_grant_for_this_patient_not_just_the_role(env):
+    """patients.write is a role-wide permission; it says nothing about THIS
+    chart. The patient exists — so a 403 here can only be the grant check,
+    isolated from the existence check `test_a_nonexistent_patient_...` below
+    covers — but front desk holds no grant for it."""
+    client, Session = env
+    with Session() as s:
+        s.add(app_mod.Patient(id=1043, name="James O'Brien"))
+        s.commit()
+
+    resp = client.post("/patients/1043/invitation", headers=_auth())
+
+    assert resp.status_code == 403
+
+
+def test_a_nonexistent_patient_cannot_receive_an_invitation(env):
+    client, _ = env
+    assert client.post("/patients/999999/invitation", headers=_auth()).status_code == 404
+
+
+def test_an_active_account_blocks_a_second_invitation(env):
+    client, Session = env
+    code = client.post("/patients/1042/invitation", headers=_auth()).json()["code"]
+    client.post("/patient/activate", json={"code": code, "password": "a-long-passphrase"})
+
+    resp = client.post("/patients/1042/invitation", headers=_auth())
+
+    assert resp.status_code == 409
 
 
 def test_a_code_cannot_be_redeemed_twice(env):
