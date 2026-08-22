@@ -1,4 +1,4 @@
-"""One privacy-safe trace across the seven stages, and a guard that makes the
+"""One privacy-safe trace across the eight stages, and a guard that makes the
 privacy property enforced rather than intended.
 
 THE PROBLEM THIS SOLVES
@@ -33,12 +33,17 @@ from typing import Any, Mapping, Optional
 
 
 class Stage(str, Enum):
-    """The seven stages the client requires one trace to cover."""
+    """The eight stages the client requires one trace to cover, declared in the
+    canonical order they must occur along the required path:
+    request -> retrieval -> agent_decision -> provider_call -> draft ->
+    validation -> review -> display. Enum member order IS the canonical order
+    (see is_ordered)."""
 
     REQUEST = "request"
     RETRIEVAL = "retrieval"
     AGENT_DECISION = "agent_decision"
     PROVIDER_CALL = "provider_call"
+    DRAFT = "draft"
     VALIDATION = "validation"
     REVIEW = "review"
     DISPLAY = "display"
@@ -165,6 +170,23 @@ class TraceRecorder:
             error_type=error_type,
         )
 
+    def draft(self, *, draft_version: int, label: ProvenanceLabel,
+              model_id: Optional[str], prompt_version: Optional[str],
+              citation_ids: list) -> StageEvent:
+        """The versioned, evidence-based draft — recorded BY REFERENCE only:
+        which version, its provenance label, which model and prompt version
+        produced it, and which citations it made. Never the draft text: adr/0010
+        keeps the text in agent_draft_provenance as the clinical artifact, and
+        the telemetry copy stays forbidden (see FORBIDDEN_KEYS)."""
+        return self.record(
+            Stage.DRAFT,
+            draft_version=draft_version,
+            provenance_label=label.value,
+            model_id=model_id,
+            prompt_version=prompt_version,
+            citation_ids=list(citation_ids),
+        )
+
     def validation(self, *, passed: bool, validation_code: Optional[str],
                    citation_ids: list) -> StageEvent:
         """A reason CODE, not a message — a validator message could quote the
@@ -191,10 +213,28 @@ class TraceRecorder:
         return {e.stage for e in self.events}
 
     def is_complete(self) -> bool:
-        """True when all seven stages appear. The client requires ONE trace
+        """True when all eight stages appear. The client requires ONE trace
         covering the whole path, so a partial trace is a failed acceptance
         criterion, not a partial success."""
         return self.stages_covered() == set(Stage)
 
     def missing_stages(self) -> list:
         return [s.value for s in Stage if s not in self.stages_covered()]
+
+    def is_ordered(self) -> bool:
+        """True when each stage's FIRST appearance follows the canonical Stage
+        order. agent_decision and provider_call may repeat (a bounded tool-
+        calling loop), so this checks the order stages are first entered, not
+        that each occurs exactly once."""
+        canonical = list(Stage)
+        first_seen: list = []
+        for event in self.events:
+            if event.stage not in first_seen:
+                first_seen.append(event.stage)
+        ranks = [canonical.index(s) for s in first_seen]
+        return ranks == sorted(ranks)
+
+    def is_acceptable(self) -> bool:
+        """The acceptance bar for one end-to-end trace: all eight stages present
+        AND first entered in canonical order."""
+        return self.is_complete() and self.is_ordered()

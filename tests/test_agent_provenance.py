@@ -31,6 +31,8 @@ def _full(t):
     t.retrieval(document_count=2, citation_ids=["c1", "c2"], categories=["lab"], excluded_count=1)
     t.agent_decision(tool_name="search_documents", turn=1, stop_reason="tool_use")
     t.provider_call(label=ProvenanceLabel.REAL, model_id="model-x", latency_ms=120)
+    t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
+            prompt_version="v3", citation_ids=["c1"])
     t.validation(passed=True, validation_code=None, citation_ids=["c1"])
     t.review(decision="approved", draft_version=1, decided_by_user_id=13)
     t.display(draft_version=1, label=ProvenanceLabel.REAL)
@@ -104,14 +106,16 @@ def test_forbidden_keys_does_not_accidentally_ban_permitted_names():
 # --- what the stages carry -------------------------------------------------- #
 
 
-def test_one_trace_covers_all_seven_stages():
+def test_one_trace_covers_all_eight_stages_in_order():
     """The client requires ONE trace across the whole path, so a partial trace
     is a failed acceptance criterion rather than a partial success."""
     t = _full(_rec())
 
     assert t.is_complete()
+    assert t.is_ordered()
+    assert t.is_acceptable()
     assert t.missing_stages() == []
-    assert len(STAGES) == 7
+    assert len(STAGES) == 8
 
 
 def test_an_incomplete_trace_names_what_is_missing():
@@ -119,8 +123,33 @@ def test_an_incomplete_trace_names_what_is_missing():
     t.request(actor_role="patient")
 
     assert not t.is_complete()
+    assert "draft" in t.missing_stages()
     assert "provider_call" in t.missing_stages()
     assert "display" in t.missing_stages()
+
+
+def test_stages_out_of_canonical_order_are_detected():
+    """The trace must cover the path IN ORDER; a display before a request is a
+    broken sequence even if every stage eventually appears."""
+    t = _rec()
+    t.display(draft_version=1, label=ProvenanceLabel.REAL)
+    t.request(actor_role="patient")
+
+    assert not t.is_ordered()
+    assert not t.is_acceptable()
+
+
+def test_the_draft_stage_references_the_version_never_the_text():
+    """The eighth stage: the versioned draft is recorded by reference (version,
+    provenance, model/prompt version, citations) — never its text."""
+    t = _rec()
+    event = t.draft(draft_version=2, label=ProvenanceLabel.REAL, model_id="model-x",
+                    prompt_version="v3", citation_ids=["c1"])
+
+    assert event.stage is Stage.DRAFT
+    assert event.attributes["draft_version"] == 2
+    assert event.attributes["prompt_version"] == "v3"
+    assert not any(k in event.attributes for k in ("generated_text", "text", "draft_text"))
 
 
 def test_retrieval_records_counts_and_ids_not_documents():
@@ -179,7 +208,7 @@ def test_the_correlation_id_is_one_value_for_the_whole_request():
     t = _full(_rec())
 
     assert t.correlation_id == "corr-1"
-    assert len(t.events) == 7
+    assert len(t.events) == 8
 
 
 # --- the persistence boundary (adr/0010, decision A) ------------------------ #
