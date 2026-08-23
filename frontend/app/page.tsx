@@ -71,7 +71,7 @@ function StaffDashboard() {
 
   const upcoming = (appts ?? [])
     .filter((a) => !["cancelled", "canceled", "completed"].includes(a.status?.toLowerCase()))
-    .sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? ""));
+    .sort((a, b) => (a.scheduled_for ?? "").localeCompare(b.scheduled_for ?? ""));
   const next = upcoming[0];
 
   return (
@@ -94,7 +94,7 @@ function StaffDashboard() {
               </div>
               <div className="rb-listrow__meta" style={{ marginTop: 6 }}>
                 <span><IconStethoscope width={15} height={15} /> {next.provider}</span>
-                <span><IconClock width={15} height={15} /> {fmtDateTime(next.start_at)}</span>
+                <span><IconClock width={15} height={15} /> {fmtDateTime(next.scheduled_for)}</span>
                 {next.location && <span><IconPin width={15} height={15} /> {next.location}</span>}
               </div>
               <div style={{ marginTop: 12 }}>

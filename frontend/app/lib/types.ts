@@ -139,8 +139,10 @@ export interface Appointment {
   provider: string;
   reason: string;
   location?: string;
-  start_at?: string;
-  end_at?: string;
+  // w9-fixes P0 4.3: the backend's AppointmentOut field is `scheduled_for`,
+  // not `start_at` (that name belongs to Slot above, a different shape) —
+  // every appointment rendered here previously read undefined.
+  scheduled_for?: string;
   status: string;
 }
 

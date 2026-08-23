@@ -253,24 +253,46 @@ emit(f"SELECT setval('providers_id_seq', {len(PROVIDERS)}, true);")
 emit()
 
 # ---------------------------------------------------------------------------
-# slots — explicit ids incl. 88231 (double-booked) and 88240
-# ---------------------------------------------------------------------------
-emit("INSERT INTO slots (id, provider_id, location, start_at, end_at, status) VALUES")
-srows = []
+# slots — explicit ids incl. 88231 (double-booked) and 88240.
+#
+# w9-fixes P0 4.2 follow-up: status used to be an independent random draw
+# right here, decided before a single appointment existed to place against
+# it — the exact shape of bug 4.2 is about (Slot.status disagreeing with
+# whether a confirmed appointment actually occupies the slot), baked into
+# the seed itself rather than caused by anything at runtime. The INSERT is
+# now deferred (see below, after the appointments section) and status is
+# derived from confirmed_slots_used once that set is final, so a freshly
+# seeded database starts with the two models already in agreement.
+slot_base_rows = []
 slot_id = 88200
-booked_ids = {88231, 88240}
 base = datetime(2026, 6, 23, 8, 0, 0)
 for n in range(120):
     prov = random.randint(1,8)
     loc = PROVIDERS[prov-1][3]
     start = base + timedelta(days=n // 8, hours=(n % 8))
     end = start + timedelta(minutes=30)
-    status = "booked" if slot_id in booked_ids else random.choice(["open","open","open","booked"])
-    srows.append(f" ({slot_id}, {prov}, {sql_str(loc)}, {sql_str(start.strftime('%Y-%m-%d %H:%M:%S'))}, {sql_str(end.strftime('%Y-%m-%d %H:%M:%S'))}, {sql_str(status)})")
+    slot_base_rows.append((slot_id, prov, loc, start, end))
     slot_id += 1
-emit(",\n".join(srows) + ";")
-emit(f"SELECT setval('slots_id_seq', {slot_id-1}, true);")
-emit()
+
+# Dedicated demo-booking pool (w9-fixes P0 4.2 follow-up) — 16 reserved ids,
+# well clear of both the random pool above (88200-88319) and the
+# curated-fixture range used below (90001-90008), that the historical
+# appointment loop never draws from. Always 'open' at generation time with
+# no appointment of any kind placed on them. This file's own dates are fixed
+# at generation time and eventually fall into the past (services now require
+# start_at in the future — see scheduling-service's list_slots/book), so
+# what actually keeps "Schedule a visit" demonstrable between rehearsals is
+# db/seed/demo_reset.sql repositioning these specific ids relative to
+# whenever it runs, not this seed file.
+DEMO_SLOT_IDS = list(range(95001, 95017))
+demo_slot_base_rows = []
+demo_base = datetime(2026, 9, 15, 9, 0, 0)
+for i, sid in enumerate(DEMO_SLOT_IDS):
+    prov = (i % len(PROVIDERS)) + 1
+    loc = PROVIDERS[prov - 1][3]
+    start = demo_base + timedelta(days=i // 4, hours=2 * (i % 4))
+    end = start + timedelta(minutes=30)
+    demo_slot_base_rows.append((sid, prov, loc, start, end))
 
 # ---------------------------------------------------------------------------
 # insurance_coverages
@@ -636,6 +658,30 @@ for pid_ in all_patient_ids:
             s_id = random.randint(88200, slot_id-1)
         arows.append(f" ({pid_}, {s_id}, {sql_str(prov[1])}, {sql_str(reason)}, {sql_str(prov[3])}, {sql_str(sched)}, {sql_str(status)}, {sql_str(created)}, NULL, NULL)")
 emit(",\n".join(arows) + ";")
+emit()
+
+assert not (set(DEMO_SLOT_IDS) & confirmed_slots_used), (
+    "the dedicated demo-booking pool must never be drawn into the historical "
+    "appointment loop above"
+)
+
+# Now that confirmed_slots_used is final, emit slots with status derived
+# from it — see the comment where slot_base_rows was built above.
+emit("INSERT INTO slots (id, provider_id, location, start_at, end_at, status) VALUES")
+all_slot_rows = []
+for sid, prov, loc, start, end in slot_base_rows:
+    status = "booked" if sid in confirmed_slots_used else "open"
+    all_slot_rows.append(
+        f" ({sid}, {prov}, {sql_str(loc)}, {sql_str(start.strftime('%Y-%m-%d %H:%M:%S'))}, "
+        f"{sql_str(end.strftime('%Y-%m-%d %H:%M:%S'))}, {sql_str(status)})"
+    )
+for sid, prov, loc, start, end in demo_slot_base_rows:
+    all_slot_rows.append(
+        f" ({sid}, {prov}, {sql_str(loc)}, {sql_str(start.strftime('%Y-%m-%d %H:%M:%S'))}, "
+        f"{sql_str(end.strftime('%Y-%m-%d %H:%M:%S'))}, 'open')"
+    )
+emit(",\n".join(all_slot_rows) + ";")
+emit(f"SELECT setval('slots_id_seq', {max(DEMO_SLOT_IDS)}, true);")
 emit()
 
 # ---------------------------------------------------------------------------

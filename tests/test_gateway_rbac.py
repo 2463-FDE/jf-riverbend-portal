@@ -6,9 +6,21 @@ the OLD flat `staff` role would have allowed, and that the role still
 reaches its own permitted routes. Downstream calls are mocked (httpx) the
 same way test_gateway_patients_route.py already does — a denial never even
 reaches httpx, since require_permission runs before the route body.
+
+w9-fixes P0 4.5 note: /appointments GET/POST now also checks a per-patient
+patient_access_grants row (see test_gateway_appointment_authorization.py for
+that boundary itself) — a role-only session can pass require_permission and
+still need a real `db` dependency and a grant to get past that second gate.
+This file is about ROLE gating, not grant gating, so the fixture below seeds
+exactly the grants test_user_id (2) needs for the specific patient ids these
+tests already use (1 and 1042), the same way a real front-desk session would
+already hold a grant before ever calling one of these routes.
 """
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from conftest import load_module
 
@@ -16,16 +28,40 @@ app_mod = load_module("services/gateway/app.py", "gateway_app_rbac")
 
 VALID_TOKEN = "valid-token-abc"
 TEST_INTERNAL_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
+TEST_USER_ID = 2
+GRANTED_PATIENT_IDS = (1, 1042)
 
 
 def _session_for(role: str) -> dict:
-    return {"user_id": "2", "username": "testuser", "role": role}
+    return {"user_id": str(TEST_USER_ID), "username": "testuser", "role": role}
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_INTERNAL_TOKEN)
-    return TestClient(app_mod.app)
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    app_mod.User.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    def fake_db():
+        db = Session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app_mod.app.dependency_overrides[app_mod.get_db] = fake_db
+    with Session() as s:
+        s.add(app_mod.User(id=TEST_USER_ID, username="testuser", password_hash="x",
+                            role="staff", is_active=True))
+        for pid in GRANTED_PATIENT_IDS:
+            s.add(app_mod.PatientAccessGrant(user_id=TEST_USER_ID, patient_id=pid))
+        s.commit()
+
+    yield TestClient(app_mod.app)
+    app_mod.app.dependency_overrides.clear()
 
 
 def _auth():
@@ -291,7 +327,7 @@ def test_scheduler_can_book_an_appointment(client, monkeypatch):
     monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("scheduler") if t == VALID_TOKEN else None)
     _stub_downstream(monkeypatch, payload={"appointment_id": 1}, status_code=201)
 
-    resp = client.post("/appointments", json={}, headers=_auth())
+    resp = client.post("/appointments", json={"patient_id": 1042}, headers=_auth())
 
     assert resp.status_code == 201
 
@@ -317,7 +353,7 @@ def test_legacy_staff_role_is_unaffected_and_can_still_reach_everything(client, 
         ("post", "/hl7/ingest", {}),
         ("get", "/patients/1042/records", None),
         ("get", "/roi/requests", None),
-        ("post", "/appointments", {}),
+        ("post", "/appointments", {"patient_id": 1042}),
     ]:
         resp = client.request(method, path, json=body, headers=_auth())
         assert resp.status_code in (200, 201), f"{method.upper()} {path} unexpectedly denied for legacy staff role"
@@ -365,7 +401,7 @@ def test_front_desk_keeps_demographics_and_scheduling(client, monkeypatch):
 
     assert client.get("/patients/1042", headers=_auth()).status_code == 200
     assert client.get("/patients", headers=_auth()).status_code == 200
-    assert client.post("/appointments", json={}, headers=_auth()).status_code == 200
+    assert client.post("/appointments", json={"patient_id": 1042}, headers=_auth()).status_code == 200
 
 
 def test_roi_clerk_is_denied_the_chart_after_the_amendment(client, monkeypatch):

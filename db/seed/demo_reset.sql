@@ -60,6 +60,23 @@
 
 \set canonical_patients '(1042, 1737, 1738, 1739)'
 
+-- Dedicated demo-booking pool (w9-fixes P0 4.2 follow-up), ids 95001-95016 —
+-- see db/seed/generate_seed.py's DEMO_SLOT_IDS. Kept separate from every
+-- other slot in the database specifically so this file can freely reset
+-- them without ever touching a real chart's historical appointment history:
+-- the 88200-88319 pool and the curated 90001-90008 fixtures are seed-time-
+-- only and are never modified here.
+--
+-- WHY THIS EXISTS: scheduling-service now requires start_at to be in the
+-- future (and GET /slots excludes any slot a confirmed appointment already
+-- occupies) — see services/scheduling-service/app.py::list_slots and
+-- book.py::_lock_open_slot. seed.sql's own dates for this pool are fixed at
+-- generation time and eventually fall into the past, so without this reset
+-- "Schedule a visit" would show no availability at all after enough time
+-- passes, or after a rehearsal/test consumes one of them.
+\set demo_slot_lo 95001
+\set demo_slot_hi 95016
+
 BEGIN;
 
 -- Review decisions, all four patients. Removing these returns any refused
@@ -68,6 +85,27 @@ BEGIN;
 -- CLEAR, never a prepopulate: nothing is inserted into
 -- patient_summary_reviews anywhere in this file.
 DELETE FROM patient_summary_reviews WHERE patient_id IN :canonical_patients;
+
+-- --- Dedicated demo-booking pool: reopen and reposition into the future ----
+-- Only ever touches appointments whose slot_id falls in this reserved
+-- range — no historical/canonical-patient appointment is deleted or
+-- modified by this block, regardless of which patient it happens to be for.
+DELETE FROM appointments WHERE slot_id BETWEEN :demo_slot_lo AND :demo_slot_hi;
+
+WITH repositioned AS (
+    SELECT id,
+           now() + interval '1 day'
+                 + ((id - :demo_slot_lo) / 4) * interval '1 day'
+                 + ((id - :demo_slot_lo) % 4) * interval '2 hours' AS new_start
+      FROM slots
+     WHERE id BETWEEN :demo_slot_lo AND :demo_slot_hi
+)
+UPDATE slots s
+   SET start_at = r.new_start,
+       end_at   = r.new_start + interval '30 minutes',
+       status   = 'open'
+  FROM repositioned r
+ WHERE s.id = r.id;
 
 -- --- 1042 and 1737: INVITE-READY -------------------------------------------
 -- Portal account, its access grant and any invitation, so the demo can start
@@ -155,6 +193,14 @@ SELECT u.id, p.patient_id
        );
 
 COMMIT;
+
+\echo ''
+\echo '  demo-booking pool (95001-95016) after reset:'
+SELECT count(*) AS available_demo_slots
+  FROM slots
+ WHERE id BETWEEN :demo_slot_lo AND :demo_slot_hi
+   AND status = 'open'
+   AND start_at > now();
 
 -- What the operator should see, one row per canonical patient. Anything
 -- surprising here — a portal_account that should exist and does not, an

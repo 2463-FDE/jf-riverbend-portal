@@ -10,8 +10,8 @@ vi.mock("../lib/session", () => ({ apiFetch: vi.fn() }));
 
 import { apiFetch } from "../lib/session";
 
-function jsonResponse(body: unknown, ok = true): Response {
-  return { ok, json: async () => body } as Response;
+function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 500): Response {
+  return { ok, status, json: async () => body } as Response;
 }
 
 function mockRoutes(nameByPatient: Record<string, string>) {
@@ -83,5 +83,160 @@ describe("appointments — name-only identity box", () => {
 
     await waitFor(() => expect(screen.getByText(/name unavailable/i)).toBeInTheDocument());
     expect(screen.queryByText(/Maria Gonzalez/)).not.toBeInTheDocument();
+  });
+});
+
+// w9-fixes P1 4.1 — editing the Patient ID field must drop every trace of
+// the previous patient's transient state (error/success banner, typed
+// reason, busy spinners) immediately, not just their name/list.
+describe("appointments — patient-context reset (w9-fixes 4.1)", () => {
+  const SLOT = {
+    id: 5,
+    provider: "Dr. X",
+    location: "Riverbend Main",
+    start_at: "2026-09-01T10:00:00Z",
+    end_at: "2026-09-01T10:30:00Z",
+    status: "open",
+  };
+
+  function mockBookingFailure() {
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/name")) {
+        const id = url.match(/patients\/(\d+)\/name/)?.[1] ?? "";
+        const names: Record<string, string> = { "1042": "Maria Gonzalez", "1738": "Thomas Johnson" };
+        return names[id]
+          ? jsonResponse({ id: Number(id), name: names[id] })
+          : jsonResponse({ error: "name unavailable" }, false);
+      }
+      if (init?.method === "POST" && url.includes("/appointments")) {
+        return jsonResponse({ error: "slot_taken" }, false);
+      }
+      if (url.includes("/appointments")) return jsonResponse({ items: [] });
+      if (url.includes("/slots")) return jsonResponse({ items: [SLOT] });
+      return jsonResponse({});
+    });
+  }
+
+  it("clears a prior error, typed reason, and busy state before the next patient loads", async () => {
+    mockBookingFailure();
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/reason for visit/i), { target: { value: "vaccination" } });
+    fireEvent.click(await screen.findByRole("button", { name: /^book$/i }));
+    await waitFor(() => expect(screen.getByText(/could not book that slot/i)).toBeInTheDocument());
+
+    // Editing the id — before pressing Load — must drop the stale banner
+    // and reason immediately.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1738" } });
+    expect(screen.queryByText(/could not book that slot/i)).not.toBeInTheDocument();
+    expect((screen.getByLabelText(/reason for visit/i) as HTMLInputElement).value).toBe("");
+    expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() => expect(screen.getByText("Thomas Johnson")).toBeInTheDocument());
+    expect(screen.queryByText(/could not book that slot/i)).not.toBeInTheDocument();
+  });
+
+  it("disables Book until a patient is loaded", async () => {
+    mockBookingFailure();
+    render(<AppointmentsPage />);
+
+    const book = await screen.findByRole("button", { name: /^book$/i });
+    expect(book).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /^book$/i })).not.toBeDisabled();
+  });
+});
+
+// Round-2 review (M3): editing the Patient ID while a load is still in
+// flight used to leave the page permanently busy — the abandoned request's
+// own cleanup refused to run once its id no longer matched the latest one,
+// and nothing else ever cleared apptsBusy.
+describe("appointments — an abandoned in-flight load releases the busy state (Round-2 review M3)", () => {
+  it("re-enables Load immediately after changing the patient id mid-load, even once the stale response arrives", async () => {
+    let resolveAppointments!: (r: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveAppointments = resolve;
+    });
+
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return jsonResponse({ id: 1042, name: "Maria Gonzalez" });
+      if (url.includes("/appointments")) return pending;
+      if (url.includes("/slots")) return jsonResponse({ items: [] });
+      return jsonResponse({});
+    });
+
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /^load$/i })).toBeDisabled());
+
+    // Edit the id before the pending /appointments call ever resolves.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1738" } });
+
+    expect(screen.getByRole("button", { name: /^load$/i })).not.toBeDisabled();
+
+    // The abandoned request finally resolving must not re-disable it or
+    // otherwise resurrect its result.
+    resolveAppointments(jsonResponse({ items: [] }));
+    await Promise.resolve();
+    expect(screen.getByRole("button", { name: /^load$/i })).not.toBeDisabled();
+  });
+});
+
+// Round-1 review (M2): a denied or failed appointments load has no `items`,
+// so it used to render exactly like "loaded successfully, zero
+// appointments" — indistinguishable from a patient who genuinely has none —
+// while still leaving Book enabled for a patient never actually confirmed.
+describe("appointments — a failed load surfaces an error, not an empty success (Round-1 review M2)", () => {
+  const SLOT = {
+    id: 9,
+    provider: "Dr. X",
+    location: "Riverbend Main",
+    start_at: "2026-09-01T10:00:00Z",
+    end_at: "2026-09-01T10:30:00Z",
+    status: "open",
+  };
+
+  function mockLoadStatus(status: number) {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return jsonResponse({ id: 1042, name: "Maria Gonzalez" });
+      if (url.includes("/appointments")) return jsonResponse({ detail: "denied" }, false, status);
+      if (url.includes("/slots")) return jsonResponse({ items: [SLOT] });
+      return jsonResponse({});
+    });
+  }
+
+  it("shows an authorization error, not 'no appointments', on a 403", async () => {
+    mockLoadStatus(403);
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByText(/not authorized to view/i)).toBeInTheDocument());
+    expect(screen.queryByText(/no appointments for this patient/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument(); // loadedPatientId never set
+  });
+
+  it("shows a load error, not 'no appointments', on a 500, and keeps Book disabled", async () => {
+    mockLoadStatus(500);
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByText(/could not load appointments/i)).toBeInTheDocument());
+    expect(screen.queryByText(/no appointments for this patient/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^book$/i })).toBeDisabled();
   });
 });
