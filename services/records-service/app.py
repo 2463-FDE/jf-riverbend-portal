@@ -1490,7 +1490,8 @@ def get_agent_summary(
     try:
         draft = agent_drafts.approved_draft(db, patient_id)
         if draft is None:
-            return AgentSummaryOut(available=False, patient_id=patient_id)
+            status = "pending" if agent_drafts.has_pending_draft(db, patient_id) else "none"
+            return AgentSummaryOut(available=False, patient_id=patient_id, status=status)
         # Display is the eighth stage, recorded under the draft's OWN
         # correlation id — which is only knowable after the row is read, so the
         # stage is emitted here rather than passed into the read above.
@@ -1503,7 +1504,7 @@ def get_agent_summary(
         raise HTTPException(status_code=503, detail="temporarily unavailable")
 
     return AgentSummaryOut(
-        available=True, patient_id=patient_id, version=detail.version,
+        available=True, patient_id=patient_id, status="approved", version=detail.version,
         provenance_label=detail.provenance_label,
         generated_text=detail.generated_text, citations=detail.citations,
     )

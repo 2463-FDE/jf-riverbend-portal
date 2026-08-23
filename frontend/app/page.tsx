@@ -15,7 +15,9 @@ import {
   IconStethoscope,
   IconHeart,
 } from "./components/icons";
+import PatientHome from "./components/PatientHome";
 import { getUser } from "./lib/session";
+import type { PortalUser } from "./lib/types";
 import type { Appointment, EncounterBlock, RecordItem } from "./lib/types";
 import { fmtDateTime, firstName } from "./lib/format";
 
@@ -23,7 +25,30 @@ function isResult(r: RecordItem): boolean {
   return Boolean(r.test || r.value !== undefined || r.reference_range);
 }
 
+// The landing route for whoever is signed in. A patient session must never
+// see the staff dashboard below — it asks for nothing (no per-account data
+// model) and its quick actions are staff routes a patient account is refused
+// outright (W9.1, 2026-08-23; see PatientHome's own docstring for why).
+//
+// sessionStorage is only readable client-side, so `user` starts null on
+// both the server render and the first client render (same output, no
+// hydration mismatch) and is only populated after mount — exactly the
+// pattern AppShell already uses for its own nav. Branching on `getUser()`
+// directly during render would read a value the server pass never had,
+// which is the mismatch this guards against.
 export default function DashboardPage() {
+  const [user, setUser] = useState<PortalUser | null | undefined>(undefined);
+
+  useEffect(() => {
+    setUser(getUser());
+  }, []);
+
+  if (user === undefined) return null;
+  if (user?.role === "patient") return <PatientHome />;
+  return <StaffDashboard />;
+}
+
+function StaffDashboard() {
   const [appts, setAppts] = useState<Appointment[] | null>(null);
   const [results, setResults] = useState<RecordItem[] | null>(null);
   const [name, setName] = useState("there");

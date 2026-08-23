@@ -42,8 +42,12 @@ const NAV_SOON: NavItem[] = [
 // What a patient sees. Every entry in NAV above is a staff route that a
 // patient account is refused — the `patient` role holds no staff permission
 // at all — so showing them that menu would be five links that each fail. The
-// navigation has to reflect the principal, not just the branding.
+// navigation has to reflect the principal, not just the branding. Appointments,
+// Messages, and Coverage/Profile join this list only once their own
+// patient-self routes exist and are tested (W9.2/W9.3) — an entry that leads
+// nowhere real is worse than no entry.
 const NAV_PATIENT: NavItem[] = [
+  { href: "/", label: "Home", icon: <IconDashboard className="rb-nav__icon" /> },
   { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
 ];
 
@@ -228,9 +232,18 @@ export default function AppShell({ children }: { children: ReactNode }) {
         <span className="rb-topbar__title">{pageTitle}</span>
         <span className="rb-topbar__spacer" />
 
-        <button className="rb-iconbtn" aria-label="Notifications (1 new)" type="button">
+        {/* The "1 new" dot below is hardcoded, not a real unread count — true
+            for every session, but only patients are told so anywhere in the
+            product. Suppressed for patient sessions until W9.2 messaging
+            gives it a real source to report; staff behavior is unchanged
+            (out of scope here, not evaluated). */}
+        <button
+          className="rb-iconbtn"
+          aria-label={user?.role === "patient" ? "Notifications" : "Notifications (1 new)"}
+          type="button"
+        >
           <IconBell />
-          <span className="rb-iconbtn__dot" aria-hidden="true" />
+          {user?.role !== "patient" && <span className="rb-iconbtn__dot" aria-hidden="true" />}
         </button>
 
         <div className="rb-usermenu" ref={menuRef}>

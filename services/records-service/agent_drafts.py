@@ -289,6 +289,26 @@ def approved_draft(db: Session, patient_id: int,
         raise
 
 
+def has_pending_draft(db: Session, patient_id: int) -> bool:
+    """Whether this patient has a VALIDATED draft still waiting on a
+    clinician's approve/reject decision — the same status AgentDraftPanel
+    checks to decide whether to show its own decision buttons. Used only to
+    tell a patient "waiting for review" versus "nothing requested yet"; it
+    never says what the draft contains, since only its status is ever theirs
+    to see (`draft`/`refused`/`rejected`/`superseded` all read as "none" to
+    a patient — none of them is a version they may ever see)."""
+    try:
+        return db.execute(
+            select(AgentDraftProvenance.id).where(
+                AgentDraftProvenance.patient_id == patient_id,
+                AgentDraftProvenance.status == VALIDATED,
+            )
+        ).scalars().first() is not None
+    except SQLAlchemyError:
+        log.exception("has_pending_draft: database error for patient_id=%s", patient_id)
+        raise
+
+
 def citations_for(db: Session, draft_id: int) -> list:
     return list(
         db.execute(

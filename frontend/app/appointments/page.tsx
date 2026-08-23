@@ -16,19 +16,26 @@ import { apiFetch } from "../lib/session";
 import type { Appointment, Slot } from "../lib/types";
 import { fmtDateTime, fmtTimeRange, fmtDate } from "../lib/format";
 
-const DEFAULT_PATIENT_ID = "1042";
-
 export default function AppointmentsPage() {
-  const [patientId, setPatientId] = useState(DEFAULT_PATIENT_ID);
-  // The id whose name is shown beside the input. Deliberately NOT patientId:
-  // loadAppts is a useCallback keyed on patientId inside a useEffect, so the
-  // appointment list already refetches on every keystroke. A name driven the
-  // same way would write one audit row per character typed (records-service
-  // _write_audit runs on every successful get_patient). It starts at the
-  // default id — that matches the list, which does load on mount — and is
-  // updated only by the Load button.
-  const [loadedPatientId, setLoadedPatientId] = useState(DEFAULT_PATIENT_ID);
+  // Blank on first render (2026-08-23, W9.0) — same reasoning as
+  // records/page.tsx: a hardcoded default id made a patient-specific request
+  // before any staff member had actually chosen a patient. Booking still
+  // reads this raw value directly (see book() below); only the list fetch
+  // and the resolved name require a completed Load.
+  const [patientId, setPatientId] = useState("");
+  const isValidPatientId = (id: string) => /^\d+$/.test(id.trim());
+
+  // The id whose name is shown beside the input and whose list was actually
+  // fetched — set only by Load (or Enter), never by typing. Mirrored into a
+  // ref so an in-flight loadAppts response can tell whether it is still the
+  // most recently requested id before applying it (a slow response for an id
+  // the staff member already moved on from must not land).
+  const [loadedPatientId, setLoadedPatientId] = useState("");
+  const loadedPatientIdRef = useRef(loadedPatientId);
+  loadedPatientIdRef.current = loadedPatientId;
+
   const [appts, setAppts] = useState<Appointment[] | null>(null);
+  const [apptsBusy, setApptsBusy] = useState(false);
   const [slots, setSlots] = useState<Slot[] | null>(null);
   const [reason, setReason] = useState("");
   const [busySlot, setBusySlot] = useState<number | null>(null);
@@ -52,16 +59,24 @@ export default function AppointmentsPage() {
     return key;
   }
 
-  const loadAppts = useCallback(async () => {
+  // Takes the id explicitly rather than reading patientId off state, so a
+  // post-booking refresh can target the id that was actually just booked for
+  // (loadedPatientId) without racing whatever the input currently holds.
+  const loadAppts = useCallback(async (id: string) => {
+    if (!isValidPatientId(id)) return;
     setAppts(null);
+    setApptsBusy(true);
     try {
-      const r = await apiFetch(`/api/appointments?patient_id=${encodeURIComponent(patientId)}`);
+      const r = await apiFetch(`/api/appointments?patient_id=${encodeURIComponent(id)}`);
       const d = await r.json();
+      if (loadedPatientIdRef.current !== id) return; // superseded by a later Load
       setAppts(Array.isArray(d) ? d : (d.items ?? []));
     } catch {
-      setAppts([]);
+      if (loadedPatientIdRef.current === id) setAppts([]);
+    } finally {
+      if (loadedPatientIdRef.current === id) setApptsBusy(false);
     }
-  }, [patientId]);
+  }, []);
 
   const loadSlots = useCallback(async () => {
     setSlots(null);
@@ -74,10 +89,26 @@ export default function AppointmentsPage() {
     }
   }, []);
 
+  // Open slots are not patient-specific, so this is the only auto-fetch on
+  // mount. The appointment list itself waits for Load (see loadAppts above).
   useEffect(() => {
-    loadAppts();
     loadSlots();
-  }, [loadAppts, loadSlots]);
+  }, [loadSlots]);
+
+  function handlePatientIdChange(value: string) {
+    setPatientId(value);
+    // Drop the previous patient's name and list immediately, whether the id
+    // was edited or cleared entirely — a name or an appointment left behind
+    // would sit above the wrong (or no) patient.
+    setLoadedPatientId("");
+    setAppts(null);
+  }
+
+  function handleLoad() {
+    if (!isValidPatientId(patientId)) return;
+    setLoadedPatientId(patientId);
+    loadAppts(patientId);
+  }
 
   async function book(slot: Slot) {
     setBusySlot(slot.id);
@@ -98,7 +129,10 @@ export default function AppointmentsPage() {
       idempotencyKeysRef.current.delete(slot.id);
       setMsg({ kind: "ok", text: `Appointment booked with ${slot.provider}.` });
       setReason("");
-      await Promise.all([loadAppts(), loadSlots()]);
+      // A successful booking confirms this id the same way pressing Load
+      // would, so the list staff just added to reflects it immediately.
+      setLoadedPatientId(patientId);
+      await Promise.all([loadAppts(patientId), loadSlots()]);
     } catch {
       setMsg({ kind: "err", text: "Could not book that slot. Please try another." });
     } finally {
@@ -113,7 +147,7 @@ export default function AppointmentsPage() {
       const r = await apiFetch(`/api/appointments/${appt.id}/cancel`, { method: "POST" });
       if (!r.ok) throw new Error();
       setMsg({ kind: "ok", text: "Appointment cancelled." });
-      await loadAppts();
+      await loadAppts(loadedPatientId);
     } catch {
       setMsg({ kind: "err", text: "Could not cancel that appointment." });
     } finally {
@@ -142,30 +176,19 @@ export default function AppointmentsPage() {
               id="appt-patient"
               className="rb-input"
               style={{ flex: "0 1 160px" }}
+              placeholder="Patient ID"
               value={patientId}
-              onChange={(e) => {
-                setPatientId(e.target.value);
-                // Drop the previous patient's name immediately. The list below
-                // is already reloading for the new id; a name left behind
-                // would sit above another patient's appointments.
-                setLoadedPatientId("");
-              }}
+              onChange={(e) => handlePatientIdChange(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLoad()}
+              inputMode="numeric"
             />
             {/* nameOnly (2026-08-22): same reasoning as records/page.tsx —
                 the id is already shown in the adjacent Patient ID input. */}
             <PatientName patientId={loadedPatientId} nameOnly />
-            <button
-              className="rb-btn"
-              onClick={() => {
-                setLoadedPatientId(patientId);
-                loadAppts();
-              }}
-              type="button"
-            >
+            <button className="rb-btn" onClick={handleLoad} disabled={apptsBusy} type="button">
               Load
             </button>
           </div>
-          <span className="rb-field__hint">Demo patient ID defaults to 1042.</span>
         </div>
       </Card>
 
@@ -178,7 +201,11 @@ export default function AppointmentsPage() {
       <div className="rb-grid rb-grid--2">
         <Card title="Your appointments" icon={<IconCalendar />}>
           {appts === null ? (
-            <Loading label="Loading appointments…" />
+            apptsBusy ? (
+              <Loading label="Loading appointments…" />
+            ) : (
+              <div className="rb-empty">Enter a Patient ID above and press Load to see appointments.</div>
+            )
           ) : appts.length ? (
             <div className="rb-list">
               {appts.map((a) => {

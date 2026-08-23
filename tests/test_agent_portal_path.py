@@ -109,12 +109,20 @@ def test_a_pending_or_rejected_draft_is_never_displayed(client):
     hidden = api.get(f"/patients/{PATIENT}/agent-summary", headers=PATIENT_H)
     assert hidden.status_code == 200 and hidden.json()["available"] is False
     assert "Pending text." not in hidden.text
+    # W9.1: the patient home's status chip needs to tell "waiting for a
+    # clinician" apart from "nothing requested" without ever seeing the text
+    # above — a validated-but-undecided draft is exactly the "pending" case.
+    assert hidden.json()["status"] == "pending"
 
     drafts.decide(db, pending, approve=False, reviewed_by=CLINICIAN_ID)
     db.commit()
     after = api.get(f"/patients/{PATIENT}/agent-summary", headers=PATIENT_H)
     assert after.json()["available"] is False, "a rejection is not a weaker approval"
     assert "Pending text." not in after.text
+    # Rejected is not "pending" either — there is nothing left waiting on a
+    # clinician, so the home should offer to request again, not keep saying
+    # "waiting for review" about a version that already got its decision.
+    assert after.json()["status"] == "none"
 
     # The clinician may read exactly what the patient may not.
     clinician_view = api.get(f"/patients/{PATIENT}/agent-draft", headers=CLINICIAN)
@@ -132,6 +140,7 @@ def test_clinician_approval_exposes_the_exact_stored_text(client):
 
     shown = api.get(f"/patients/{PATIENT}/agent-summary", headers=PATIENT_H).json()
     assert shown["available"] is True
+    assert shown["status"] == "approved"
     assert shown["generated_text"] == V1_TEXT, "the exact stored text, never a regeneration"
     assert shown["version"] == 1
     assert shown["provenance_label"] == drafts.LABEL_FIXTURE

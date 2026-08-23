@@ -29,21 +29,37 @@ function mockRoutes(nameByPatient: Record<string, string>) {
 }
 
 describe("appointments — name-only identity box", () => {
-  it("shows the id in its own input and only the name beside it", async () => {
+  it("starts with an empty Patient ID field, issues no patient-specific request until Load, then resolves the name", async () => {
     mockRoutes({ "1042": "Maria Gonzalez" });
     render(<AppointmentsPage />);
 
-    // The default id auto-loads on this screen (unlike records) — wait for
-    // the name lookup it triggers to resolve.
-    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+    const input = screen.getByLabelText(/patient id/i) as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Patient ID");
 
-    expect((screen.getByLabelText(/patient id/i) as HTMLInputElement).value).toBe("1042");
+    // /slots is patient-independent and does auto-load; /appointments and
+    // /name (both patient-specific) must not fire until Load is pressed.
+    await waitFor(() =>
+      expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/slots"))).toBe(true)
+    );
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/appointments"))).toBe(false);
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/name"))).toBe(false);
+    expect(screen.getByText(/enter a patient id above and press load/i)).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+    expect(input.value).toBe("1042");
     expect(screen.queryByText(/Patient ID 1042/)).not.toBeInTheDocument();
   });
 
   it("shows only the name after loading a different patient", async () => {
     mockRoutes({ "1042": "Maria Gonzalez", "1738": "Thomas Johnson" });
     render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
     await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1738" } });
@@ -57,6 +73,9 @@ describe("appointments — name-only identity box", () => {
   it("shows 'Name unavailable' rather than a stale or partial identity on denial", async () => {
     mockRoutes({ "1042": "Maria Gonzalez" }); // 1739 deliberately absent -> denied
     render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
     await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1739" } });

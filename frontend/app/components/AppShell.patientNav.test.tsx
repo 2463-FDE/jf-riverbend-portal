@@ -43,6 +43,29 @@ describe("navigation for a patient account", () => {
     expect(await screen.findByRole("link", { name: /your results/i })).toBeInTheDocument();
   });
 
+  it("offers a Home link to the patient landing page (W9.1)", async () => {
+    render(
+      <AppShell>
+        <p>content</p>
+      </AppShell>
+    );
+
+    const home = await screen.findByRole("link", { name: /^home$/i });
+    expect(home).toHaveAttribute("href", "/");
+  });
+
+  it("does not show the hardcoded '1 new' notification dot — there is no real unread source yet", async () => {
+    const { container } = render(
+      <AppShell>
+        <p>content</p>
+      </AppShell>
+    );
+
+    await screen.findByRole("link", { name: /your results/i });
+    expect(container.querySelector(".rb-iconbtn__dot")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^notifications$/i })).toBeInTheDocument();
+  });
+
   it("does not offer staff destinations a patient cannot open", async () => {
     render(
       <AppShell>

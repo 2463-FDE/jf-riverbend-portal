@@ -272,10 +272,17 @@ class AgentSummaryOut(BaseModel):
 
     `available` is explicit so "nothing approved yet" is a state the UI renders
     deliberately rather than inferring from a null it might forget to check.
+
+    `status` (2026-08-23, W9.1) is coarser than the draft's own status column —
+    "approved" | "pending" | "none" — so the patient home's single status chip
+    can distinguish "waiting for a clinician" from "nothing requested yet"
+    without exposing a draft/refused/rejected/superseded row a patient may
+    never see at all.
     """
 
     available: bool
     patient_id: int
+    status: str = "none"
     version: int | None = None
     provenance_label: str | None = None
     generated_text: str | None = None
