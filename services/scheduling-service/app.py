@@ -11,7 +11,7 @@ import hmac
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Query
-from sqlalchemy import select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from book import IdempotencyKeyConflict, book
@@ -110,11 +110,34 @@ def list_slots(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """List open slots, joined to the provider name. Paginated."""
+    """List open slots, joined to the provider name. Paginated.
+
+    w9-fixes P0 4.2: `slots.status` is the read model and `appointments` is
+    the write model, and before this fix nothing kept them in sync on a
+    confirmed booking — the live demo database had a large, pre-existing
+    batch of slots marked 'open' with a confirmed appointment sitting on
+    them (legacy seed inconsistency, not test pollution — see
+    db/seed/generate_seed.py's history). book.py's own INSERT now updates
+    slots.status in the same transaction (closing the gap going forward),
+    but this excludes a slot with ANY confirmed appointment regardless of
+    its stored status column, so a slot from BEFORE that fix (or any other
+    drift) fails closed instead of being offered again.
+
+    Also requires start_at in the future: a slot's status/appointment state
+    can be perfectly consistent and it still must never be offered once its
+    time has passed. This is also what keeps the seed's dedicated
+    demo-booking pool (95001-95016) usable — see db/seed/demo_reset.sql,
+    which is the thing that actually keeps those ids' start_at ahead of
+    "now" between rehearsals.
+    """
     stmt = (
         select(Slot, Provider.name)
         .join(Provider, Provider.id == Slot.provider_id, isouter=True)
-        .where(Slot.status == "open")
+        .where(
+            Slot.status == "open",
+            Slot.start_at > func.now(),
+            ~exists().where(Appointment.slot_id == Slot.id, Appointment.status == "confirmed"),
+        )
     )
     if provider_id is not None:
         stmt = stmt.where(Slot.provider_id == provider_id)
@@ -175,14 +198,16 @@ def create_appointment(req: BookingRequest):
     never caught it, so a losing booker saw "appointment booked."
     """
     try:
+        # w9-fixes P0 4.2/4.3: provider/location/scheduled_for are no longer
+        # passed through from the request — book() derives all three from
+        # the locked slot row itself now, never from the caller. See that
+        # module's docstring for why (a client-supplied time/location/
+        # provider could disagree with the slot actually being booked).
         appointment_id, is_replay = book(
             req.patient_id,
             req.slot_id,
             req.idempotency_key,
-            provider=req.provider,
             reason=req.reason,
-            location=req.location,
-            scheduled_for=req.scheduled_for,
         )
     except IdempotencyKeyConflict as e:
         log.warning(
@@ -216,12 +241,25 @@ def create_appointment(req: BookingRequest):
 
 @app.post("/appointments/{appointment_id}/cancel", response_model=CancelResponse, dependencies=[Depends(_verify_internal_token)])
 def cancel_appointment(appointment_id: int, db: Session = Depends(get_db)):
-    """Cancel an appointment. 404 if it does not exist."""
+    """Cancel an appointment. 404 if it does not exist.
+
+    w9-fixes P0 4.2: book() marks a slot 'booked' on confirmation now, so
+    cancellation is the other half — it must reopen the slot, or a
+    cancelled appointment would leave its slot permanently unbookable by
+    anyone. Only meaningful for a still-'confirmed' appointment: cancelling
+    an already-cancelled one a second time must not re-open a slot that may
+    since have been won by a different, still-confirmed booking.
+    """
     appt = db.get(Appointment, appointment_id)
     if appt is None:
         raise HTTPException(status_code=404, detail="appointment not found")
 
+    was_confirmed = appt.status == "confirmed"
     appt.status = "cancelled"
+    if was_confirmed:
+        slot = db.get(Slot, appt.slot_id)
+        if slot is not None:
+            slot.status = "open"
     try:
         db.commit()
     except Exception:
