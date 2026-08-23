@@ -304,3 +304,63 @@ class AgentSummaryRequestOut(BaseModel):
     provenance_label: str
     correlation_id: str
     citations: list[AgentDraftCitationOut] = []
+
+
+# --- W9.2: secure patient-clinician messaging ------------------------------- #
+
+
+class MessageOut(BaseModel):
+    """One message, exactly as sent. `sender_user_id` and `created_at` are
+    the immutable identity/timestamp every message carries — never re-derived
+    or re-labelled after the fact."""
+
+    id: int
+    thread_id: int
+    sender_user_id: int
+    sender_name: str
+    body: str
+    created_at: str
+
+
+class ThreadSummaryOut(BaseModel):
+    """One row of an inbox listing. `unread_count` is per the CALLER, not a
+    global property of the thread — the same thread can be unread for one
+    granted clinician and read for another."""
+
+    id: int
+    patient_id: int
+    patient_name: str | None = None
+    subject: str
+    status: str
+    last_sender_name: str | None = None
+    last_message_at: str | None = None
+    unread_count: int
+
+
+class ThreadPage(BaseModel):
+    items: list[ThreadSummaryOut]
+
+
+class ThreadDetailOut(BaseModel):
+    id: int
+    patient_id: int
+    patient_name: str | None = None
+    subject: str
+    status: str
+    created_at: str
+    messages: list[MessageOut] = []
+
+
+class CreateThreadRequest(BaseModel):
+    subject: str
+    body: str
+    idempotency_key: str
+
+
+class SendMessageRequest(BaseModel):
+    body: str
+    idempotency_key: str
+
+
+class ThreadStatusRequest(BaseModel):
+    status: str  # "open" | "closed"

@@ -34,21 +34,32 @@ const NAV: NavItem[] = [
   { href: "/roi", label: "Release of Information", icon: <IconRoi className="rb-nav__icon" /> },
 ];
 
+// Billing/Coverage & Eligibility is W9.3, not yet functional — kept as a
+// disabled placeholder for staff. Messages was here too until W9.2 made it
+// real (see NAV_MESSAGES below); a placeholder that leads nowhere is worse
+// than no entry, so it comes out of this list the moment that stops being
+// true, not before.
 const NAV_SOON: NavItem[] = [
-  { href: "#", label: "Messages", icon: <IconMessages className="rb-nav__icon" />, soon: true },
   { href: "#", label: "Billing", icon: <IconBilling className="rb-nav__icon" />, soon: true },
 ];
+
+const NAV_MESSAGES: NavItem = {
+  href: "/messages",
+  label: "Messages",
+  icon: <IconMessages className="rb-nav__icon" />,
+};
 
 // What a patient sees. Every entry in NAV above is a staff route that a
 // patient account is refused — the `patient` role holds no staff permission
 // at all — so showing them that menu would be five links that each fail. The
-// navigation has to reflect the principal, not just the branding. Appointments,
-// Messages, and Coverage/Profile join this list only once their own
-// patient-self routes exist and are tested (W9.2/W9.3) — an entry that leads
-// nowhere real is worse than no entry.
+// navigation has to reflect the principal, not just the branding. Appointments
+// and Coverage/Profile join this list only once their own patient-self routes
+// exist and are tested (W9.3) — an entry that leads nowhere real is worse
+// than no entry.
 const NAV_PATIENT: NavItem[] = [
   { href: "/", label: "Home", icon: <IconDashboard className="rb-nav__icon" /> },
   { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
+  NAV_MESSAGES,
 ];
 
 // Shown only to roles that actually hold summary_review.decide. `staff` was
@@ -60,6 +71,13 @@ const NAV_PATIENT: NavItem[] = [
 // Same caveat as the patient nav: a courtesy, not a control. The gateway and
 // records-service refuse the route regardless of what is drawn here.
 const _MAY_REVIEW = new Set(["clinician", "nursing_ma"]);
+
+// Same two roles hold messages.read/messages.write (config/roles.yaml,
+// W9.2) — kept as its own set rather than reused from _MAY_REVIEW because
+// the two happen to match today for an unrelated reason (both are the
+// clinical-documentation roles) and a future role could hold one permission
+// without the other.
+const _MAY_MESSAGE = new Set(["clinician", "nursing_ma"]);
 
 const NAV_REVIEW: NavItem = {
   href: "/review-queue",
@@ -73,7 +91,9 @@ const NAV_REVIEW: NavItem = {
 // server, which is where it matters.
 function navFor(user: PortalUser | null): NavItem[] {
   if (user?.role === "patient") return NAV_PATIENT;
-  return _MAY_REVIEW.has(user?.role ?? "") ? [...NAV, NAV_REVIEW] : NAV;
+  const role = user?.role ?? "";
+  const items = _MAY_REVIEW.has(role) ? [...NAV, NAV_REVIEW] : [...NAV];
+  return _MAY_MESSAGE.has(role) ? [...items, NAV_MESSAGES] : items;
 }
 
 function Logo({ className }: { className?: string }) {

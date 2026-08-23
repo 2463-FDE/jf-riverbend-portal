@@ -1313,3 +1313,85 @@ def proxy_request_own_agent_summary(
         raise HTTPException(status_code=403, detail="not authorized")
     return _post("records", f"/patients/{patient_id}/agent-summary/request", {},
                  headers=_agent_headers(session), forward_status=True)
+
+
+# --------------------------------------------------------------------------- #
+# W9.2 — secure patient-clinician messaging.
+#
+# messages.read/messages.write are held by BOTH the patient role and the
+# clinician/nursing_ma roles (config/roles.yaml) — the per-patient scoping is
+# the grant records-service checks, the same mechanism own_record.read and
+# summary_review.decide already piggyback on. So /threads, /threads/{id} and
+# its two actions are single shared routes: a patient calling them only ever
+# sees their own thread(s), because that is the only patient_id their own
+# grant matches, with no separate "self" endpoint required. Only creating a
+# NEW thread needs the session-resolved patient_id, the same way requesting
+# an agent summary does above — see proxy_create_own_thread.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/threads")
+def proxy_list_threads(
+    limit: int = 50,
+    session: dict = Depends(require_permission("messages.read")),
+):
+    return _get("records", "/threads", params={"limit": limit},
+                headers=_agent_headers(session), forward_status=True)
+
+
+@app.get("/threads/{thread_id}")
+def proxy_get_thread(
+    thread_id: int,
+    session: dict = Depends(require_permission("messages.read")),
+):
+    return _get("records", f"/threads/{thread_id}",
+                headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/threads/{thread_id}/messages", status_code=201)
+def proxy_reply_to_thread(
+    thread_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("messages.write")),
+):
+    return _post("records", f"/threads/{thread_id}/messages", payload,
+                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/threads/{thread_id}/status")
+def proxy_set_thread_status(
+    thread_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("messages.write")),
+):
+    """Close/reopen. records-service enforces staff-only on top of the grant
+    check — a patient holding messages.write can still reply, just not
+    change the thread's lifecycle."""
+    return _post("records", f"/threads/{thread_id}/status", payload,
+                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/patient/me/threads", status_code=201)
+def proxy_create_own_thread(
+    payload: dict,
+    session: dict = Depends(require_permission("messages.write")),
+    db: Session = Depends(get_db),
+):
+    """A patient starts a new thread. Same session-resolution as
+    /patient/me/agent-summary/request above — the chart comes from the
+    account, never from anything the browser supplies."""
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("messages: account store unreadable user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient_id is None:
+        log.warning("messages: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+    return _post("records", f"/patients/{patient_id}/threads", payload,
+                 headers=_agent_headers(session), forward_status=True)

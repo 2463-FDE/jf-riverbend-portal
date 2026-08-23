@@ -684,3 +684,47 @@ CREATE INDEX IF NOT EXISTS patient_summary_reviews_pending_idx
     ON patient_summary_reviews (state, created_at DESC);
 CREATE INDEX IF NOT EXISTS patient_summary_reviews_patient_idx
     ON patient_summary_reviews (patient_id);
+
+-- --------------------------------------------------------------------------
+-- message_threads / thread_messages / thread_read_state — secure
+-- patient-clinician messaging (migration 022)
+--
+-- Kept in sync with db/migrations/022_message_threads.sql. Authorization
+-- reuses patient_access_grants exactly as chart access does — see that
+-- migration's own comments and services/records-service/app.py's messaging
+-- routes.
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_threads (
+    id          SERIAL PRIMARY KEY,
+    patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    subject     TEXT NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 200),
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    created_by  INTEGER NOT NULL REFERENCES users(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS message_threads_patient_idx
+    ON message_threads (patient_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS thread_messages (
+    id              SERIAL PRIMARY KEY,
+    thread_id       INTEGER NOT NULL REFERENCES message_threads(id) ON DELETE CASCADE,
+    sender_user_id  INTEGER NOT NULL REFERENCES users(id),
+    body            TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 4000),
+    idempotency_key TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS thread_messages_sender_idem_key
+    ON thread_messages (sender_user_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS thread_messages_thread_idx
+    ON thread_messages (thread_id, created_at);
+
+CREATE TABLE IF NOT EXISTS thread_read_state (
+    thread_id             INTEGER NOT NULL REFERENCES message_threads(id) ON DELETE CASCADE,
+    user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_read_message_id  INTEGER REFERENCES thread_messages(id),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (thread_id, user_id)
+);

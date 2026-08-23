@@ -77,6 +77,11 @@ class User(Base):
 
     id = Column(Integer, primary_key=True)
     username = Column(Text)
+    # Added for W9.2 (messaging needs a display name for a sender/patient
+    # beyond the bare username) — the column already exists on the real
+    # `users` table (migration 021, gateway's own User model); this minimal
+    # projection simply hadn't selected it before now.
+    full_name = Column(Text)
     role = Column(Text)
     is_active = Column(Boolean, nullable=False, default=True)
 
@@ -200,3 +205,55 @@ class AgentDraftCitation(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("draft_id", "citation_id", name="agent_draft_citation_unique"),)
+
+
+class MessageThread(Base):
+    """A durable conversation between one patient and their authorized care
+    team (migration 022, W9.2) — deliberately NOT the eligibility chat's
+    transient in-memory conversation, which has no human transcript at all.
+
+    Authorization is the same mechanism as chart access: `patient_id` here is
+    checked against `patient_access_grants`, the identical table and query
+    every other patient-scoped route in this service already uses (see
+    app.py's messaging routes, which reuse `_authorize_or_deny`)."""
+
+    __tablename__ = "message_threads"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
+    subject = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="open")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class ThreadMessage(Base):
+    """One message. Sender and body are immutable once written — there is no
+    UPDATE route on this table at the application layer, and there must not
+    be one: a message already read by its recipient cannot un-say itself."""
+
+    __tablename__ = "thread_messages"
+    __table_args__ = (UniqueConstraint("sender_user_id", "idempotency_key", name="thread_messages_sender_idem_key"),)
+
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(Integer, ForeignKey("message_threads.id", ondelete="CASCADE"), nullable=False)
+    sender_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    body = Column(Text, nullable=False)
+    idempotency_key = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class ThreadReadState(Base):
+    """One row per (user, thread): the last message that user has seen.
+    Unread state is derived from this, not stored as a count — a count would
+    drift the moment a message is deleted or a read is recorded out of order,
+    and nothing here needs either to happen."""
+
+    __tablename__ = "thread_read_state"
+
+    thread_id = Column(Integer, ForeignKey("message_threads.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    last_read_message_id = Column(Integer, ForeignKey("thread_messages.id"))
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+

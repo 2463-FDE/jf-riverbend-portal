@@ -210,3 +210,34 @@ export interface RoiRequest {
   status: string;
   created_at?: string;
 }
+
+// W9.2 — secure patient-clinician messaging.
+export interface ThreadSummary {
+  id: number;
+  patient_id: number;
+  patient_name: string | null;
+  subject: string;
+  status: "open" | "closed";
+  last_sender_name: string | null;
+  last_message_at: string | null;
+  unread_count: number;
+}
+
+export interface ThreadMessage {
+  id: number;
+  thread_id: number;
+  sender_user_id: number;
+  sender_name: string;
+  body: string;
+  created_at: string;
+}
+
+export interface ThreadDetail {
+  id: number;
+  patient_id: number;
+  patient_name: string | null;
+  subject: string;
+  status: "open" | "closed";
+  created_at: string;
+  messages: ThreadMessage[];
+}
