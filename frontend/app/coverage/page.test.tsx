@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import CoveragePage from "./page";
 
@@ -45,6 +45,13 @@ function mockRoutes(overrides: Partial<{ coverages: unknown; verify: unknown; na
 }
 
 describe("Coverage & Eligibility", () => {
+  // Round-1 review: without this, an earlier test's clearSession()/replace()
+  // calls could satisfy a later test's assertion even if that later test's
+  // own code path never actually called them.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("starts empty and loads coverage only after Load, with the member id masked", async () => {
     mockRoutes();
     render(<CoveragePage />);
@@ -140,7 +147,6 @@ describe("Coverage & Eligibility", () => {
   // coverage." (indistinguishable from a real outage) or "not authorized"
   // (indistinguishable from a real per-patient denial).
   it("clears the session and redirects to sign-in on an expired session (401), not a generic load error", async () => {
-    replace.mockClear();
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (url.includes("/coverages")) return denied(401);
       return ok({});
@@ -156,7 +162,6 @@ describe("Coverage & Eligibility", () => {
   });
 
   it("also treats an expired session as expired, not a failure, when requesting a verification", async () => {
-    replace.mockClear();
     vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.includes("/name")) return ok({ id: 1737, name: "Priya Khan" });
       if (url.includes("/verify")) return denied(401);
@@ -169,6 +174,46 @@ describe("Coverage & Eligibility", () => {
     await screen.findByText("Acme Health");
 
     fireEvent.click(screen.getByRole("button", { name: /request verification/i }));
+
+    await waitFor(() => expect(clearSession).toHaveBeenCalled());
+    expect(replace).toHaveBeenCalledWith("/login");
+  });
+
+  it("also treats an expired session as expired, not a failure, when checking status", async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return ok({ id: 1737, name: "Priya Khan" });
+      if (url.includes("/eligibility-status")) return denied(401);
+      if (url.includes("/coverages")) return ok({ items: [COVERAGE] });
+      return ok({});
+    });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await screen.findByText("Acme Health");
+
+    fireEvent.click(screen.getByRole("button", { name: /^check status$/i }));
+
+    await waitFor(() => expect(clearSession).toHaveBeenCalled());
+    expect(replace).toHaveBeenCalledWith("/login");
+  });
+
+  it("also treats an expired session as expired, not a failure, on retry", async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return ok({ id: 1737, name: "Priya Khan" });
+      if (url.includes("/eligibility-retry")) return denied(401);
+      // A can_retry:true verify result is what makes the Retry button appear.
+      if (url.includes("/verify")) return ok({ category: "unavailable", message: "Temporarily unavailable", can_retry: true });
+      if (url.includes("/coverages")) return ok({ items: [COVERAGE] });
+      return ok({});
+    });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await screen.findByText("Acme Health");
+    fireEvent.click(screen.getByRole("button", { name: /request verification/i }));
+    await screen.findByRole("button", { name: /^retry$/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
 
     await waitFor(() => expect(clearSession).toHaveBeenCalled());
     expect(replace).toHaveBeenCalledWith("/login");
