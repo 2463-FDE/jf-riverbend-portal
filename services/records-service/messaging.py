@@ -92,10 +92,18 @@ def send_message(
     Idempotent the same way create_thread is: a replayed (sender, key) pair
     returns the original message rather than creating a second one, even if
     the thread has since closed — a replay is not a new send.
+
+    Scoped to THIS thread as well as (sender, key) — round-1 review
+    (MSG-002): a sender-only key meant reusing the same key against a
+    DIFFERENT thread returned the first thread's message as if it had just
+    been posted to the second, a false "success" for a reply that was never
+    recorded where the caller actually asked for it. `thread_messages`'s own
+    unique index is scoped the same way (migration 022).
     """
     existing = db.execute(
         select(ThreadMessage).where(
             ThreadMessage.sender_user_id == sender_user_id,
+            ThreadMessage.thread_id == thread.id,
             ThreadMessage.idempotency_key == idempotency_key,
         )
     ).scalars().first()

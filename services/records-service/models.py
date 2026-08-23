@@ -241,7 +241,15 @@ class ThreadMessage(Base):
     be one: a message already read by its recipient cannot un-say itself."""
 
     __tablename__ = "thread_messages"
-    __table_args__ = (UniqueConstraint("sender_user_id", "idempotency_key", name="thread_messages_sender_idem_key"),)
+    # Scoped to thread_id, not just sender (round-1 review, MSG-002) — see
+    # migration 022's own comment on why a sender-only key let a replay
+    # against a different thread return the wrong thread's message.
+    __table_args__ = (
+        UniqueConstraint(
+            "sender_user_id", "thread_id", "idempotency_key",
+            name="thread_messages_sender_thread_idem_key",
+        ),
+    )
 
     id = Column(Integer, primary_key=True)
     thread_id = Column(Integer, ForeignKey("message_threads.id", ondelete="CASCADE"), nullable=False)

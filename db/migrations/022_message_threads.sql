@@ -42,14 +42,19 @@ CREATE TABLE IF NOT EXISTS thread_messages (
     -- audit trail every message reply relies on.
     sender_user_id  INTEGER NOT NULL REFERENCES users(id),
     body            TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 4000),
-    -- One client-supplied key per sender. A retried send with the same key
-    -- returns the original message instead of creating a second one.
+    -- One client-supplied key per (sender, thread). A retried send with the
+    -- same key returns the original message instead of creating a second
+    -- one. Scoped to thread_id, not just sender — round-1 review (MSG-002):
+    -- without it, a key reused by the same sender across TWO DIFFERENT
+    -- threads returned the FIRST thread's message as if it had just been
+    -- posted to the second, a false "success" for a reply that was never
+    -- recorded where the caller asked for it.
     idempotency_key TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS thread_messages_sender_idem_key
-    ON thread_messages (sender_user_id, idempotency_key);
+CREATE UNIQUE INDEX IF NOT EXISTS thread_messages_sender_thread_idem_key
+    ON thread_messages (sender_user_id, thread_id, idempotency_key);
 
 CREATE INDEX IF NOT EXISTS thread_messages_thread_idx
     ON thread_messages (thread_id, created_at);

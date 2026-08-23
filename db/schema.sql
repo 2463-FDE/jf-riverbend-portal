@@ -721,8 +721,8 @@ CREATE TABLE IF NOT EXISTS thread_messages (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS thread_messages_sender_idem_key
-    ON thread_messages (sender_user_id, idempotency_key);
+CREATE UNIQUE INDEX IF NOT EXISTS thread_messages_sender_thread_idem_key
+    ON thread_messages (sender_user_id, thread_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS thread_messages_thread_idx
     ON thread_messages (thread_id, created_at);
 

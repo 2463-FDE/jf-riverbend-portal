@@ -202,6 +202,36 @@ def test_a_duplicate_send_is_idempotent(client):
     assert len(thread["messages"]) == 2  # the original patient message + exactly one reply
 
 
+def test_the_same_idempotency_key_reused_on_a_different_thread_is_not_confused_for_a_replay(client):
+    """Round-1 review (MSG-002): the same sender reusing one idempotency key
+    across two DIFFERENT threads must create a genuinely new message in the
+    second thread, not silently return the first thread's message as if it
+    had just been posted where the caller actually asked."""
+    api, db = client
+    thread_a = _create(api, PATIENT_H, key="key-a").json()["id"]
+    thread_b = _create(api, PATIENT_H, key="key-b").json()["id"]
+
+    reply_a = api.post(
+        f"/threads/{thread_a}/messages",
+        json={"body": "Reply in thread A.", "idempotency_key": "shared-key"},
+        headers=CLINICIAN,
+    )
+    reply_b = api.post(
+        f"/threads/{thread_b}/messages",
+        json={"body": "Reply in thread B.", "idempotency_key": "shared-key"},
+        headers=CLINICIAN,
+    )
+
+    assert reply_a.status_code == 201 and reply_b.status_code == 201
+    assert reply_a.json()["id"] != reply_b.json()["id"], "each thread must get its own message"
+    assert reply_b.json()["thread_id"] == thread_b
+    assert reply_b.json()["body"] == "Reply in thread B."
+
+    messages_b = api.get(f"/threads/{thread_b}", headers=PATIENT_H).json()["messages"]
+    assert any(m["body"] == "Reply in thread B." for m in messages_b)
+    assert not any(m["body"] == "Reply in thread A." for m in messages_b)
+
+
 def test_a_sent_message_has_no_edit_or_delete_route(client):
     api, db = client
     thread_id = _create(api, PATIENT_H).json()["id"]
