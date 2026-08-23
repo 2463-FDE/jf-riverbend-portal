@@ -111,4 +111,15 @@ class InsuranceCoverage(Base):
 
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, nullable=False)
+    payer_name = Column(Text)
     member_id = Column(Text)
+    group_number = Column(Text)
+    plan_type = Column(Text)
+    status = Column(Text)
+    verified_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Migration 023 (W9.3) — see that file's own comment. Read/written only
+    # by the coverage/eligibility routes below; never serialized to a
+    # response — a job id is not something the browser needs or may use as
+    # a lookup key (see those routes' own docstrings).
+    verification_job_id = Column(Text)

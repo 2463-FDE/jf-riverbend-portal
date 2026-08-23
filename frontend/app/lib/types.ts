@@ -241,3 +241,22 @@ export interface ThreadDetail {
   created_at: string;
   messages: ThreadMessage[];
 }
+
+// W9.3 — Coverage & Eligibility workspace.
+export interface CoverageItem {
+  id: number;
+  patient_id: number;
+  payer_name: string | null;
+  plan_type: string | null;
+  group_number: string | null;
+  member_id_masked: string | null;
+  status: string | null;
+  verified_at: string | null;
+  has_member_id: boolean;
+}
+
+export interface EligibilityResult {
+  category: string; // active | inactive | unknown | stale | pending | simulated | unavailable
+  message?: string;
+  can_retry?: boolean;
+}

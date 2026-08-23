@@ -59,6 +59,14 @@ class Settings:
     # unbounded lifetime. 8h is simply the more conservative of the two.
     absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "28800"))
 
+    # W9.3 — the same variable eligibility-service's own config.py reads
+    # (shared via docker-compose's env_file: .env on every service). Blank
+    # here means the same thing it means there: no real payer key exists in
+    # this training environment, so the Coverage & Eligibility workspace
+    # labels every verification "Synthetic training — no payer contacted"
+    # and never places a real outbound call — see the verify route.
+    payer_api_key = os.getenv("PAYER_API_KEY", "")
+
     @property
     def db_url(self) -> str:
         return (

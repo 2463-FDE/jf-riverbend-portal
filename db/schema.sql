@@ -159,7 +159,12 @@ CREATE TABLE IF NOT EXISTS insurance_coverages (
                   CHECK (status IN ('active', 'inactive', 'unknown', 'pending', 'stale')),
     status_legacy TEXT,                         -- pre-migration-009 value, only set if it was remapped
     verified_at   TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Migration 023 (W9.3) — the current/last eligibility-service job for
+    -- THIS coverage. eligibility-service's own job record stores no
+    -- patient_id/coverage_id by design; this is the association kept on
+    -- the coverage side instead, and never sent to the browser.
+    verification_job_id TEXT
 );
 
 -- ---------------------------------------------------------------------------
