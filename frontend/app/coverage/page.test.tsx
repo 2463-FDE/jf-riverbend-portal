@@ -6,9 +6,14 @@ import CoveragePage from "./page";
 // simulated/stale/unknown result as active coverage — those are the two
 // failure shapes billing staff would actually act on incorrectly.
 
-vi.mock("../lib/session", () => ({ apiFetch: vi.fn() }));
+const replace = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace }),
+}));
 
-import { apiFetch } from "../lib/session";
+vi.mock("../lib/session", () => ({ apiFetch: vi.fn(), clearSession: vi.fn() }));
+
+import { apiFetch, clearSession } from "../lib/session";
 
 function ok(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response;
@@ -128,5 +133,44 @@ describe("Coverage & Eligibility", () => {
     fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
 
     expect(await screen.findByText(/could not load coverage/i)).toBeInTheDocument();
+  });
+
+  // P0 (w-9-2-planner): a 401 is the gateway session itself expiring — not a
+  // coverage/backend failure — and must never render as "Could not load
+  // coverage." (indistinguishable from a real outage) or "not authorized"
+  // (indistinguishable from a real per-patient denial).
+  it("clears the session and redirects to sign-in on an expired session (401), not a generic load error", async () => {
+    replace.mockClear();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/coverages")) return denied(401);
+      return ok({});
+    });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(clearSession).toHaveBeenCalled());
+    expect(replace).toHaveBeenCalledWith("/login");
+    expect(screen.queryByText(/could not load coverage/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not authorized/i)).not.toBeInTheDocument();
+  });
+
+  it("also treats an expired session as expired, not a failure, when requesting a verification", async () => {
+    replace.mockClear();
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/name")) return ok({ id: 1737, name: "Priya Khan" });
+      if (url.includes("/verify")) return denied(401);
+      if (url.includes("/coverages")) return ok({ items: [COVERAGE] });
+      return ok({});
+    });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await screen.findByText("Acme Health");
+
+    fireEvent.click(screen.getByRole("button", { name: /request verification/i }));
+
+    await waitFor(() => expect(clearSession).toHaveBeenCalled());
+    expect(replace).toHaveBeenCalledWith("/login");
   });
 });
