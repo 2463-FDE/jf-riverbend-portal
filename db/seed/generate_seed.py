@@ -284,12 +284,19 @@ irows = []
 for pid_ in (1042, 1330, 1588):
     irows.append(f" ({pid_}, 'Blue Cross Blue Shield', 'BCBS4471', 'GRP88', 'PPO', 'active', '2026-06-22 09:14:30')")
 irows.append(f" (1043, 'Aetna', 'AETNA9920', 'GRP12', 'PPO', 'active', '2026-06-22 09:17:50')")
-# Curated fixtures 1737/1738/1739 — active coverage, explicit and fixed, so a
-# rerun never lands one of them on 'unknown'/'inactive' (the requirement is
-# "active insurance and eligibility data", not "usually active").
+# Curated fixtures 1737/1738/1739 — explicit and fixed, so a rerun always
+# reproduces the same demo, never a random draw. 1737 stays 'active' per its
+# own original requirement ("active insurance and eligibility data"). 1738
+# and 1739 are deliberately NOT both 'active' (2026-08-23, W9.4): the
+# Coverage & Eligibility workspace needs 'stale' and 'unknown' to be real,
+# reachable states on a canonical patient, not something only a random
+# generated row happens to land on — see coverage-eligibility.md's essential
+# test list ("active/inactive, pending, stale, unavailable, and simulated
+# mapping"). Both still have a member id on file, so "Request verification"
+# is always available from the seed's own starting state.
 irows.append(" (1737, 'Kaiser', 'KAISER5591', 'GRP41', 'HMO', 'active', '2026-03-05 08:55:00')")
-irows.append(" (1738, 'Aetna', 'AETNA7381', 'GRP22', 'PPO', 'active', '2026-03-18 09:25:00')")
-irows.append(" (1739, 'UnitedHealthcare', 'UHC7392', 'GRP63', 'HMO', 'active', '2026-03-22 14:20:00')")
+irows.append(" (1738, 'Aetna', 'AETNA7381', 'GRP22', 'PPO', 'stale', '2026-03-18 09:25:00')")
+irows.append(" (1739, 'UnitedHealthcare', 'UHC7392', 'GRP63', 'HMO', 'unknown', NULL)")
 for pid_ in all_patient_ids:
     if pid_ in CURATED_IDS or pid_ in (1330, 1588, 1043):
         continue
@@ -776,6 +783,48 @@ for _ in range(20):
     pid_ = random.choice(all_patient_ids)
     alrows.append(f" ('records-service', {sql_str(f'GET /patients/{pid_}/records 200')})")
 emit(",\n".join(alrows) + ";")
+emit()
+
+# ---------------------------------------------------------------------------
+# message_threads / thread_messages / thread_read_state — W9.2 demo fixtures
+# (2026-08-23, W9.4)
+#
+# Only 1738 and 1739 get a seeded thread: they are the two curated patients
+# with a real portal account already (1042/1737 are invite-ready — there is
+# no patient-role user yet to be the sender of a message from them). Two
+# threads are enough to demonstrate both essential, distinct states without
+# a third patient: 1738's is unread by BOTH of its granted clinicians (the
+# same drkim+drnguyen overlap the grant matrix demonstrates elsewhere, so
+# the shared-inbox behavior and the unread state are shown together), 1739's
+# is a full patient-asks/clinician-replies exchange the patient has already
+# read.
+# ---------------------------------------------------------------------------
+thomas_user_id = patient_user_id_of[1738]
+aisha_user_id = patient_user_id_of[1739]
+DRKIM_ID, DRNGUYEN_ID = 13, 6  # USERS list order above — see the grant matrix comment on gwrows
+
+emit("INSERT INTO message_threads (id, patient_id, subject, status, created_by, created_at, updated_at) VALUES")
+emit(f" (1, 1738, 'Question about my blood pressure readings', 'open', {thomas_user_id}, '2026-08-20 09:00:00', '2026-08-20 09:00:00'),")
+emit(f" (2, 1739, 'Refill request for my inhaler', 'open', {aisha_user_id}, '2026-08-18 14:00:00', '2026-08-18 14:32:00');")
+emit()
+
+emit("INSERT INTO thread_messages (id, thread_id, sender_user_id, body, idempotency_key, created_at) VALUES")
+emit(f" (1, 1, {thomas_user_id}, 'My home readings have been running a bit high this week, should I be concerned?', 'seed-1738-msg-1', '2026-08-20 09:00:00'),")
+emit(f" (2, 2, {aisha_user_id}, 'Hi, I am almost out of my albuterol inhaler, can you send a refill?', 'seed-1739-msg-1', '2026-08-18 14:00:00'),")
+emit(f" (3, 2, {DRNGUYEN_ID}, 'Sent a refill to your pharmacy on file. Let us know if you do not see it by tomorrow.', 'seed-1739-msg-2', '2026-08-18 14:32:00');")
+emit()
+emit("SELECT setval('message_threads_id_seq', 2, true);")
+emit("SELECT setval('thread_messages_id_seq', 3, true);")
+emit()
+
+# 1739's thread has been read by the patient (their own view of drnguyen's
+# reply) but deliberately NOT by drnguyen — a real, reachable unread row
+# rather than a demo that starts pre-cleared. 1738's thread has no read
+# state at all: unread for every one of its granted clinicians, which is
+# exactly what the "unread" essential test needs to be true from a fresh
+# seed, not only after some other action runs first.
+emit("INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id, updated_at) VALUES")
+emit(f" (2, {aisha_user_id}, 3, '2026-08-18 15:00:00');")
 emit()
 
 print("\n".join(OUT))

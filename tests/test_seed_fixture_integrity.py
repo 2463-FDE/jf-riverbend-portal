@@ -75,11 +75,23 @@ def test_each_canonical_patient_appears_exactly_once(generated_sql, patient_id):
     assert len(hits) == 1, f"patient {patient_id} appears {len(hits)} times, expected exactly 1"
 
 
+# 1042/1737 stay 'active' per their original requirement ("active insurance
+# and eligibility data"). 1738/1739 were deliberately moved OFF 'active'
+# (2026-08-23, W9.4): the Coverage & Eligibility workspace needs 'stale' and
+# 'unknown' to be real, reachable states on a canonical patient rather than
+# something only a random generated row happens to land on — see
+# coverage-eligibility.md's essential test list. Each still has a member id
+# on file, so "Request verification" is available from the seed's own
+# starting state regardless of which status it starts on.
+_EXPECTED_COVERAGE_STATUS = {1042: "active", 1737: "active", 1738: "stale", 1739: "unknown"}
+
+
 @pytest.mark.parametrize("patient_id", CANONICAL)
-def test_each_canonical_patient_has_active_insurance(generated_sql, patient_id):
+def test_each_canonical_patient_has_the_expected_insurance_status(generated_sql, patient_id):
     block = _block(generated_sql, "INSERT INTO insurance_coverages", "\n\n")
-    pattern = re.compile(rf"^\s*\({patient_id}, '[^']+', '[^']+', '[^']+', '[^']+', 'active',", re.M)
-    assert pattern.search(block), f"patient {patient_id} has no active insurance_coverages row"
+    expected = _EXPECTED_COVERAGE_STATUS[patient_id]
+    pattern = re.compile(rf"^\s*\({patient_id}, '[^']+', '[^']+', '[^']+', '[^']+', '{expected}',", re.M)
+    assert pattern.search(block), f"patient {patient_id} has no {expected!r} insurance_coverages row"
 
 
 @pytest.mark.parametrize("patient_id", CANONICAL)
