@@ -94,17 +94,27 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
 
 
 def bind_visit_context(
-    visit_id: str, *, patient_id: Optional[int] = None, insurance_id: Optional[str] = None
+    visit_id: str,
+    *,
+    patient_id: Optional[int] = None,
+    insurance_id: Optional[str] = None,
+    coverage_on_file: Optional[dict] = None,
 ) -> None:
-    """Seed/update the visit's structured memory with the patient/insurance
-    binding the front desk already has on file, so check_eligibility has an
-    insurance_id to check without the model ever supplying one (see
-    libs/eligibility_agent/eligibility_tool.py's anti-smuggling design — the
-    model can never pass its own insurance/member/patient id). A no-op if
-    neither field is given. Memory-store failures degrade the same way
-    RedisVisitMemory.put always does: silently, logged TYPE-only, never
+    """Seed/update the visit's structured memory with the patient/insurance/
+    stored-coverage binding the front desk already has on file, so
+    verify_current_eligibility has an insurance_id to check and
+    get_coverage_on_file has a stored snapshot to read — without the model
+    ever supplying either (see libs/eligibility_agent/eligibility_tool.py's
+    anti-smuggling design — the model can never pass its own insurance/
+    member/patient id or coverage facts). `coverage_on_file`, when given, is
+    the plain dict services/gateway/app.py::proxy_visit_message derives
+    server-side from the patient's actual insurance_coverages row
+    (payer_name, plan_type, member_id_masked, status, verified_at) — never
+    taken from the request as anything the model could see or edit. A no-op
+    if none of the three are given. Memory-store failures degrade the same
+    way RedisVisitMemory.put always does: silently, logged TYPE-only, never
     raised into the request handler."""
-    if patient_id is None and insurance_id is None:
+    if patient_id is None and insurance_id is None and coverage_on_file is None:
         return
     memory = get_visit_memory()
     existing = memory.get(visit_id)
@@ -113,6 +123,12 @@ def bind_visit_context(
         updates["patient_id"] = patient_id
     if insurance_id is not None:
         updates["insurance_id"] = insurance_id
+    if coverage_on_file is not None:
+        updates["coverage_payer_name"] = coverage_on_file.get("payer_name")
+        updates["coverage_plan_type"] = coverage_on_file.get("plan_type")
+        updates["coverage_member_id_masked"] = coverage_on_file.get("member_id_masked")
+        updates["coverage_status"] = coverage_on_file.get("status")
+        updates["coverage_verified_at"] = coverage_on_file.get("verified_at")
     if existing is not None:
         context = existing.model_copy(update=updates)
     else:

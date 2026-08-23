@@ -23,8 +23,8 @@ omits it.
 Like `OllamaProvider` (libs/llm_client/providers/ollama_provider.py), the
 base URL and model name come from config, never hardcoded, and no network
 call happens unless this adapter is actually selected. `transport` mirrors
-`eligibility_tool.CheckEligibilityTool`'s own constructor param — tests
-inject an `httpx.MockTransport`, never a live server.
+`eligibility_tool.VerifyCurrentEligibilityTool`'s own constructor param —
+tests inject an `httpx.MockTransport`, never a live server.
 """
 import json
 import os

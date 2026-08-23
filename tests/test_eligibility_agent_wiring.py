@@ -199,3 +199,64 @@ def test_bind_visit_context_is_a_noop_when_nothing_is_given(monkeypatch):
     agent_wiring.bind_visit_context("visit-1")
 
     assert fake_memory.put_calls == 0
+
+
+# --- w-9-2-planner P1a: coverage_on_file binding -----------------------------
+
+
+def test_bind_visit_context_stores_the_coverage_on_file_snapshot(monkeypatch):
+    fake_memory = _FakeVisitMemory()
+    monkeypatch.setattr(agent_wiring, "get_visit_memory", lambda: fake_memory)
+
+    agent_wiring.bind_visit_context(
+        "visit-1",
+        patient_id=1737,
+        insurance_id="MEM1",
+        coverage_on_file={
+            "payer_name": "Kaiser",
+            "plan_type": "HMO",
+            "member_id_masked": "******5591",
+            "status": "active",
+            "verified_at": "2026-03-05T08:55:00+00:00",
+        },
+    )
+
+    stored = fake_memory.get("visit-1")
+    assert stored.coverage_payer_name == "Kaiser"
+    assert stored.coverage_plan_type == "HMO"
+    assert stored.coverage_member_id_masked == "******5591"
+    assert stored.coverage_status == "active"
+    assert stored.coverage_verified_at.isoformat() == "2026-03-05T08:55:00+00:00"
+
+
+def test_bind_visit_context_with_only_coverage_on_file_is_not_a_noop(monkeypatch):
+    # coverage_on_file alone (no patient_id/insurance_id) must still bind —
+    # the no-op guard must check all three fields, not just the first two.
+    fake_memory = _FakeVisitMemory()
+    monkeypatch.setattr(agent_wiring, "get_visit_memory", lambda: fake_memory)
+
+    agent_wiring.bind_visit_context("visit-1", coverage_on_file={"payer_name": "Kaiser", "status": "active"})
+
+    assert fake_memory.put_calls == 1
+    assert fake_memory.get("visit-1").coverage_payer_name == "Kaiser"
+
+
+def test_bind_visit_context_coverage_on_file_does_not_clobber_other_fields(monkeypatch):
+    fake_memory = _FakeVisitMemory()
+    fake_memory.put(
+        VisitContext(
+            visit_id="visit-1",
+            insurance_id="OLD",
+            eligibility_status="active",
+            eligibility_checked_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    monkeypatch.setattr(agent_wiring, "get_visit_memory", lambda: fake_memory)
+
+    agent_wiring.bind_visit_context("visit-1", coverage_on_file={"payer_name": "Kaiser", "status": "active"})
+
+    stored = fake_memory.get("visit-1")
+    assert stored.coverage_payer_name == "Kaiser"
+    assert stored.insurance_id == "OLD"  # untouched
+    assert stored.eligibility_status == "active"  # untouched — a stored snapshot, not a verification

@@ -1,10 +1,11 @@
 """Visit-scoped structured memory — TTL'd, strictly isolated per visit_id.
 
-Stores ONLY the structured fields VisitContext already defines (insurance_id,
-patient_id, eligibility_status, eligibility_checked_at) — never a chat
-transcript, prompt, or model response. This is the entire cross-turn
-persistence surface for both AgentRuntime implementations; there is nowhere
-else conversational content could leak into storage.
+Stores ONLY the structured fields VisitContext already defines (patient_id,
+insurance_id, the stored coverage_* snapshot, eligibility_status,
+eligibility_checked_at) — never a chat transcript, prompt, or model response.
+This is the entire cross-turn persistence surface for both AgentRuntime
+implementations; there is nowhere else conversational content could leak
+into storage.
 
 Key prefix is separate from every other Redis use in the stack: gateway
 sessions use "session:{token}" (services/gateway/security.py), Stage 1's

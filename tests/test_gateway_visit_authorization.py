@@ -27,6 +27,7 @@ import db as db_mod  # noqa: E402
 import models as models_mod  # noqa: E402
 
 find_authorized_appointment = va_mod.find_authorized_appointment
+latest_insurance_coverage = va_mod.latest_insurance_coverage
 latest_insurance_member_id = va_mod.latest_insurance_member_id
 parse_user_id = va_mod.parse_user_id
 Appointment = models_mod.Appointment
@@ -183,6 +184,49 @@ def test_a_coverage_row_with_no_member_id_is_skipped():
     db.commit()
 
     assert latest_insurance_member_id(db, patient_id=1042) is None
+
+
+# --- latest_insurance_coverage (w-9-2-planner P1a) --------------------------
+
+
+def test_no_coverage_row_returns_none():
+    db = _fresh_session()
+
+    assert latest_insurance_coverage(db, patient_id=1042) is None
+
+
+def test_returns_the_most_recently_created_coverage_row():
+    db = _fresh_session()
+    db.add(InsuranceCoverage(id=1, patient_id=1042, payer_name="Old Payer", member_id="OLD-1"))
+    db.add(InsuranceCoverage(id=2, patient_id=1042, payer_name="New Payer", member_id="NEW-2"))
+    db.commit()
+
+    coverage = latest_insurance_coverage(db, patient_id=1042)
+
+    assert coverage.payer_name == "New Payer"
+
+
+def test_a_coverage_row_with_no_member_id_is_still_returned():
+    # Unlike latest_insurance_member_id: a coverage row can carry a real
+    # payer/plan/status worth showing even with no member id on file —
+    # verification just can't run against it (mirrors the Coverage &
+    # Eligibility page's own has_member_id-gated display).
+    db = _fresh_session()
+    db.add(InsuranceCoverage(id=1, patient_id=1042, payer_name="Kaiser", status="active", member_id=None))
+    db.commit()
+
+    coverage = latest_insurance_coverage(db, patient_id=1042)
+
+    assert coverage is not None
+    assert coverage.payer_name == "Kaiser"
+
+
+def test_never_returns_another_patients_coverage():
+    db = _fresh_session()
+    db.add(InsuranceCoverage(id=1, patient_id=2001, payer_name="Other Patient's Payer"))
+    db.commit()
+
+    assert latest_insurance_coverage(db, patient_id=1042) is None
 
 
 # --- parse_user_id -----------------------------------------------------------

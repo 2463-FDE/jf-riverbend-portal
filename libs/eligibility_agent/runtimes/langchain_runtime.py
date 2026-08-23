@@ -1,7 +1,7 @@
 """LangChain/LangGraph comparison-spike AgentRuntime.
 
 A minimal 2-node LangGraph (agent <-> tools, bounded, then END) wired to the
-SAME check_eligibility tool and the SAME safety properties (allowlist, strict
+SAME two eligibility tools and the SAME safety properties (allowlist, strict
 argument validation, bounded turns, safe errors, deterministic termination)
 as the raw_bedrock runtime — this exists to compare LangGraph's own
 orchestration primitives against a hand-rolled loop, not to add a second,
@@ -45,12 +45,21 @@ from typing import Optional
 from libs.safe_logging import get_safe_logger
 
 from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult, parse_as_of
-from ..eligibility_tool import TOOL_NAME, TOOL_SPEC, CheckEligibilityTool, EligibilityToolConfig
+from ..eligibility_tool import (
+    COVERAGE_TOOL_NAME,
+    COVERAGE_TOOL_SPEC,
+    VERIFY_TOOL_NAME,
+    VERIFY_TOOL_SPEC,
+    EligibilityToolConfig,
+    GetCoverageOnFileTool,
+    VerifyCurrentEligibilityTool,
+)
 from ..memory import VisitMemoryPort
 
 log = get_safe_logger(__name__)
 
-_ALLOWED_TOOLS = frozenset({TOOL_NAME})
+_TOOL_SPECS = [VERIFY_TOOL_SPEC, COVERAGE_TOOL_SPEC]
+_ALLOWED_TOOLS = frozenset({VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME})
 
 _SAFE_PROVIDER_ERROR_REPLY = (
     "I couldn't reach the eligibility assistant just now. Please try again in a "
@@ -111,9 +120,14 @@ class LangChainAgentRuntime:
         from langgraph.graph import END, StateGraph
 
         context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
-        tool = CheckEligibilityTool(context, config=self._tool_config, transport=self._tool_transport)
+        tools_by_name = {
+            VERIFY_TOOL_NAME: VerifyCurrentEligibilityTool(
+                context, config=self._tool_config, transport=self._tool_transport
+            ),
+            COVERAGE_TOOL_NAME: GetCoverageOnFileTool(context),
+        }
         chat_model = self._chat_model_factory()
-        bound_model = chat_model.bind_tools([TOOL_SPEC])
+        bound_model = chat_model.bind_tools(_TOOL_SPECS)
 
         outcome = {"tool_called": False, "eligibility_status": context.eligibility_status, "context": context}
         max_turns = self._max_turns
@@ -146,11 +160,17 @@ class LangChainAgentRuntime:
                     log.warning("agent tool call rejected (reason=unknown_tool)")
                     payload = {"error": "unknown_tool"}
                 else:
-                    result = tool.invoke(call.get("args") or {})
+                    result = tools_by_name[call["name"]].invoke(call.get("args") or {})
                     payload = result.payload
                     if result.ok:
                         outcome["tool_called"] = True
-                        if "status" in payload:
+                        # Same scoping as raw_bedrock.py: only a VERIFIED
+                        # outcome from verify_current_eligibility may update
+                        # eligibility_status/eligibility_checked_at — see
+                        # eligibility_tool.py's own docstring on why a
+                        # stored-lookup or a simulated/unavailable outcome
+                        # must never masquerade as a fresh check.
+                        if call["name"] == VERIFY_TOOL_NAME and payload.get("outcome") == "verified":
                             status = EligibilityStatus(payload["status"])
                             outcome["eligibility_status"] = status
                             # Persist the payer's real verification time (as_of),

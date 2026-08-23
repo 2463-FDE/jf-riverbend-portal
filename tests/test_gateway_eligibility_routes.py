@@ -142,9 +142,23 @@ class _FakeAppointment:
         self.patient_id = patient_id
 
 
-def _authorize(monkeypatch, *, appointment=None, insurance_id=None):
+class _FakeCoverage:
+    def __init__(self, *, payer_name=None, plan_type=None, member_id=None, status=None, verified_at=None):
+        self.payer_name = payer_name
+        self.plan_type = plan_type
+        self.member_id = member_id
+        self.status = status
+        self.verified_at = verified_at
+
+
+def _authorize(monkeypatch, *, appointment=None, insurance_id=None, coverage=None):
     monkeypatch.setattr(app_mod, "find_authorized_appointment", lambda db, **kw: appointment)
     monkeypatch.setattr(app_mod, "latest_insurance_member_id", lambda db, **kw: insurance_id)
+    # w-9-2-planner P1a: proxy_visit_message now also derives a stored
+    # coverage-on-file snapshot — defaults to None (no coverage on file) so
+    # every existing test here that doesn't care about it keeps working
+    # without touching a real DB session.
+    monkeypatch.setattr(app_mod, "latest_insurance_coverage", lambda db, **kw: coverage)
 
 
 def test_visit_message_non_numeric_visit_id_is_rejected_without_a_grant_lookup(client, monkeypatch):
@@ -189,12 +203,58 @@ def test_visit_message_authorized_appointment_forwards_server_derived_fields(cli
 
     assert resp.status_code == 200
     assert captured["url"].endswith("/visits/1/messages")
-    assert captured["json"] == {"message": "am I covered?", "patient_id": 1042, "insurance_id": "BCBS-9981"}
+    assert captured["json"] == {
+        "message": "am I covered?",
+        "patient_id": 1042,
+        "insurance_id": "BCBS-9981",
+        "coverage_on_file": None,  # no coverage row in this test's fixture
+    }
     assert "X-Request-Id" in captured["headers"]
     # Opaque, uuid4-hex shaped — not derived from the session/username.
     correlation_id = captured["headers"]["X-Request-Id"]
     assert len(correlation_id) == 32
     assert "frontdesk" not in correlation_id
+
+
+def test_visit_message_forwards_a_masked_coverage_on_file_snapshot(client, monkeypatch):
+    # w-9-2-planner P1a: coverage_on_file is server-derived the same way
+    # patient_id/insurance_id already are, and never carries the full member
+    # id — only the same masked form the Coverage & Eligibility page shows.
+    _authorize(
+        monkeypatch,
+        appointment=_FakeAppointment(patient_id=1737),
+        insurance_id="KAISER5591",
+        coverage=_FakeCoverage(
+            payer_name="Kaiser",
+            plan_type="HMO",
+            member_id="KAISER5591",
+            status="active",
+            verified_at=None,
+        ),
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(
+            200,
+            {"visit_id": "1", "reply": "ok", "tool_called": False, "termination_reason": "answered", "turns_used": 1},
+        )
+
+    monkeypatch.setattr(app_mod.httpx, "post", fake_post)
+
+    resp = client.post("/visits/1/messages", json={"message": "what's on file?"}, headers=_auth())
+
+    assert resp.status_code == 200
+    coverage_on_file = captured["json"]["coverage_on_file"]
+    assert coverage_on_file["payer_name"] == "Kaiser"
+    assert coverage_on_file["plan_type"] == "HMO"
+    assert coverage_on_file["status"] == "active"
+    assert coverage_on_file["member_id_masked"] == "******5591"
+    # The full member id legitimately appears in top-level insurance_id —
+    # verify_current_eligibility needs it for the live payer call. Only
+    # coverage_on_file's own copy must be masked.
+    assert "KAISER5591" not in str(coverage_on_file)
 
 
 def test_visit_message_ignores_client_supplied_patient_and_insurance_id(client, monkeypatch):

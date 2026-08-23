@@ -53,7 +53,13 @@ from db import get_db
 from logging_config import configure
 from models import InsuranceCoverage, Patient, PatientAccessGrant, PatientInvitation, User
 from security import create_session, destroy_session, get_session, hash_password, verify_password
-from visit_authorization import find_authorized_appointment, has_active_grant, latest_insurance_member_id, parse_user_id
+from visit_authorization import (
+    find_authorized_appointment,
+    has_active_grant,
+    latest_insurance_coverage,
+    latest_insurance_member_id,
+    parse_user_id,
+)
 
 log = configure(settings.service_name)
 
@@ -965,12 +971,16 @@ def proxy_visit_message(
     being requested": a session alone no longer scopes this route to every
     patient in the system.
 
-    `patient_id`/`insurance_id` are NEVER taken from `payload` — whatever a
-    caller sends there is dropped. They're derived here, server-side, from
-    the authorized appointment and the patient's insurance on file, which is
-    the only way eligibility-service's `bind_visit_context` ever sees them
-    (mirrors the same "server-derived, not client-supplied" principle
-    proxy_intake already applies to X-Actor-Id).
+    `patient_id`/`insurance_id`/`coverage_on_file` are NEVER taken from
+    `payload` — whatever a caller sends there is dropped. They're derived
+    here, server-side, from the authorized appointment and the patient's
+    insurance on file, which is the only way eligibility-service's
+    `bind_visit_context` ever sees them (mirrors the same "server-derived,
+    not client-supplied" principle proxy_intake already applies to
+    X-Actor-Id). `coverage_on_file` (w-9-2-planner P1a) is the stored
+    payer/plan/status snapshot get_coverage_on_file answers from without
+    ever contacting the payer — see visit_authorization.py's
+    latest_insurance_coverage.
     """
     try:
         appointment_id = int(visit_id)
@@ -995,11 +1005,37 @@ def proxy_visit_message(
     message = payload.get("message") if isinstance(payload, dict) else None
     try:
         insurance_id = latest_insurance_member_id(db, patient_id=appointment.patient_id)
+        coverage = latest_insurance_coverage(db, patient_id=appointment.patient_id)
     except SQLAlchemyError as e:
         log.error("visit message: insurance lookup failed (error_type=%s)", type(e).__name__)
         raise HTTPException(status_code=503, detail="patient store unavailable")
 
-    downstream_payload = {"message": message, "patient_id": appointment.patient_id, "insurance_id": insurance_id}
+    # w-9-2-planner P1a: the same server-derived, never-caller-supplied
+    # principle as insurance_id above, now extended to a stored-coverage
+    # snapshot get_coverage_on_file can answer from directly — payer/plan/
+    # status/last-verified, masked the same way the Coverage & Eligibility
+    # page's own _mask_member_id already does. `coverage` may lack a
+    # member_id (has_member_id-gated elsewhere) yet still carry a real
+    # payer/plan/status worth showing, so this is intentionally NOT the same
+    # row insurance_id above is filtered from.
+    coverage_on_file = (
+        {
+            "payer_name": coverage.payer_name,
+            "plan_type": coverage.plan_type,
+            "member_id_masked": _mask_member_id(coverage.member_id),
+            "status": coverage.status,
+            "verified_at": coverage.verified_at.isoformat() if coverage.verified_at else None,
+        }
+        if coverage is not None
+        else None
+    )
+
+    downstream_payload = {
+        "message": message,
+        "patient_id": appointment.patient_id,
+        "insurance_id": insurance_id,
+        "coverage_on_file": coverage_on_file,
+    }
     return _post(
         "eligibility",
         f"/visits/{visit_id}/messages",

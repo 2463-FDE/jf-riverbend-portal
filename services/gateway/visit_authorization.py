@@ -109,6 +109,25 @@ def has_active_grant(db: Session, *, user_id: int, patient_id: int) -> bool:
     ) is not None
 
 
+def latest_insurance_coverage(db: Session, *, patient_id: int) -> Optional[InsuranceCoverage]:
+    """The patient's most recently created coverage row, or `None` — no
+    member_id filter, unlike latest_insurance_member_id below. Backs the
+    stored coverage-on-file snapshot the eligibility chat now also derives
+    server-side (w-9-2-planner P1a, app.py::proxy_visit_message): a coverage
+    row can carry a real payer/plan/status worth showing even with no
+    member id on file (verification just can't run against it — mirrors the
+    Coverage & Eligibility page's own has_member_id-gated display)."""
+    return (
+        db.execute(
+            select(InsuranceCoverage)
+            .where(InsuranceCoverage.patient_id == patient_id)
+            .order_by(InsuranceCoverage.id.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+
 def latest_insurance_member_id(db: Session, *, patient_id: int) -> Optional[str]:
     """The patient's most recently recorded insurance member_id, or `None` if
     they have none on file. This — never a caller-supplied value — is the

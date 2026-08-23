@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from libs.eligibility_agent.bedrock_tool_port import ConverseTurn
-from libs.eligibility_agent.eligibility_tool import TOOL_SPEC
+from libs.eligibility_agent.eligibility_tool import VERIFY_TOOL_SPEC as TOOL_SPEC
 from libs.eligibility_agent.ollama_tool_port import (
     OllamaToolCapableModel,
     _to_ollama_messages,

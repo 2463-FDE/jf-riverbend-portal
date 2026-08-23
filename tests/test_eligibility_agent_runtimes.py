@@ -32,10 +32,18 @@ import pytest
 
 from libs.eligibility_agent.bedrock_tool_port import ConverseTurn, ToolCall, ToolCapableModel
 from libs.eligibility_agent.contracts import EligibilityStatus, TerminationReason, VisitContext
-from libs.eligibility_agent.eligibility_tool import TOOL_NAME
+from libs.eligibility_agent.eligibility_tool import COVERAGE_TOOL_NAME, VERIFY_TOOL_NAME, EligibilityToolConfig
 from libs.eligibility_agent.memory import VisitMemoryPort
 from libs.eligibility_agent.runtimes.raw_bedrock import RawBedrockAgentRuntime
 from libs.llm_client.errors import ProviderCallError, ProviderTimeoutError
+
+# w-9-2-planner P1a: every test in this file that scripts a bare ("tool_call",
+# args) step is exercising verify_current_eligibility's LIVE-CALL mechanics
+# (response parsing, persistence, error handling) against a mocked transport
+# — payer_configured=True keeps that path reachable, the same way it already
+# was before the tool split. The payer_configured=False / simulated /
+# get_coverage_on_file behavior gets its own dedicated tests below.
+_CONFIGURED = EligibilityToolConfig(payer_configured=True)
 
 # --------------------------------------------------------------------------- #
 # Shared test doubles
@@ -57,8 +65,8 @@ class FakeVisitMemory(VisitMemoryPort):
         self._store[context.visit_id] = context
 
 
-def _seed_context(memory, visit_id="visit-1", insurance_id="BCBS1"):
-    memory.put(VisitContext(visit_id=visit_id, insurance_id=insurance_id, updated_at=_now()))
+def _seed_context(memory, visit_id="visit-1", insurance_id="BCBS1", **coverage_fields):
+    memory.put(VisitContext(visit_id=visit_id, insurance_id=insurance_id, updated_at=_now(), **coverage_fields))
 
 
 def _now():
@@ -97,7 +105,7 @@ class FakeToolCapableModel(ToolCapableModel):
         if kind == "text":
             return ConverseTurn(text=step[1], tool_calls=[])
         if kind == "tool_call":
-            return ConverseTurn(text=None, tool_calls=[ToolCall(id="t1", name=TOOL_NAME, arguments=step[1])])
+            return ConverseTurn(text=None, tool_calls=[ToolCall(id="t1", name=VERIFY_TOOL_NAME, arguments=step[1])])
         if kind == "tool_call_named":
             return ConverseTurn(text=None, tool_calls=[ToolCall(id="t1", name=step[1], arguments=step[2])])
         raise AssertionError(f"unknown script step: {step!r}")
@@ -124,7 +132,7 @@ class _FakeBoundModel:
         if kind == "text":
             return _FakeAIMessage(content=step[1], tool_calls=[])
         if kind == "tool_call":
-            return _FakeAIMessage(tool_calls=[{"name": TOOL_NAME, "args": step[1], "id": "t1"}])
+            return _FakeAIMessage(tool_calls=[{"name": VERIFY_TOOL_NAME, "args": step[1], "id": "t1"}])
         if kind == "tool_call_named":
             return _FakeAIMessage(tool_calls=[{"name": step[1], "args": step[2], "id": "t1"}])
         raise AssertionError(f"unknown script step: {step!r}")
@@ -209,12 +217,13 @@ def _install_fake_langgraph(monkeypatch):
     monkeypatch.setitem(sys.modules, "langgraph.graph", fake_graph_mod)
 
 
-def build_runtime(runtime_name, *, script, memory, tool_transport, monkeypatch, max_turns=4):
+def build_runtime(runtime_name, *, script, memory, tool_transport, monkeypatch, max_turns=4, tool_config=_CONFIGURED):
     if runtime_name == "raw_bedrock":
         return RawBedrockAgentRuntime(
             memory=memory,
             model=FakeToolCapableModel(script),
             max_turns=max_turns,
+            tool_config=tool_config,
             tool_transport=tool_transport,
         )
     if runtime_name == "langchain":
@@ -224,6 +233,7 @@ def build_runtime(runtime_name, *, script, memory, tool_transport, monkeypatch, 
         return LangChainAgentRuntime(
             memory=memory,
             max_turns=max_turns,
+            tool_config=tool_config,
             tool_transport=tool_transport,
             chat_model_factory=lambda: _FakeChatModel(script),
             checkpointer_factory=lambda: object(),  # never inspected by the fake graph
@@ -526,6 +536,104 @@ def test_phi_is_never_logged_even_when_the_eligibility_call_fails(runtime_name, 
     with caplog.at_level(logging.WARNING):
         result = runtime.handle_message("visit-1", "check now")
 
-    assert result.eligibility_status == EligibilityStatus.UNKNOWN
+    # w-9-2-planner P1a: a failed/unavailable attempt is not itself learned
+    # information — it must not overwrite the (here, absent) prior status
+    # with "unknown", which is exactly the "a new verification never
+    # upgrades stored data" boundary applied to the no-prior-data case.
+    assert result.eligibility_status is None
     for record in caplog.records:
         assert secret_member_id not in record.getMessage()
+
+
+# --- w-9-2-planner P1a: get_coverage_on_file, and the outcome split --------
+
+
+def test_get_coverage_on_file_answers_from_the_stored_snapshot_with_no_network_call(runtime_name, monkeypatch):
+    memory = FakeVisitMemory()
+    _seed_context(
+        memory,
+        coverage_payer_name="Kaiser",
+        coverage_plan_type="HMO",
+        coverage_member_id_masked="******5591",
+        coverage_status="active",
+        coverage_verified_at=datetime(2026, 3, 5, 8, 55, 0, tzinfo=timezone.utc),
+    )
+    script = [("tool_call_named", COVERAGE_TOOL_NAME, {}), ("text", "You have Kaiser HMO on file, active.")]
+    runtime = build_runtime(
+        runtime_name, script=script, memory=memory, tool_transport=never_called_transport(), monkeypatch=monkeypatch
+    )
+
+    result = runtime.handle_message("visit-1", "what coverage do you have on file?")
+
+    assert result.tool_called is True
+    assert result.termination_reason == TerminationReason.ANSWERED
+
+
+def test_get_coverage_on_file_never_touches_eligibility_status_or_persists(runtime_name, monkeypatch):
+    # The stored snapshot is a pure read — it must never be mistaken for a
+    # fresh verification outcome, in either the turn result or memory.
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_payer_name="Kaiser", coverage_status="active")
+    script = [("tool_call_named", COVERAGE_TOOL_NAME, {}), ("text", "Here's what's on file.")]
+    runtime = build_runtime(
+        runtime_name, script=script, memory=memory, tool_transport=never_called_transport(), monkeypatch=monkeypatch
+    )
+
+    result = runtime.handle_message("visit-1", "what's on file?")
+
+    assert result.eligibility_status is None  # never set by this tool
+    assert memory.get("visit-1").eligibility_status is None
+
+
+def test_unconfigured_payer_reports_simulated_and_does_not_persist_active(runtime_name, monkeypatch):
+    # w-9-2-planner P1a's core boundary: a simulated attempt must never
+    # upgrade stored/absent data into "active" in memory, even though the
+    # tool's own note may mention the stored status.
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_status="active")
+    script = [("tool_call", {}), ("text", "This is a synthetic training environment.")]
+    runtime = build_runtime(
+        runtime_name,
+        script=script,
+        memory=memory,
+        tool_transport=never_called_transport(),
+        monkeypatch=monkeypatch,
+        tool_config=EligibilityToolConfig(payer_configured=False),
+    )
+
+    result = runtime.handle_message("visit-1", "check now")
+
+    assert result.tool_called is True
+    assert result.eligibility_status is None  # not persisted as a fresh ACTIVE result
+    assert memory.get("visit-1").eligibility_status is None
+    assert memory.get("visit-1").coverage_status == "active"  # the stored snapshot itself is untouched
+
+
+def test_a_prior_verified_status_survives_an_unavailable_reattempt(runtime_name, monkeypatch):
+    # Seed a prior genuine verification, then a live attempt that fails
+    # outright (transport error) — the PRIOR verified result must survive,
+    # not be blanked out by the failed reattempt.
+    memory = FakeVisitMemory()
+    prior = _now()
+    memory.put(
+        VisitContext(
+            visit_id="visit-1",
+            insurance_id="BCBS1",
+            eligibility_status=EligibilityStatus.ACTIVE,
+            eligibility_checked_at=prior,
+            updated_at=prior,
+        )
+    )
+
+    def handler(request):
+        raise httpx.ConnectError("payer unreachable", request=request)
+
+    script = [("tool_call", {}), ("text", "Verification unavailable right now.")]
+    runtime = build_runtime(
+        runtime_name, script=script, memory=memory, tool_transport=httpx.MockTransport(handler), monkeypatch=monkeypatch
+    )
+
+    result = runtime.handle_message("visit-1", "check again")
+
+    assert result.eligibility_status == EligibilityStatus.ACTIVE
+    assert memory.get("visit-1").eligibility_status == EligibilityStatus.ACTIVE
