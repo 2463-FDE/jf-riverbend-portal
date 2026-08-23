@@ -155,6 +155,44 @@ describe("appointments — patient-context reset (w9-fixes 4.1)", () => {
   });
 });
 
+// Round-2 review (M3): editing the Patient ID while a load is still in
+// flight used to leave the page permanently busy — the abandoned request's
+// own cleanup refused to run once its id no longer matched the latest one,
+// and nothing else ever cleared apptsBusy.
+describe("appointments — an abandoned in-flight load releases the busy state (Round-2 review M3)", () => {
+  it("re-enables Load immediately after changing the patient id mid-load, even once the stale response arrives", async () => {
+    let resolveAppointments!: (r: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveAppointments = resolve;
+    });
+
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return jsonResponse({ id: 1042, name: "Maria Gonzalez" });
+      if (url.includes("/appointments")) return pending;
+      if (url.includes("/slots")) return jsonResponse({ items: [] });
+      return jsonResponse({});
+    });
+
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /^load$/i })).toBeDisabled());
+
+    // Edit the id before the pending /appointments call ever resolves.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1738" } });
+
+    expect(screen.getByRole("button", { name: /^load$/i })).not.toBeDisabled();
+
+    // The abandoned request finally resolving must not re-disable it or
+    // otherwise resurrect its result.
+    resolveAppointments(jsonResponse({ items: [] }));
+    await Promise.resolve();
+    expect(screen.getByRole("button", { name: /^load$/i })).not.toBeDisabled();
+  });
+});
+
 // Round-1 review (M2): a denied or failed appointments load has no `items`,
 // so it used to render exactly like "loaded successfully, zero
 // appointments" — indistinguishable from a patient who genuinely has none —

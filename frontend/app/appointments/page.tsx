@@ -132,6 +132,12 @@ export default function AppointmentsPage() {
     setLoadedPatientId("");
     latestRequestedIdRef.current = "";
     setAppts(null);
+    // Round-2 review (M3): invalidating latestRequestedIdRef above means the
+    // abandoned request's own `finally` will refuse to clear apptsBusy
+    // (its `latestRequestedIdRef.current === id` check now fails), so
+    // without this the Load button — disabled while apptsBusy is true —
+    // stayed disabled forever after editing the id mid-load.
+    setApptsBusy(false);
     setMsg(null);
     setReason("");
     setBusySlot(null);
