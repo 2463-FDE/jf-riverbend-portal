@@ -16,16 +16,20 @@ has to be able to tell apart.
 Run with:  pytest -m integration
 """
 import os
-import random
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
 httpx = pytest.importorskip("httpx")
+psycopg2 = pytest.importorskip("psycopg2")
 
 pytestmark = pytest.mark.integration
 
 GATEWAY = os.getenv("GATEWAY_URL", "http://localhost:8070")
+DB_DSN = os.getenv(
+    "DATABASE_URL", "postgresql://riverbend_app:riverbend_app_pw@localhost:5432/riverbend"
+)
 
 # Every domain service that verifies the shared token, with one guarded route
 # each. interop and roi were added in 7B.
@@ -144,20 +148,42 @@ def test_hl7_ingest_still_works_through_the_gateway(staff_token):
 
 def test_booking_still_works_through_the_gateway(staff_token):
     """A write, not just a read — the token has to be on POST as well as GET,
-    and those go through different helpers in the gateway."""
-    r = httpx.post(
-        f"{GATEWAY}/appointments",
-        headers=_auth(staff_token),
-        json={
-            "patient_id": 1042,
-            "provider_id": 1,
-            "slot_id": random.randint(900_000, 999_999),
-            "starts_at": "2026-09-01T10:00:00Z",
-            "idempotency_key": str(uuid.uuid4()),
-        },
-        timeout=25,
-    )
-    assert r.status_code == 201 and not _rejected(r), r.text
+    and those go through different helpers in the gateway.
+
+    w9-fixes P0 4.2/4.3: this used to book a synthetic, out-of-range slot_id
+    (random.randint(900_000, 999_999)). That worked only because booking
+    never checked the slot actually existed and was open — book.py's
+    _lock_open_slot now requires both (and a future start_at), so a
+    synthetic id is refused the same way a genuinely taken slot is. What
+    this test is actually about (the internal-service-token reaching the
+    gateway's POST helper) needs a real, throwaway slot instead."""
+    start = datetime.utcnow() + timedelta(days=3)
+    with psycopg2.connect(DB_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO slots (provider_id, location, start_at, end_at, status) "
+            "VALUES (1, 'Riverbend Main', %s, %s, 'open') RETURNING id",
+            (start, start + timedelta(minutes=30)),
+        )
+        slot_id = cur.fetchone()[0]
+        conn.commit()
+
+    try:
+        r = httpx.post(
+            f"{GATEWAY}/appointments",
+            headers=_auth(staff_token),
+            json={
+                "patient_id": 1042,
+                "slot_id": slot_id,
+                "idempotency_key": str(uuid.uuid4()),
+            },
+            timeout=25,
+        )
+        assert r.status_code == 201 and not _rejected(r), r.text
+    finally:
+        with psycopg2.connect(DB_DSN) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM appointments WHERE slot_id = %s", (slot_id,))
+            cur.execute("DELETE FROM slots WHERE id = %s", (slot_id,))
+            conn.commit()
 
 
 def test_healthz_stays_reachable_without_a_token():
