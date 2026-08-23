@@ -56,6 +56,21 @@ CREATE TABLE IF NOT EXISTS thread_messages (
 CREATE UNIQUE INDEX IF NOT EXISTS thread_messages_sender_thread_idem_key
     ON thread_messages (sender_user_id, thread_id, idempotency_key);
 
+-- Migration-compatibility fix for the MSG-002 correction above: this file
+-- ran against real deployments BEFORE this correction existed, and
+-- apply.sh re-applies every file unconditionally against a database at any
+-- prior point (see that script's own docstring) — it does not track "this
+-- one already ran". A database from before this fix already has the OLD,
+-- sender+key-only index, and leaving it in place is not merely redundant:
+-- it still REJECTS the very insert the new (sender, thread, key) index and
+-- the application code now correctly allow (the same idempotency_key reused
+-- by one sender across two different threads), turning the fix into a
+-- database-level IntegrityError regardless of what the code now permits.
+-- The new index is created FIRST, so uniqueness is never unenforced even
+-- for the instant between these two statements; the old one is then
+-- dropped only if it is actually still there.
+DROP INDEX IF EXISTS thread_messages_sender_idem_key;
+
 CREATE INDEX IF NOT EXISTS thread_messages_thread_idx
     ON thread_messages (thread_id, created_at);
 
