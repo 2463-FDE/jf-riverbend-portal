@@ -91,3 +91,12 @@ describe("signing out of a shared workstation", () => {
     expect(alert.textContent).toMatch(/try again/i);
   });
 });
+
+describe("the notification dot for a non-patient session", () => {
+  it("is unchanged — still shown, since suppressing it (W9.1) is scoped to patient sessions only", () => {
+    const { container } = render(<AppShell><div /></AppShell>);
+
+    expect(container.querySelector(".rb-iconbtn__dot")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /notifications \(1 new\)/i })).toBeInTheDocument();
+  });
+});

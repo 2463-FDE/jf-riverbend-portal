@@ -34,17 +34,39 @@ const NAV: NavItem[] = [
   { href: "/roi", label: "Release of Information", icon: <IconRoi className="rb-nav__icon" /> },
 ];
 
-const NAV_SOON: NavItem[] = [
-  { href: "#", label: "Messages", icon: <IconMessages className="rb-nav__icon" />, soon: true },
-  { href: "#", label: "Billing", icon: <IconBilling className="rb-nav__icon" />, soon: true },
-];
+// Nothing left to park here — Billing became real (Coverage & Eligibility,
+// W9.3, see NAV_COVERAGE below) the same way Messages did in W9.2. Kept as
+// an empty list rather than removed outright: the next placeholder this
+// product needs has somewhere to go without re-deriving the "Soon" styling.
+const NAV_SOON: NavItem[] = [];
+
+const NAV_MESSAGES: NavItem = {
+  href: "/messages",
+  label: "Messages",
+  icon: <IconMessages className="rb-nav__icon" />,
+};
+
+// Deliberately NOT labelled "Billing" — this repository has coverage and
+// eligibility capabilities and nothing else (no claims, invoices, balances,
+// or payments exist anywhere in the schema), and the page itself refuses to
+// imply otherwise. See app/coverage/page.tsx's own docstring.
+const NAV_COVERAGE: NavItem = {
+  href: "/coverage",
+  label: "Coverage & Eligibility",
+  icon: <IconBilling className="rb-nav__icon" />,
+};
 
 // What a patient sees. Every entry in NAV above is a staff route that a
 // patient account is refused — the `patient` role holds no staff permission
 // at all — so showing them that menu would be five links that each fail. The
-// navigation has to reflect the principal, not just the branding.
+// navigation has to reflect the principal, not just the branding. Appointments
+// and Coverage/Profile join this list only once their own patient-self routes
+// exist and are tested (W9.3) — an entry that leads nowhere real is worse
+// than no entry.
 const NAV_PATIENT: NavItem[] = [
+  { href: "/", label: "Home", icon: <IconDashboard className="rb-nav__icon" /> },
   { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
+  NAV_MESSAGES,
 ];
 
 // Shown only to roles that actually hold summary_review.decide. `staff` was
@@ -56,6 +78,18 @@ const NAV_PATIENT: NavItem[] = [
 // Same caveat as the patient nav: a courtesy, not a control. The gateway and
 // records-service refuse the route regardless of what is drawn here.
 const _MAY_REVIEW = new Set(["clinician", "nursing_ma"]);
+
+// Same two roles hold messages.read/messages.write (config/roles.yaml,
+// W9.2) — kept as its own set rather than reused from _MAY_REVIEW because
+// the two happen to match today for an unrelated reason (both are the
+// clinical-documentation roles) and a future role could hold one permission
+// without the other.
+const _MAY_MESSAGE = new Set(["clinician", "nursing_ma"]);
+
+// Roles holding billing.read (config/roles.yaml): front_desk, billing,
+// management, and the deprecated staff role. Not clinician/nursing_ma/lab/
+// roi_clerk/scheduler/it_admin — none of those holds any billing.* permission.
+const _MAY_VIEW_COVERAGE = new Set(["front_desk", "billing", "management", "staff"]);
 
 const NAV_REVIEW: NavItem = {
   href: "/review-queue",
@@ -69,7 +103,11 @@ const NAV_REVIEW: NavItem = {
 // server, which is where it matters.
 function navFor(user: PortalUser | null): NavItem[] {
   if (user?.role === "patient") return NAV_PATIENT;
-  return _MAY_REVIEW.has(user?.role ?? "") ? [...NAV, NAV_REVIEW] : NAV;
+  const role = user?.role ?? "";
+  let items = _MAY_REVIEW.has(role) ? [...NAV, NAV_REVIEW] : [...NAV];
+  if (_MAY_MESSAGE.has(role)) items = [...items, NAV_MESSAGES];
+  if (_MAY_VIEW_COVERAGE.has(role)) items = [...items, NAV_COVERAGE];
+  return items;
 }
 
 function Logo({ className }: { className?: string }) {
@@ -209,18 +247,26 @@ export default function AppShell({ children }: { children: ReactNode }) {
             );
           })}
 
-          <div className="rb-nav__section">More</div>
-          {(user?.role === "patient" ? [] : NAV_SOON).map((item) => (
-            <span
-              key={item.label}
-              className="rb-nav__item rb-nav__item--disabled"
-              aria-disabled="true"
-            >
-              {item.icon}
-              <span>{item.label}</span>
-              <span className="rb-nav__soon">Soon</span>
-            </span>
-          ))}
+          {/* NAV_SOON is currently empty for every role (Billing became
+              real in W9.3, the same way Messages did in W9.2) — the whole
+              section hides rather than showing a "More" label over nothing,
+              same reasoning as hiding it outright for patients below. */}
+          {(user?.role === "patient" ? [] : NAV_SOON).length > 0 && (
+            <>
+              <div className="rb-nav__section">More</div>
+              {NAV_SOON.map((item) => (
+                <span
+                  key={item.label}
+                  className="rb-nav__item rb-nav__item--disabled"
+                  aria-disabled="true"
+                >
+                  {item.icon}
+                  <span>{item.label}</span>
+                  <span className="rb-nav__soon">Soon</span>
+                </span>
+              ))}
+            </>
+          )}
         </nav>
       </aside>
 
@@ -228,9 +274,18 @@ export default function AppShell({ children }: { children: ReactNode }) {
         <span className="rb-topbar__title">{pageTitle}</span>
         <span className="rb-topbar__spacer" />
 
-        <button className="rb-iconbtn" aria-label="Notifications (1 new)" type="button">
+        {/* The "1 new" dot below is hardcoded, not a real unread count — true
+            for every session, but only patients are told so anywhere in the
+            product. Suppressed for patient sessions until W9.2 messaging
+            gives it a real source to report; staff behavior is unchanged
+            (out of scope here, not evaluated). */}
+        <button
+          className="rb-iconbtn"
+          aria-label={user?.role === "patient" ? "Notifications" : "Notifications (1 new)"}
+          type="button"
+        >
           <IconBell />
-          <span className="rb-iconbtn__dot" aria-hidden="true" />
+          {user?.role !== "patient" && <span className="rb-iconbtn__dot" aria-hidden="true" />}
         </button>
 
         <div className="rb-usermenu" ref={menuRef}>

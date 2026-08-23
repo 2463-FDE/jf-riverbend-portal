@@ -40,13 +40,22 @@ from libs.patient_view_agent import (
     run_patient_view,
 )
 from logging_config import configure
-from models import AgentDraftProvenance, AuditLog, Encounter, Patient, PatientSummaryReview, Record, User
+from models import (
+    AgentDraftProvenance,
+    AuditLog,
+    Encounter,
+    Patient,
+    PatientSummaryReview,
+    Record,
+    User,
+)
 from patient_access_gate import (
     SqlPatientAccessGate,
     active_patient_ids_query,
     parse_user_id,
 )
 import agent_drafts
+import messaging
 import patient_summary
 import review_queue
 import summary_agent_path
@@ -76,6 +85,13 @@ from schemas import (
     ReconciliationResult,
     RecordOut,
     RecordSearchHit,
+    CreateThreadRequest,
+    MessageOut,
+    SendMessageRequest,
+    ThreadDetailOut,
+    ThreadPage,
+    ThreadStatusRequest,
+    ThreadSummaryOut,
 )
 
 log = configure(settings.service_name)
@@ -1490,7 +1506,8 @@ def get_agent_summary(
     try:
         draft = agent_drafts.approved_draft(db, patient_id)
         if draft is None:
-            return AgentSummaryOut(available=False, patient_id=patient_id)
+            status = "pending" if agent_drafts.has_pending_draft(db, patient_id) else "none"
+            return AgentSummaryOut(available=False, patient_id=patient_id, status=status)
         # Display is the eighth stage, recorded under the draft's OWN
         # correlation id — which is only knowable after the row is read, so the
         # stage is emitted here rather than passed into the read above.
@@ -1503,7 +1520,7 @@ def get_agent_summary(
         raise HTTPException(status_code=503, detail="temporarily unavailable")
 
     return AgentSummaryOut(
-        available=True, patient_id=patient_id, version=detail.version,
+        available=True, patient_id=patient_id, status="approved", version=detail.version,
         provenance_label=detail.provenance_label,
         generated_text=detail.generated_text, citations=detail.citations,
     )
@@ -1564,4 +1581,306 @@ def request_agent_summary(
         patient_id=patient_id, version=detail.version, status=detail.status,
         provenance_label=detail.provenance_label, correlation_id=outcome.draft.correlation_id,
         citations=detail.citations,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# W9.2 — secure patient-clinician messaging.
+#
+# One set of routes serves both audiences, deliberately: `messages.read`/
+# `messages.write` are held by the `patient` role and by `clinician`/
+# `nursing_ma` alike (config/roles.yaml), and a patient's own
+# patient_access_grants row scopes them to exactly their own patient_id the
+# same way a clinician's grants scope them to theirs — there is no second
+# mechanism to keep in sync. The gateway is where the two audiences get
+# different-looking paths (/patient/me/... vs /threads); down here it is one
+# grant-scoped listing and one grant-scoped thread lookup.
+#
+# Thread creation is the one asymmetric action (only a patient starts a new
+# thread, per the client's UX — a clinician replies to one, closes it,
+# reopens it, but does not compose the first message), so it alone takes an
+# explicit patient_id in the path rather than deriving one from an existing
+# row.
+# --------------------------------------------------------------------------- #
+
+_MESSAGE_SUBJECT_MAX = 200
+_MESSAGE_BODY_MAX = 4000
+
+
+def _authorize_messaging(db, *, x_actor_id, x_actor_name, required_permission, audit_action) -> int:
+    """Same shape as _authorize_reviewer: require an identified actor AND the
+    role permission, for the routes with no patient-scoped grant gate ahead
+    of them (the grant check for these is embedded in the thread/listing
+    query itself — see thread_for_actor and thread_summaries)."""
+    actor_id = parse_user_id(x_actor_id)
+    if actor_id is None:
+        log.warning("messaging: refused a call with no identifiable actor")
+        raise HTTPException(status_code=403, detail="not authorized")
+    _authorize_actor_permission(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name,
+        required_permission=required_permission, audit_action=audit_action,
+    )
+    return actor_id
+
+
+def _clean_text(value: str, *, max_len: int, field: str) -> str:
+    cleaned = (value or "").strip()
+    if not (1 <= len(cleaned) <= max_len):
+        raise HTTPException(
+            status_code=400, detail=f"{field} must be 1-{max_len} characters"
+        )
+    return cleaned
+
+
+@app.get("/threads", response_model=ThreadPage)
+def list_threads(
+    limit: int = Query(default=50, ge=1, le=200),
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """The inbox — every thread for every patient this actor holds an active
+    grant for. For a patient account that is exactly their own thread(s),
+    via the same self-grant own_record.read already relies on; for a
+    clinician it is every patient they are currently granted."""
+    _verify_internal_token(x_internal_token)
+    actor_id = _authorize_messaging(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name,
+        required_permission="messages.read", audit_action="messages_inbox_read",
+    )
+    try:
+        items = messaging.thread_summaries(
+            db, patient_ids=active_patient_ids_query(actor_id), viewer_user_id=actor_id, limit=limit,
+        )
+    except SQLAlchemyError:
+        log.exception("messaging: inbox unreadable for actor_id=%s", actor_id)
+        raise HTTPException(status_code=503, detail="messages temporarily unavailable")
+    return ThreadPage(items=[ThreadSummaryOut(**i) for i in items])
+
+
+@app.post("/patients/{patient_id}/threads", response_model=ThreadDetailOut, status_code=201)
+def create_thread(
+    patient_id: int,
+    req: CreateThreadRequest,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """A patient starts a new thread with their care team.
+
+    Round-1 review (2026-08-23): permission + grant alone let a GRANTED
+    CLINICIAN call this route directly and originate a thread — contrary to
+    the client's UX (a clinician replies to a thread, closes it, reopens
+    it, but does not compose the first message) and to this route's own
+    docstring, which claimed a patient-only action the code did not
+    actually enforce. Fixed by requiring BOTH: the actor's own role is
+    'patient' AND their own users.patient_id equals the patient_id in the
+    path — not merely that they hold a grant for it. A patient's account
+    only ever has one self-grant, so in the correct case this is redundant
+    with the grant check; it is required so it cannot be true for anyone
+    else, permission and grant included.
+    """
+    _verify_internal_token(x_internal_token)
+    _authorize_or_deny(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
+        patient_id=patient_id, required_permission="messages.write",
+        audit_action="messages_thread_create",
+    )
+    actor_id = parse_user_id(x_actor_id)
+    if actor_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    actor = db.get(User, actor_id)
+    if actor is None or actor.role != "patient" or actor.patient_id != patient_id:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    subject = _clean_text(req.subject, max_len=_MESSAGE_SUBJECT_MAX, field="subject")
+    body = _clean_text(req.body, max_len=_MESSAGE_BODY_MAX, field="body")
+    idempotency_key = (req.idempotency_key or "").strip()
+    if not idempotency_key:
+        raise HTTPException(status_code=400, detail="idempotency_key is required")
+
+    try:
+        thread = messaging.create_thread(
+            db, patient_id=patient_id, sender_user_id=actor_id,
+            subject=subject, body=body, idempotency_key=idempotency_key,
+        )
+        # Committed together with its audit row (round-1 review): a separate
+        # _write_audit call commits on its own, so an audit-write failure
+        # could 503 a request whose thread/message was already durable, with
+        # no trace of it — the same failure decide_review's own comment
+        # documents and fixes the same way.
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=f"messages_thread_create thread_id={thread.id} patient_id={patient_id}",
+            )
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("messaging: thread create failed patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="could not start a new thread right now")
+
+    patient = db.get(Patient, patient_id)
+    return ThreadDetailOut(
+        id=thread.id, patient_id=thread.patient_id,
+        patient_name=patient.name if patient else None,
+        subject=thread.subject, status=thread.status,
+        created_at=thread.created_at.isoformat() if thread.created_at else "",
+        messages=messaging.messages_for(db, thread.id),
+    )
+
+
+@app.get("/threads/{thread_id}", response_model=ThreadDetailOut)
+def get_thread(
+    thread_id: int,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """A thread and its full message history. Reading it also advances the
+    caller's own read position to the latest message — the same "the read
+    IS the state change" shape /patients/{id}/summary already uses for the
+    review queue, applied here to unread counts instead."""
+    _verify_internal_token(x_internal_token)
+    actor_id = _authorize_messaging(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name,
+        required_permission="messages.read", audit_action="messages_thread_read",
+    )
+    try:
+        thread = messaging.thread_for_actor(
+            db, thread_id=thread_id, authorized_patient_ids=active_patient_ids_query(actor_id)
+        )
+        if thread is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+        rows = messaging.messages_for(db, thread.id)
+        if rows:
+            messaging.mark_read(db, thread_id=thread.id, user_id=actor_id, last_message_id=rows[-1]["id"])
+        patient = db.get(Patient, thread.patient_id)
+        db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("messaging: thread read failed thread_id=%s", thread_id)
+        raise HTTPException(status_code=503, detail="messages temporarily unavailable")
+
+    return ThreadDetailOut(
+        id=thread.id, patient_id=thread.patient_id,
+        patient_name=patient.name if patient else None,
+        subject=thread.subject, status=thread.status,
+        created_at=thread.created_at.isoformat() if thread.created_at else "",
+        messages=rows,
+    )
+
+
+@app.post("/threads/{thread_id}/messages", response_model=MessageOut, status_code=201)
+def reply_to_thread(
+    thread_id: int,
+    req: SendMessageRequest,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    _verify_internal_token(x_internal_token)
+    actor_id = _authorize_messaging(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name,
+        required_permission="messages.write", audit_action="messages_reply",
+    )
+    body = _clean_text(req.body, max_len=_MESSAGE_BODY_MAX, field="body")
+    idempotency_key = (req.idempotency_key or "").strip()
+    if not idempotency_key:
+        raise HTTPException(status_code=400, detail="idempotency_key is required")
+
+    try:
+        thread = messaging.thread_for_actor(
+            db, thread_id=thread_id, authorized_patient_ids=active_patient_ids_query(actor_id)
+        )
+        if thread is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+        message = messaging.send_message(
+            db, thread=thread, sender_user_id=actor_id, body=body, idempotency_key=idempotency_key,
+        )
+        # Committed together with its audit row — see create_thread's own
+        # comment on why a separate _write_audit call is wrong here.
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=f"messages_reply thread_id={thread_id} message_id={message.id}",
+            )
+        )
+        db.commit()
+    except messaging.MessagingError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("messaging: reply failed thread_id=%s", thread_id)
+        raise HTTPException(status_code=503, detail="could not send that message")
+
+    sender = db.get(User, actor_id)
+    return MessageOut(
+        id=message.id, thread_id=message.thread_id, sender_user_id=actor_id,
+        sender_name=(sender.full_name or sender.username) if sender else "Unknown",
+        body=message.body, created_at=message.created_at.isoformat() if message.created_at else "",
+    )
+
+
+@app.post("/threads/{thread_id}/status", response_model=ThreadDetailOut)
+def set_thread_status(
+    thread_id: int,
+    req: ThreadStatusRequest,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_actor_name: Optional[str] = Header(default=None, alias="X-Actor-Name"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Close or reopen. Staff-only — per the client's UX, a patient reads and
+    replies but does not control the thread's lifecycle."""
+    _verify_internal_token(x_internal_token)
+    actor_id = _authorize_messaging(
+        db, x_actor_id=x_actor_id, x_actor_name=x_actor_name,
+        required_permission="messages.write", audit_action="messages_set_status",
+    )
+    if _actor_role(db, actor_id) == "patient":
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    try:
+        thread = messaging.thread_for_actor(
+            db, thread_id=thread_id, authorized_patient_ids=active_patient_ids_query(actor_id)
+        )
+        if thread is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+        messaging.set_status(db, thread=thread, status=req.status)
+        # Committed together with its audit row — see create_thread's own
+        # comment on why a separate _write_audit call is wrong here.
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=f"messages_set_status thread_id={thread_id} status={req.status}",
+            )
+        )
+        db.commit()
+    except messaging.MessagingError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("messaging: status change failed thread_id=%s", thread_id)
+        raise HTTPException(status_code=503, detail="could not update that thread")
+
+    return ThreadDetailOut(
+        id=thread.id, patient_id=thread.patient_id, subject=thread.subject, status=thread.status,
+        created_at=thread.created_at.isoformat() if thread.created_at else "",
+        messages=messaging.messages_for(db, thread.id),
     )

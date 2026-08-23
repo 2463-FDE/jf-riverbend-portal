@@ -92,6 +92,14 @@ roles:
       # notes to a patient. Deciding is a clinical judgment, so it gets a
       # permission only clinical roles hold.
       - summary_review.decide
+      # Secure patient-clinician messaging (W9.2, new this cycle — not part
+      # of the 2026-08-13 signed matrix, same as summary_review.decide and
+      # own_record.read below weren't). Scoping to a specific patient's
+      # thread is the existing patient_access_grants check, not a new
+      # mechanism — this permission only says the role may use the feature
+      # at all.
+      - messages.read
+      - messages.write
 
   nursing_ma:
     description: Nursing and medical-assistant documentation (vitals, intake).
@@ -108,6 +116,8 @@ roles:
       - appointments.read
       - consents.read
       - summary_review.decide
+      - messages.read
+      - messages.write
 
   lab:
     description: Specimen intake and posting results.
@@ -189,6 +199,11 @@ roles:
     # path and clinician review, never the raw chart route a clinician uses.
     permissions:
       - own_record.read
+      # Secure patient-clinician messaging (W9.2). Same self-grant mechanism
+      # as own_record.read above scopes a patient to their own thread(s) —
+      # this permission only says the patient role may use the feature.
+      - messages.read
+      - messages.write
 
 default_role: staff
 

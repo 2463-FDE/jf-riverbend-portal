@@ -1,0 +1,132 @@
+import { describe, expect, it, vi } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import CoveragePage from "./page";
+
+// This screen must never show a full member id, and must never present a
+// simulated/stale/unknown result as active coverage — those are the two
+// failure shapes billing staff would actually act on incorrectly.
+
+vi.mock("../lib/session", () => ({ apiFetch: vi.fn() }));
+
+import { apiFetch } from "../lib/session";
+
+function ok(body: unknown): Response {
+  return { ok: true, status: 200, json: async () => body } as Response;
+}
+function denied(status: number): Response {
+  return { ok: false, status, json: async () => ({}) } as Response;
+}
+
+const COVERAGE = {
+  id: 1,
+  patient_id: 1737,
+  payer_name: "Acme Health",
+  plan_type: "PPO",
+  group_number: "GRP-1",
+  member_id_masked: "********6789",
+  status: "unknown",
+  verified_at: null,
+  has_member_id: true,
+};
+
+function mockRoutes(overrides: Partial<{ coverages: unknown; verify: unknown; name: unknown }> = {}) {
+  vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+    if (url.includes("/name")) return ok(overrides.name ?? { id: 1737, name: "Priya Khan" });
+    if (url.includes("/verify")) return ok(overrides.verify ?? { category: "simulated", message: "Synthetic training — no payer contacted" });
+    if (url.includes("/eligibility-status")) return ok({ category: "unknown", message: "Not yet verified" });
+    if (url.includes("/coverages")) return ok(overrides.coverages ?? { items: [COVERAGE] });
+    return ok({});
+  });
+}
+
+describe("Coverage & Eligibility", () => {
+  it("starts empty and loads coverage only after Load, with the member id masked", async () => {
+    mockRoutes();
+    render(<CoveragePage />);
+
+    const input = screen.getByLabelText(/patient id/i) as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/coverages"))).toBe(false);
+
+    fireEvent.change(input, { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    expect(await screen.findByText("Acme Health")).toBeInTheDocument();
+    expect(screen.getByText(/member id \*+6789/i)).toBeInTheDocument();
+    expect(screen.queryByText(/ABC123456789/)).not.toBeInTheDocument();
+  });
+
+  it("shows a denied message rather than any coverage content", async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return denied(403);
+      if (url.includes("/coverages")) return denied(403);
+      return ok({});
+    });
+    render(<CoveragePage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    expect(await screen.findByText(/not authorized/i)).toBeInTheDocument();
+    expect(screen.queryByText("Acme Health")).not.toBeInTheDocument();
+  });
+
+  it("shows an empty state when the patient has no coverage on file", async () => {
+    mockRoutes({ coverages: { items: [] } });
+    render(<CoveragePage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    expect(await screen.findByText(/no coverage on file/i)).toBeInTheDocument();
+  });
+
+  it("labels a simulated verification explicitly and never as active", async () => {
+    mockRoutes();
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await screen.findByText("Acme Health");
+
+    fireEvent.click(screen.getByRole("button", { name: /request verification/i }));
+
+    expect((await screen.findAllByText(/synthetic training/i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^active$/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a retry control only when the backend says retry is allowed", async () => {
+    mockRoutes({ verify: { category: "unavailable", message: "Temporarily unavailable", can_retry: true } });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await screen.findByText("Acme Health");
+
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /request verification/i }));
+
+    expect(await screen.findByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+  });
+
+  it("disables requesting a verification when there is no member id on file", async () => {
+    mockRoutes({ coverages: { items: [{ ...COVERAGE, member_id_masked: null, has_member_id: false }] } });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await screen.findByText(/no member id on file/i);
+    expect(screen.getByRole("button", { name: /request verification/i })).toBeDisabled();
+  });
+
+  it("shows a plain error when the coverage list fails to load", async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return ok({ id: 1737, name: "Priya Khan" });
+      if (url.includes("/coverages")) return denied(500);
+      return ok({});
+    });
+    render(<CoveragePage />);
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1737" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    expect(await screen.findByText(/could not load coverage/i)).toBeInTheDocument();
+  });
+});

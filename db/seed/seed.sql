@@ -426,8 +426,8 @@ INSERT INTO insurance_coverages (patient_id, payer_name, member_id, group_number
  (1588, 'Blue Cross Blue Shield', 'BCBS4471', 'GRP88', 'PPO', 'active', '2026-06-22 09:14:30'),
  (1043, 'Aetna', 'AETNA9920', 'GRP12', 'PPO', 'active', '2026-06-22 09:17:50'),
  (1737, 'Kaiser', 'KAISER5591', 'GRP41', 'HMO', 'active', '2026-03-05 08:55:00'),
- (1738, 'Aetna', 'AETNA7381', 'GRP22', 'PPO', 'active', '2026-03-18 09:25:00'),
- (1739, 'UnitedHealthcare', 'UHC7392', 'GRP63', 'HMO', 'active', '2026-03-22 14:20:00'),
+ (1738, 'Aetna', 'AETNA7381', 'GRP22', 'PPO', 'stale', '2026-03-18 09:25:00'),
+ (1739, 'UnitedHealthcare', 'UHC7392', 'GRP63', 'HMO', 'unknown', NULL),
  (1601, 'Medi-Cal', 'MEDI9812', 'GRP77', 'Medicaid', 'unknown', NULL),
  (1602, 'Medi-Cal', 'MEDI2426', 'GRP76', 'Medicaid', 'active', '2026-06-01 12:00:00'),
  (1603, 'UnitedHealthcare', 'UNIT9976', 'GRP29', 'HMO', 'active', '2026-06-01 12:00:00'),
@@ -2581,4 +2581,19 @@ INSERT INTO audit_logs (actor, message) VALUES
  ('records-service', 'GET /patients/1692/records 200'),
  ('records-service', 'GET /patients/1730/records 200'),
  ('records-service', 'GET /patients/1750/records 200');
+
+INSERT INTO message_threads (id, patient_id, subject, status, created_by, created_at, updated_at) VALUES
+ (1, 1738, 'Question about my blood pressure readings', 'open', 14, '2026-08-20 09:00:00', '2026-08-20 09:00:00'),
+ (2, 1739, 'Refill request for my inhaler', 'open', 15, '2026-08-18 14:00:00', '2026-08-18 14:32:00');
+
+INSERT INTO thread_messages (id, thread_id, sender_user_id, body, idempotency_key, created_at) VALUES
+ (1, 1, 14, 'My home readings have been running a bit high this week, should I be concerned?', 'seed-1738-msg-1', '2026-08-20 09:00:00'),
+ (2, 2, 15, 'Hi, I am almost out of my albuterol inhaler, can you send a refill?', 'seed-1739-msg-1', '2026-08-18 14:00:00'),
+ (3, 2, 6, 'Sent a refill to your pharmacy on file. Let us know if you do not see it by tomorrow.', 'seed-1739-msg-2', '2026-08-18 14:32:00');
+
+SELECT setval('message_threads_id_seq', 2, true);
+SELECT setval('thread_messages_id_seq', 3, true);
+
+INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id, updated_at) VALUES
+ (2, 15, 3, '2026-08-18 15:00:00');
 

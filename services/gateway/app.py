@@ -32,6 +32,7 @@ any patient-specific grant could exist for them, so it stays gated on
 "authenticated staff" only, same as before — see proxy_patients below and
 the PR's "Open decisions" section.
 """
+import json
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -50,7 +51,7 @@ import roles_config
 from config import settings
 from db import get_db
 from logging_config import configure
-from models import Patient, PatientAccessGrant, PatientInvitation, User
+from models import InsuranceCoverage, Patient, PatientAccessGrant, PatientInvitation, User
 from security import create_session, destroy_session, get_session, hash_password, verify_password
 from visit_authorization import find_authorized_appointment, has_active_grant, latest_insurance_member_id, parse_user_id
 
@@ -690,6 +691,264 @@ def proxy_eligibility_job_retry(job_id: str, session: dict = Depends(require_per
     )
 
 
+# --------------------------------------------------------------------------- #
+# W9.3 — Coverage & Eligibility workspace.
+#
+# The two routes above (proxy_eligibility_job_status/retry) are exactly the
+# "arbitrary job id is not an authorization boundary" gap their own comment
+# documents — this workspace does not use them. Every route below is scoped
+# by patient_id AND coverage_id, checks an active patient_access_grants row
+# the same way proxy_visit_message does (has_active_grant, not merely the
+# role permission), verifies the coverage belongs to the named patient
+# BEFORE touching eligibility-service, and never returns a raw job_id to the
+# browser — insurance_coverages.verification_job_id (migration 023) is the
+# only place a job id is held, read and written server-side only.
+# --------------------------------------------------------------------------- #
+
+def _mask_member_id(member_id: Optional[str]) -> Optional[str]:
+    """All but the last 4 characters. A masked id is still enough for staff
+    to confirm they picked the right coverage without displaying the whole
+    identifier on a screen that is not the record of it."""
+    if not member_id:
+        return None
+    tail = member_id[-4:]
+    return f"{'*' * max(len(member_id) - 4, 0)}{tail}"
+
+
+def _coverage_out(c: InsuranceCoverage) -> dict:
+    return {
+        "id": c.id,
+        "patient_id": c.patient_id,
+        "payer_name": c.payer_name,
+        "plan_type": c.plan_type,
+        "group_number": c.group_number,
+        "member_id_masked": _mask_member_id(c.member_id),
+        "status": c.status,
+        "verified_at": c.verified_at.isoformat() if c.verified_at else None,
+        "has_member_id": bool(c.member_id),
+    }
+
+
+def _ok_body(result) -> Optional[dict]:
+    """The parsed JSON body from a forward_status=True call, only when it
+    actually succeeded (200) — None for any other status or a network
+    failure, so callers branch on "did I get a usable body" once instead of
+    re-deriving it from a JSONResponse's status_code at each call site."""
+    if isinstance(result, JSONResponse):
+        if result.status_code != 200:
+            return None
+        return json.loads(result.body) if result.body else {}
+    return result if isinstance(result, dict) else None
+
+
+def _authorized_coverage(
+    db: Session, *, patient_id: int, coverage_id: int, for_update: bool = False
+) -> InsuranceCoverage:
+    """The coverage, or a 404 — identically, whether the id does not exist or
+    belongs to a different patient. Never distinguish the two: a coverage id
+    is as guessable/sequential as any other integer primary key here.
+
+    `for_update` (round-1 review, 2026-08-23): verify and the status check
+    both read `verification_job_id`, decide something from it, and write it
+    or the coverage's status back — without a lock, two concurrent calls can
+    both read the same "nothing in flight" state and each create its own
+    live payer job for the same coverage. SELECT ... FOR UPDATE serializes
+    them on this row for the rest of the transaction, so the second caller's
+    read reflects the first caller's write. (SQLite, used by this file's
+    tests, has no row-level lock and silently ignores the clause — the
+    tests exercise the mapping logic, not the concurrency guarantee itself,
+    which only a real concurrent-request test against Postgres could.)
+    """
+    query = select(InsuranceCoverage).where(
+        InsuranceCoverage.id == coverage_id, InsuranceCoverage.patient_id == patient_id
+    )
+    if for_update:
+        query = query.with_for_update()
+    coverage = db.execute(query).scalar_one_or_none()
+    if coverage is None:
+        raise HTTPException(status_code=404, detail="coverage not found")
+    return coverage
+
+
+def _require_patient_grant(db: Session, session: dict, patient_id: int) -> int:
+    actor_id = parse_user_id(session.get("user_id"))
+    if actor_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    if not has_active_grant(db, user_id=actor_id, patient_id=patient_id):
+        raise HTTPException(status_code=403, detail="not authorized")
+    return actor_id
+
+
+@app.get("/patients/{patient_id}/coverages")
+def list_patient_coverages(
+    patient_id: int,
+    session: dict = Depends(require_permission("billing.read")),
+    db: Session = Depends(get_db),
+):
+    _require_patient_grant(db, session, patient_id)
+    rows = db.execute(
+        select(InsuranceCoverage).where(InsuranceCoverage.patient_id == patient_id).order_by(InsuranceCoverage.id)
+    ).scalars().all()
+    return {"items": [_coverage_out(c) for c in rows]}
+
+
+# Job status -> a safe display category. Never the raw exception type name
+# (see EligibilityJobResponse.error's own "PHI-safe" comment upstream) —
+# mapped into the SAME small vocabulary a "succeeded" result's result_status
+# already uses, so the frontend has one status field to branch on regardless
+# of which stage of the job produced it.
+def _job_category(job_status: str, result_status: Optional[str], manual_retry_count: int, max_manual_retries: int) -> dict:
+    if job_status in ("queued", "running"):
+        return {"category": "pending", "can_retry": False}
+    if job_status == "succeeded":
+        return {"category": result_status or "unknown", "can_retry": False}
+    if job_status in ("failed", "retryable"):
+        return {"category": "unavailable", "can_retry": manual_retry_count < max_manual_retries}
+    if job_status == "dead_letter":
+        return {"category": "unavailable", "can_retry": manual_retry_count < max_manual_retries}
+    return {"category": "unknown", "can_retry": False}
+
+
+@app.post("/patients/{patient_id}/coverages/{coverage_id}/verify", status_code=201)
+def verify_patient_coverage(
+    patient_id: int,
+    coverage_id: int,
+    session: dict = Depends(require_permission("billing.write")),
+    db: Session = Depends(get_db),
+):
+    """Request a verification. Derives the member id server-side from the
+    coverage row the path already named and authorized — the browser never
+    supplies or sees it in full (see _mask_member_id above).
+
+    for_update=True (round-1 review): without a lock, two near-simultaneous
+    Verify clicks both read no-job-in-flight and both create a live payer
+    job for the same coverage. Held through this whole function, including
+    the reuse-check GET to eligibility-service — the second caller blocks
+    until the first's transaction ends and then reads the id it just wrote."""
+    _require_patient_grant(db, session, patient_id)
+    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id, for_update=True)
+    if not coverage.member_id:
+        raise HTTPException(status_code=400, detail="this coverage has no member id on file")
+
+    if not settings.payer_api_key:
+        # No real payer key exists in this training environment (never will,
+        # per ADR/README) — make NO outbound call at all rather than run the
+        # real check pipeline with nothing behind it. This is the entire
+        # simulation boundary: one branch, taken before eligibility-service
+        # is ever contacted, not a flag threaded through it.
+        return {"category": "simulated", "message": "Synthetic training — no payer contacted", "can_retry": False}
+
+    headers = _correlation_headers()
+    headers["X-Internal-Token"] = settings.internal_service_token
+
+    # Idempotent: reuse a job already in flight for this coverage rather
+    # than starting a second live check behind it. Only QUEUED/RUNNING
+    # counts as "in flight" — a terminal job (succeeded, failed, dead_letter)
+    # means this Verify click is a genuinely new request, not a duplicate.
+    if coverage.verification_job_id:
+        existing = _get(
+            "eligibility", f"/eligibility/jobs/{coverage.verification_job_id}",
+            headers=headers, forward_status=True,
+        )
+        existing_body = _ok_body(existing)
+        if existing_body and existing_body.get("status") in ("queued", "running"):
+            return _job_category(
+                existing_body.get("status", ""), existing_body.get("result_status"),
+                existing_body.get("manual_retry_count", 0), existing_body.get("max_manual_retries", 0),
+            )
+
+    result = _post(
+        "eligibility", "/eligibility/jobs",
+        {"insurance_id": coverage.member_id, "idempotency_key": f"coverage:{coverage_id}:{uuid.uuid4().hex}"},
+        headers=headers,
+    )
+    if not isinstance(result, dict) or "job_id" not in result:
+        raise HTTPException(status_code=503, detail="could not start a verification right now")
+
+    coverage.verification_job_id = result["job_id"]
+    db.commit()
+    mapped = _job_category(result.get("status", ""), result.get("result_status"),
+                            result.get("manual_retry_count", 0), result.get("max_manual_retries", 0))
+    return mapped
+
+
+@app.get("/patients/{patient_id}/coverages/{coverage_id}/eligibility-status")
+def get_coverage_eligibility_status(
+    patient_id: int,
+    coverage_id: int,
+    session: dict = Depends(require_permission("billing.read")),
+    db: Session = Depends(get_db),
+):
+    # for_update=True (round-1 review): this route can also durably write
+    # coverage.status/verified_at below on a terminal result — the same
+    # concurrent-write hazard verify has, held the same way.
+    _require_patient_grant(db, session, patient_id)
+    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id, for_update=True)
+    if not coverage.verification_job_id:
+        return {"category": "unknown", "message": "Not yet verified", "can_retry": False}
+
+    headers = _correlation_headers()
+    headers["X-Internal-Token"] = settings.internal_service_token
+    result = _get(
+        "eligibility", f"/eligibility/jobs/{coverage.verification_job_id}", headers=headers, forward_status=True
+    )
+    body = _ok_body(result)
+    if body is None:
+        if isinstance(result, JSONResponse) and result.status_code == 404:
+            # The job record fell out of Redis (its TTL is bounded — see
+            # jobs.py) — not an error, just nothing left to report. A fresh
+            # Verify starts a new one.
+            return {"category": "unknown", "message": "Not yet verified", "can_retry": False}
+        raise HTTPException(status_code=503, detail="could not check verification status right now")
+
+    mapped = _job_category(body.get("status", ""), body.get("result_status"),
+                            body.get("manual_retry_count", 0), body.get("max_manual_retries", 0))
+    if mapped["category"] in ("active", "inactive", "stale", "unknown") and body.get("status") == "succeeded":
+        # A terminal, checked result is what makes the durable record
+        # trustworthy going forward — the same "outcome truthfulness" the
+        # reference asks for, not merely a transient poll response.
+        coverage.status = mapped["category"]
+        # func.now() — the moment THIS check recorded the result, not a
+        # re-parse of the job's own ISO timestamp string (which would need
+        # parsing to be a real datetime for a timestamptz column anyway).
+        coverage.verified_at = func.now()
+        db.commit()
+    return mapped
+
+
+@app.post("/patients/{patient_id}/coverages/{coverage_id}/eligibility-retry")
+def retry_coverage_eligibility(
+    patient_id: int,
+    coverage_id: int,
+    session: dict = Depends(require_permission("billing.write")),
+    db: Session = Depends(get_db),
+):
+    _require_patient_grant(db, session, patient_id)
+    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id)
+    if not coverage.verification_job_id:
+        raise HTTPException(status_code=409, detail="nothing to retry — request a verification first")
+
+    headers = _correlation_headers()
+    headers["X-Internal-Token"] = settings.internal_service_token
+    result = _post(
+        "eligibility", f"/eligibility/jobs/{coverage.verification_job_id}/retry", {},
+        headers=headers, forward_status=True,
+    )
+    body = _ok_body(result)
+    if body is None and isinstance(result, JSONResponse) and result.status_code == 409:
+        # Current job state is not eligible for a manual retry right now
+        # (still in flight, already succeeded, or retries exhausted) —
+        # eligibility-service's own body IS the current job even on 409, so
+        # map it the same way a status check would rather than surfacing a
+        # bare error.
+        body = json.loads(result.body) if result.body else {}
+    if body is None:
+        raise HTTPException(status_code=503, detail="could not retry this verification right now")
+
+    return _job_category(body.get("status", ""), body.get("result_status"),
+                          body.get("manual_retry_count", 0), body.get("max_manual_retries", 0))
+
+
 @app.post("/visits/{visit_id}/messages")
 def proxy_visit_message(
     visit_id: str,
@@ -1312,4 +1571,86 @@ def proxy_request_own_agent_summary(
         log.warning("agent summary request: account has no linked patient user_id=%s", user_id)
         raise HTTPException(status_code=403, detail="not authorized")
     return _post("records", f"/patients/{patient_id}/agent-summary/request", {},
+                 headers=_agent_headers(session), forward_status=True)
+
+
+# --------------------------------------------------------------------------- #
+# W9.2 — secure patient-clinician messaging.
+#
+# messages.read/messages.write are held by BOTH the patient role and the
+# clinician/nursing_ma roles (config/roles.yaml) — the per-patient scoping is
+# the grant records-service checks, the same mechanism own_record.read and
+# summary_review.decide already piggyback on. So /threads, /threads/{id} and
+# its two actions are single shared routes: a patient calling them only ever
+# sees their own thread(s), because that is the only patient_id their own
+# grant matches, with no separate "self" endpoint required. Only creating a
+# NEW thread needs the session-resolved patient_id, the same way requesting
+# an agent summary does above — see proxy_create_own_thread.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/threads")
+def proxy_list_threads(
+    limit: int = 50,
+    session: dict = Depends(require_permission("messages.read")),
+):
+    return _get("records", "/threads", params={"limit": limit},
+                headers=_agent_headers(session), forward_status=True)
+
+
+@app.get("/threads/{thread_id}")
+def proxy_get_thread(
+    thread_id: int,
+    session: dict = Depends(require_permission("messages.read")),
+):
+    return _get("records", f"/threads/{thread_id}",
+                headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/threads/{thread_id}/messages", status_code=201)
+def proxy_reply_to_thread(
+    thread_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("messages.write")),
+):
+    return _post("records", f"/threads/{thread_id}/messages", payload,
+                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/threads/{thread_id}/status")
+def proxy_set_thread_status(
+    thread_id: int,
+    payload: dict,
+    session: dict = Depends(require_permission("messages.write")),
+):
+    """Close/reopen. records-service enforces staff-only on top of the grant
+    check — a patient holding messages.write can still reply, just not
+    change the thread's lifecycle."""
+    return _post("records", f"/threads/{thread_id}/status", payload,
+                 headers=_agent_headers(session), forward_status=True)
+
+
+@app.post("/patient/me/threads", status_code=201)
+def proxy_create_own_thread(
+    payload: dict,
+    session: dict = Depends(require_permission("messages.write")),
+    db: Session = Depends(get_db),
+):
+    """A patient starts a new thread. Same session-resolution as
+    /patient/me/agent-summary/request above — the chart comes from the
+    account, never from anything the browser supplies."""
+    user_id = parse_user_id(session.get("user_id"))
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        patient_id = db.execute(
+            select(User.patient_id).where(User.id == user_id)
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        log.exception("messages: account store unreadable user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if patient_id is None:
+        log.warning("messages: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+    return _post("records", f"/patients/{patient_id}/threads", payload,
                  headers=_agent_headers(session), forward_status=True)
