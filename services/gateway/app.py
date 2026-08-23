@@ -1234,7 +1234,13 @@ def proxy_cancel(
         raise HTTPException(status_code=503, detail="authorization store unavailable")
     if appointment is None:
         raise HTTPException(status_code=403, detail="not authorized")
-    return _post("scheduling", f"/appointments/{appointment_id}/cancel", {})
+    # Round-1 review: without forward_status, _post flattens ANY
+    # scheduling-service response into a 200 (a 404 for an already-deleted
+    # appointment, a 503 outage) — the browser's `r.ok` check would then read
+    # "Appointment cancelled." for a cancel that never happened, with the
+    # appointment still confirmed and its slot still booked. Same reasoning
+    # as proxy_book's own forward_status=True below.
+    return _post("scheduling", f"/appointments/{appointment_id}/cancel", {}, forward_status=True)
 
 
 # --------------------------------------------------------------------------- #

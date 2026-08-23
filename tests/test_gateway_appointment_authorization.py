@@ -160,3 +160,18 @@ def test_cancelling_a_nonexistent_appointment_is_denied_identically(env, monkeyp
     resp = api.post("/appointments/999999/cancel", headers=_auth())
 
     assert resp.status_code == 403
+
+
+def test_cancelling_an_authorized_appointment_surfaces_a_scheduling_failure(env, monkeypatch):
+    """Round-1 review (M1): proxy_cancel used to call _post without
+    forward_status, so a non-2xx from scheduling-service (a 404 for an
+    already-gone appointment, a 503 outage) was flattened into a bare 200 —
+    the browser's `r.ok` check would then report "Appointment cancelled."
+    for a cancel that never happened. The grant check passing must not be
+    mistaken for the cancel itself succeeding."""
+    api, _ = env
+    monkeypatch.setattr(app_mod.httpx, "post", lambda *a, **k: _FakeResponse(503, {"detail": "database unavailable"}))
+
+    resp = api.post(f"/appointments/{GRANTED_APPT_ID}/cancel", headers=_auth())
+
+    assert resp.status_code == 503

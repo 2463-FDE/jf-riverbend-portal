@@ -10,8 +10,8 @@ vi.mock("../lib/session", () => ({ apiFetch: vi.fn() }));
 
 import { apiFetch } from "../lib/session";
 
-function jsonResponse(body: unknown, ok = true): Response {
-  return { ok, json: async () => body } as Response;
+function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 500): Response {
+  return { ok, status, json: async () => body } as Response;
 }
 
 function mockRoutes(nameByPatient: Record<string, string>) {
@@ -152,5 +152,53 @@ describe("appointments — patient-context reset (w9-fixes 4.1)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
     await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /^book$/i })).not.toBeDisabled();
+  });
+});
+
+// Round-1 review (M2): a denied or failed appointments load has no `items`,
+// so it used to render exactly like "loaded successfully, zero
+// appointments" — indistinguishable from a patient who genuinely has none —
+// while still leaving Book enabled for a patient never actually confirmed.
+describe("appointments — a failed load surfaces an error, not an empty success (Round-1 review M2)", () => {
+  const SLOT = {
+    id: 9,
+    provider: "Dr. X",
+    location: "Riverbend Main",
+    start_at: "2026-09-01T10:00:00Z",
+    end_at: "2026-09-01T10:30:00Z",
+    status: "open",
+  };
+
+  function mockLoadStatus(status: number) {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.includes("/name")) return jsonResponse({ id: 1042, name: "Maria Gonzalez" });
+      if (url.includes("/appointments")) return jsonResponse({ detail: "denied" }, false, status);
+      if (url.includes("/slots")) return jsonResponse({ items: [SLOT] });
+      return jsonResponse({});
+    });
+  }
+
+  it("shows an authorization error, not 'no appointments', on a 403", async () => {
+    mockLoadStatus(403);
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByText(/not authorized to view/i)).toBeInTheDocument());
+    expect(screen.queryByText(/no appointments for this patient/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument(); // loadedPatientId never set
+  });
+
+  it("shows a load error, not 'no appointments', on a 500, and keeps Book disabled", async () => {
+    mockLoadStatus(500);
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+
+    await waitFor(() => expect(screen.getByText(/could not load appointments/i)).toBeInTheDocument());
+    expect(screen.queryByText(/no appointments for this patient/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^book$/i })).toBeDisabled();
   });
 });

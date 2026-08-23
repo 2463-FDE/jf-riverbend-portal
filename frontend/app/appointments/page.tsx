@@ -59,22 +59,49 @@ export default function AppointmentsPage() {
     return key;
   }
 
+  // Round-1 review (M2): tracks the most recently REQUESTED id, independent
+  // of loadedPatientId — which is now set only on a SUCCESSFUL load (see
+  // below), so it can no longer double as "is this response still current."
+  const latestRequestedIdRef = useRef("");
+
   // Takes the id explicitly rather than reading patientId off state, so a
   // post-booking refresh can target the id that was actually just booked for
   // (loadedPatientId) without racing whatever the input currently holds.
   const loadAppts = useCallback(async (id: string) => {
     if (!isValidPatientId(id)) return;
+    latestRequestedIdRef.current = id;
     setAppts(null);
     setApptsBusy(true);
     try {
       const r = await apiFetch(`/api/appointments?patient_id=${encodeURIComponent(id)}`);
+      if (latestRequestedIdRef.current !== id) return; // superseded by a later Load
+      if (!r.ok) {
+        // Round-1 review (M2): a denied or failed load has no `items`, so
+        // treating it like a real response rendered "No appointments for
+        // this patient yet." — indistinguishable from a patient who
+        // genuinely has none — and left Book enabled for a patient that was
+        // never actually confirmed. loadedPatientId is left unset here
+        // (never set eagerly by handleLoad any more), so Book stays
+        // disabled and the banner carries the real reason instead.
+        setMsg({
+          kind: "err",
+          text:
+            r.status === 403
+              ? "You are not authorized to view this patient's appointments."
+              : "Could not load appointments for this patient.",
+        });
+        return;
+      }
       const d = await r.json();
-      if (loadedPatientIdRef.current !== id) return; // superseded by a later Load
+      if (latestRequestedIdRef.current !== id) return;
+      setLoadedPatientId(id);
       setAppts(Array.isArray(d) ? d : (d.items ?? []));
     } catch {
-      if (loadedPatientIdRef.current === id) setAppts([]);
+      if (latestRequestedIdRef.current === id) {
+        setMsg({ kind: "err", text: "Could not load appointments for this patient." });
+      }
     } finally {
-      if (loadedPatientIdRef.current === id) setApptsBusy(false);
+      if (latestRequestedIdRef.current === id) setApptsBusy(false);
     }
   }, []);
 
@@ -103,6 +130,7 @@ export default function AppointmentsPage() {
     // book/cancel spinner, or a reused idempotency key could otherwise be
     // misread as belonging to whoever is loaded next.
     setLoadedPatientId("");
+    latestRequestedIdRef.current = "";
     setAppts(null);
     setMsg(null);
     setReason("");
@@ -113,7 +141,15 @@ export default function AppointmentsPage() {
 
   function handleLoad() {
     if (!isValidPatientId(patientId)) return;
-    setLoadedPatientId(patientId);
+    // Cleared here rather than inside loadAppts itself — book()/cancel()
+    // also call loadAppts, as a post-mutation refresh, and must not have
+    // their own just-set success banner wiped by that internal call.
+    setMsg(null);
+    // Round-1 review (M2): loadedPatientId is now set by loadAppts itself,
+    // only once that call actually succeeds — setting it here unconditionally
+    // is exactly what let a denied/failed load look identical to "loaded, zero
+    // appointments" and left Book enabled for a patient that was never
+    // confirmed.
     loadAppts(patientId);
   }
 
