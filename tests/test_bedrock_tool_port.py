@@ -136,3 +136,17 @@ def test_unexpected_response_shape_is_normalized_to_provider_call_error(monkeypa
 
     with pytest.raises(ProviderCallError):
         _model().converse([], _TOOLS, timeout=10)
+
+
+def test_boto3_not_installed_is_normalized_to_provider_not_configured(monkeypatch):
+    # w9-fixes P0 4.6: __init__'s own config check can't catch this — a real
+    # BEDROCK_MODEL_ID/AWS_REGION can be set while the image simply lacks the
+    # SDK, which used to be eligibility-service's own deliberate stance
+    # before this PR pinned boto3/botocore there. Kept as defense in depth
+    # for any other broken deployment. Setting sys.modules["boto3"] = None is
+    # the standard way to make `import boto3` raise ImportError without
+    # needing boto3 actually absent from the test environment.
+    monkeypatch.setitem(sys.modules, "boto3", None)
+
+    with pytest.raises(ProviderNotConfiguredError):
+        _model().converse([], _TOOLS, timeout=10)
