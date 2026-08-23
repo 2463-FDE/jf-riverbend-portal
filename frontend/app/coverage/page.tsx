@@ -1,11 +1,12 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import Card from "../components/Card";
 import PatientName from "../components/PatientName";
 import StatusBadge from "../components/StatusBadge";
 import { IconBilling } from "../components/icons";
-import { apiFetch } from "../lib/session";
+import { apiFetch, clearSession } from "../lib/session";
 import type { CoverageItem, EligibilityResult } from "../lib/types";
 import { fmtDateTime } from "../lib/format";
 
@@ -48,6 +49,7 @@ function isValidPatientId(id: string): boolean {
 }
 
 export default function CoveragePage() {
+  const router = useRouter();
   const [patientId, setPatientId] = useState("");
   const [loadedPatientId, setLoadedPatientId] = useState("");
   const loadedPatientIdRef = useRef(loadedPatientId);
@@ -68,6 +70,19 @@ export default function CoveragePage() {
     setError(null);
   }
 
+  // P0 (w-9-2-planner): a 401 here means the gateway session itself has
+  // expired (idle or absolute TTL — services/gateway/app.py::require_session)
+  // or was never valid, never that coverage data is unavailable. Every
+  // request on this page used to fold a 401 into the same generic "could not
+  // load" message a real backend/coverage problem gets, which reads as a
+  // data outage when the actual fix is signing in again. This clears the
+  // stale local session and returns the user to /login, mirroring
+  // AppShell.signOut's own clear-then-redirect order.
+  function handleExpiredSession() {
+    clearSession();
+    router.replace("/login");
+  }
+
   async function load() {
     if (!isValidPatientId(patientId)) return;
     const requestedId = patientId;
@@ -78,6 +93,10 @@ export default function CoveragePage() {
     setResults({});
     try {
       const res = await apiFetch(`/api/patients/${encodeURIComponent(requestedId)}/coverages`);
+      if (res.status === 401) {
+        handleExpiredSession();
+        return;
+      }
       const body = await res.json().catch(() => ({}));
       if (loadedPatientIdRef.current !== requestedId) return;
       if (!res.ok) {
@@ -104,6 +123,10 @@ export default function CoveragePage() {
       const res = await apiFetch(`/api/patients/${loadedPatientId}/coverages/${coverageId}/verify`, {
         method: "POST",
       });
+      if (res.status === 401) {
+        handleExpiredSession();
+        return;
+      }
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         setResults((r) => ({ ...r, [coverageId]: { category: "unavailable", message: "Could not request a verification." } }));
@@ -121,6 +144,10 @@ export default function CoveragePage() {
     setActionBusy(coverageId);
     try {
       const res = await apiFetch(`/api/patients/${loadedPatientId}/coverages/${coverageId}/eligibility-status`);
+      if (res.status === 401) {
+        handleExpiredSession();
+        return;
+      }
       const body = await res.json().catch(() => ({}));
       if (res.ok) setResults((r) => ({ ...r, [coverageId]: body }));
     } finally {
@@ -134,6 +161,10 @@ export default function CoveragePage() {
       const res = await apiFetch(`/api/patients/${loadedPatientId}/coverages/${coverageId}/eligibility-retry`, {
         method: "POST",
       });
+      if (res.status === 401) {
+        handleExpiredSession();
+        return;
+      }
       const body = await res.json().catch(() => ({}));
       if (res.ok) setResults((r) => ({ ...r, [coverageId]: body }));
     } finally {
