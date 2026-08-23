@@ -342,13 +342,18 @@ def issue_patient_invitation(
         raise HTTPException(status_code=403, detail="not authorized")
 
     # An account already exists for this chart (users.patient_id is unique —
-    # migration 017) — issuing a second invitation would let a second password
-    # be set on the same chart via a different invitation later, or simply
-    # confuse "invited" with "already has access". One portal account per
-    # chart is the invariant; this is where it is enforced on the issuing side
-    # (activation enforces it from the other side via that same unique index).
+    # migration 017, `users_patient_id_unique`) — issuing a second invitation
+    # would let a second password be set on the same chart via a different
+    # invitation later, or simply confuse "invited" with "already has access".
+    # One portal account per chart is the invariant; this is where it is
+    # enforced on the issuing side (activation enforces it from the other side
+    # via that same unique index). Deliberately NOT filtered to is_active: the
+    # unique constraint binds the column regardless of the row's active state,
+    # so a disabled account still occupies the slot — issuing against it would
+    # mint a code whose activation then dies on the same unique index, leaving
+    # the patient with a code that can never be redeemed (round-1 review, M1).
     existing_account = db.execute(
-        select(User.id).where(User.patient_id == patient_id, User.is_active.is_(True))
+        select(User.id).where(User.patient_id == patient_id)
     ).scalar_one_or_none()
     if existing_account is not None:
         # Structured, not a string the frontend has to parse: this and the
@@ -1077,6 +1082,14 @@ def proxy_own_identity(
     the approved agent-summary display both read to render the "{Name} —
     Patient ID {id}" format on the patient's own screens, the same string
     shape the staff-side /patients/{id}/name lookup already produces.
+
+    Gated on the same `has_active_grant` check every other chart read in this
+    file uses (issuance, revocation) — a live session for an account that was
+    since disabled, or whose self-grant (created at activation) was revoked
+    or has expired, must not still resolve a name here. `own_record.read`
+    only proves the caller is A patient, not that this specific grant is
+    still live — code review round 1 (B1) found this route was the one
+    identity path that skipped that second check.
     """
     user_id = parse_user_id(session.get("user_id"))
     if user_id is None:
@@ -1090,6 +1103,14 @@ def proxy_own_identity(
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if patient_id is None:
         log.warning("own identity: account has no linked patient user_id=%s", user_id)
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    try:
+        authorized = has_active_grant(db, user_id=user_id, patient_id=patient_id)
+    except SQLAlchemyError:
+        log.exception("own identity: grant store unreadable for user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="temporarily unavailable")
+    if not authorized:
         raise HTTPException(status_code=403, detail="not authorized")
 
     try:

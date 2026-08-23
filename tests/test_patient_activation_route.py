@@ -179,6 +179,28 @@ def test_an_active_account_blocks_a_second_invitation(env):
     assert resp.json()["detail"]["reason"] == "ACTIVE_PORTAL_ACCOUNT"
 
 
+def test_a_disabled_existing_account_still_blocks_a_second_invitation(env):
+    """Round-1 review, M1: `users.patient_id` is unique regardless of
+    is_active (migration 017), so a disabled account still occupies the slot.
+    Issuing against it used to succeed — the check filtered to active
+    accounts only — which minted a code that could never be redeemed:
+    activation would insert `patient-1042` again and die on the same unique
+    index the first account already holds. This must refuse before minting
+    that unusable code, not after."""
+    client, Session = env
+    with Session() as s:
+        s.add(app_mod.User(
+            id=99, username="patient-1042", password_hash="x", role="patient",
+            patient_id=1042, is_active=False,
+        ))
+        s.commit()
+
+    resp = client.post("/patients/1042/invitation", headers=_auth())
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "ACTIVE_PORTAL_ACCOUNT"
+
+
 def test_revoking_requires_the_same_active_grant_as_issuing(env, monkeypatch):
     """Revoking had lagged issuing's own has_active_grant requirement — a
     caller who cannot issue for this chart must not be able to revoke for it

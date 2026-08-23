@@ -5,8 +5,14 @@ resolved from the SESSION (own_record.read + the account's own users.patient_id)
 never from a path parameter, so there is no id for a caller to substitute.
 
 Covers: anonymous, inactive account, an account with no linked patient (a
-misconfiguration this route must not paper over), and that two different
-patient accounts each see only their own identity through the same route.
+misconfiguration this route must not paper over), a linked account with no
+active self-grant (revoked or never issued), and that two different patient
+accounts each see only their own identity through the same route.
+
+Round-1 code review (B1) found this route resolved `patients.name` from
+session -> users.patient_id alone, with no `has_active_grant` check — every
+account fixtured below now carries the same self-grant activation actually
+creates, except the ones deliberately built to prove denial without one.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -58,6 +64,22 @@ def env(monkeypatch):
             id=4, username="misconfigured-patient", password_hash="x", role="patient",
             patient_id=None, is_active=True,
         ))
+        s.add(app_mod.Patient(id=1739, name="Aisha Taylor"))
+        s.add(app_mod.User(
+            id=5, username="grantless-patient", password_hash="x", role="patient",
+            patient_id=1739, is_active=True,
+        ))
+        s.commit()
+
+        # Self-grants — the same row activation creates (app.py:569). Users 1
+        # and 2 are the "everything is fine" path; user 3's grant proves the
+        # is_active join in has_active_grant, not just the grant's own
+        # revoked_at/expires_at, is what closes B1 — the grant itself is
+        # perfectly live, only the account is disabled. User 4 (no patient_id)
+        # and user 5 (grantless) get none on purpose.
+        s.add(app_mod.PatientAccessGrant(user_id=1, patient_id=1042))
+        s.add(app_mod.PatientAccessGrant(user_id=2, patient_id=1737))
+        s.add(app_mod.PatientAccessGrant(user_id=3, patient_id=1042))
         s.commit()
 
     client = TestClient(app_mod.app)
@@ -98,17 +120,25 @@ def test_a_different_patient_sees_only_their_own_identity_through_the_same_route
 
 def test_an_inactive_account_receives_no_identity_data(env, monkeypatch):
     # require_permission's role check does not by itself inspect is_active —
-    # the session is what the gateway trusts was issued to a real account, so
-    # this also stands as the fail-closed backstop if a disabled account's
-    # session were ever still live.
+    # the session is what the gateway trusts was issued to a real account.
+    # User 3's grant for 1042 is otherwise perfectly live (unrevoked,
+    # unexpired) — is_active=False on the account itself is the only thing
+    # wrong here, and has_active_grant's join on User.is_active is what must
+    # catch a disabled account whose session somehow outlives it (B1).
     _session_for(monkeypatch, 3)
     resp = env.get("/patient/me/identity", headers=_auth())
-    assert resp.status_code in (200, 403)
-    if resp.status_code == 200:
-        # If a live session for a disabled account somehow reaches here, it
-        # must not leak a DIFFERENT patient's identity — cross-patient is the
-        # one failure mode this test exists to rule out either way.
-        assert resp.json()["patient_id"] == 1042
+    assert resp.status_code == 403
+
+
+def test_a_patient_with_no_active_grant_receives_no_identity_data(env, monkeypatch):
+    """A linked, active account with no self-grant at all — revoked or never
+    issued, this route cannot tell which and must not care. own_record.read
+    proves the caller is A patient, not that this specific grant still
+    stands; that second check is what B1 found missing."""
+    _session_for(monkeypatch, 5)
+    resp = env.get("/patient/me/identity", headers=_auth())
+    assert resp.status_code == 403
+    assert "Aisha" not in resp.text
 
 
 def test_an_account_with_no_linked_patient_receives_no_identity_data(env, monkeypatch):
