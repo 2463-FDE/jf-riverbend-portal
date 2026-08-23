@@ -1182,12 +1182,30 @@ def proxy_list_appointments(
     # which the grid says is None for them. Reading appointments needs the
     # appointments permission.
     session: dict = Depends(require_permission("appointments.read")),
+    db: Session = Depends(get_db),
 ):
+    # w9-fixes P0 4.5: appointments.read is per-ACTION authorization (does
+    # this role do appointment lookups at all), not per-RESOURCE — it says
+    # nothing about THIS patient. Scheduling-service has no actor context of
+    # its own to check that, so the grant boundary every other chart-adjacent
+    # route already enforces (records, agent-draft, messaging, coverage) has
+    # to be enforced here, the same way visit-chat already does for
+    # appointment-scoped access.
+    _require_patient_grant(db, session, patient_id)
     return _get("scheduling", "/appointments", params={"patient_id": patient_id})
 
 
 @app.post("/appointments")
-def proxy_book(payload: dict, session: dict = Depends(require_permission("appointments.write"))):
+def proxy_book(payload: dict, session: dict = Depends(require_permission("appointments.write")), db: Session = Depends(get_db)):
+    # w9-fixes P0 4.5: the browser names the patient_id it wants to book
+    # for — checked against the caller's own grants before this reaches
+    # scheduling-service, same reasoning as the GET above.
+    patient_id = payload.get("patient_id") if isinstance(payload, dict) else None
+    try:
+        patient_id = int(patient_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="patient_id is required")
+    _require_patient_grant(db, session, patient_id)
     # Stage 4 (Week 5, RIV-175): forward_status=True, same round-8 fix as
     # proxy_intake — the default silently flattened scheduling-service's
     # real 201 into a bare 200, which also would have masked a 422 (e.g. a
@@ -1196,7 +1214,26 @@ def proxy_book(payload: dict, session: dict = Depends(require_permission("appoin
 
 
 @app.post("/appointments/{appointment_id}/cancel")
-def proxy_cancel(appointment_id: int, session: dict = Depends(require_permission("appointments.write"))):
+def proxy_cancel(
+    appointment_id: int,
+    session: dict = Depends(require_permission("appointments.write")),
+    db: Session = Depends(get_db),
+):
+    # w9-fixes P0 4.5: cancellation names only an appointment_id — resolved
+    # to its patient server-side via the SAME authorized-appointment query
+    # visit-chat already uses, rather than trusting scheduling-service (which
+    # has no actor context) to have checked anything. No existence oracle: a
+    # nonexistent id and an ungranted one both 403 identically.
+    actor_id = parse_user_id(session.get("user_id"))
+    if actor_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    try:
+        appointment = find_authorized_appointment(db, user_id=actor_id, appointment_id=appointment_id)
+    except SQLAlchemyError:
+        log.exception("cancel: grant lookup failed appointment_id=%s", appointment_id)
+        raise HTTPException(status_code=503, detail="authorization store unavailable")
+    if appointment is None:
+        raise HTTPException(status_code=403, detail="not authorized")
     return _post("scheduling", f"/appointments/{appointment_id}/cancel", {})
 
 
