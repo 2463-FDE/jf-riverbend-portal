@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../lib/session";
+import { identityLine, usePatientIdentity } from "../lib/usePatientIdentity";
 
 /**
  * The patient's AI-assisted summary — a separate panel, deliberately.
@@ -47,6 +48,16 @@ interface RequestReceipt {
 }
 
 export default function AgentSummaryPanel() {
+  // Own identity, resolved server-side from the session — same route
+  // /my-results uses, never a lookup by id (there is no id for a patient to
+  // supply here).
+  const { name: ownName, patientId: ownPatientId } = usePatientIdentity(
+    "/api/patient/identity",
+    "self"
+  );
+  const identity = ownPatientId !== null ? identityLine(ownName, ownPatientId) : null;
+  const identityLineEl = identity ? <p className="rb-agent-identity">{identity}</p> : null;
+
   const [summary, setSummary] = useState<AgentSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<RequestReceipt | null>(null);
@@ -118,6 +129,7 @@ export default function AgentSummaryPanel() {
     return (
       <section className="rb-agent-summary" aria-labelledby="agent-summary-heading">
         <h2 id="agent-summary-heading">Your summary</h2>
+        {identityLineEl}
         <p role="alert">{error}</p>
       </section>
     );
@@ -127,6 +139,7 @@ export default function AgentSummaryPanel() {
     return (
       <section className="rb-agent-summary" aria-labelledby="agent-summary-heading">
         <h2 id="agent-summary-heading">Your summary</h2>
+        {identityLineEl}
         <p>
           There is no approved summary on your record yet. One appears here only after a
           clinician has reviewed and approved it.
@@ -141,6 +154,7 @@ export default function AgentSummaryPanel() {
   return (
     <section className="rb-agent-summary" aria-labelledby="agent-summary-heading">
       <h2 id="agent-summary-heading">Your summary</h2>
+      {identityLineEl}
 
       <p className="rb-agent-provenance">
         <span className="rb-agent-label" data-provenance={label}>

@@ -15,13 +15,9 @@ import {
   IconStethoscope,
   IconHeart,
 } from "./components/icons";
-import { apiFetch, getUser } from "./lib/session";
+import { getUser } from "./lib/session";
 import type { Appointment, EncounterBlock, RecordItem } from "./lib/types";
 import { fmtDateTime, firstName } from "./lib/format";
-
-// The dashboard pulls a default patient's data so the portal has something to
-// show on landing (a single-patient demo account).
-const DEFAULT_PATIENT_ID = "1042";
 
 function isResult(r: RecordItem): boolean {
   return Boolean(r.test || r.value !== undefined || r.reference_range);
@@ -32,23 +28,20 @@ export default function DashboardPage() {
   const [results, setResults] = useState<RecordItem[] | null>(null);
   const [name, setName] = useState("there");
 
+  // No hardcoded patient id here (removed 2026-08-22): this dashboard is the
+  // landing page for WHOEVER is signed in, staff or patient, and a fixed demo
+  // id previously fetched one specific patient's real appointments/results on
+  // every load regardless of who was looking — for a staff account granted
+  // that chart, someone else's real data appeared unlabeled as if it were a
+  // generic preview; for anyone else it silently 403'd. There is no
+  // account-agnostic "my appointments"/"my results" summary endpoint yet, so
+  // this section shows its own empty state and links to the real screens
+  // instead of guessing at a patient id.
   useEffect(() => {
     const u = getUser();
     if (u?.full_name) setName(firstName(u.full_name));
-
-    apiFetch(`/api/appointments?patient_id=${DEFAULT_PATIENT_ID}`)
-      .then((r) => r.json())
-      .then((d) => setAppts(Array.isArray(d) ? d : (d.items ?? [])))
-      .catch(() => setAppts([]));
-
-    apiFetch(`/api/records?patient_id=${DEFAULT_PATIENT_ID}`)
-      .then((r) => r.json())
-      .then((d) => {
-        const encounters: EncounterBlock[] = d.encounters ?? [];
-        const recs = encounters.flatMap((e) => e.records ?? []).filter(isResult);
-        setResults(recs.slice(0, 5));
-      })
-      .catch(() => setResults([]));
+    setAppts([]);
+    setResults([]);
   }, []);
 
   const upcoming = (appts ?? [])

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import AgentSummaryPanel from "../components/AgentSummaryPanel";
 import { apiFetch, getUser } from "../lib/session";
+import { identityLine, usePatientIdentity } from "../lib/usePatientIdentity";
 
 /**
  * A patient's own results.
@@ -153,10 +154,20 @@ export default function MyResultsPage() {
   }, [load]);
 
   const user = getUser();
+  // Own identity, not a lookup by id: the patient never supplies which chart
+  // this is, and neither does this fetch — /api/patient/identity resolves it
+  // server-side from the session, the same way /api/patient/summary already
+  // does for the results below.
+  const { name: ownName, patientId: ownPatientId } = usePatientIdentity(
+    "/api/patient/identity",
+    "self"
+  );
+  const identity = ownPatientId !== null ? identityLine(ownName, ownPatientId) : null;
 
   return (
     <main className="rb-results-page">
       <h1>Your results</h1>
+      {identity && <p className="rb-results-identity">{identity}</p>}
       <p className="rb-results-intro">
         These are your results exactly as your care team recorded them. Nothing here is an
         interpretation — if you have questions about what a result means, your care team is the

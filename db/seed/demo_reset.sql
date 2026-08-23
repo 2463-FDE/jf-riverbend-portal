@@ -1,95 +1,238 @@
--- demo_reset.sql — return the demo patient to a clean pre-demo state.
+-- demo_reset.sql — return the four canonical demo patients to a clean,
+-- rehearsable state: 1042 (Maria Gonzalez, hyperlipidemia + duplicate-record
+-- reconciliation), 1737 (Priya Khan, diabetes + invitation/activation), 1738
+-- (Thomas Johnson, hypertension, pre-activated, the deliberate TWO-CLINICIAN
+-- overlap patient), 1739 (Aisha Taylor, asthma, pre-activated).
 --
 -- WHY THIS EXISTS
 -- The clinician review gate is deliberately durable: a rejected record is
 -- never re-queued, and an approved one stays released. That is the property
--- the client asked for, and it means every rehearsal CONSUMES demo state.
--- After one full run patient 1737 has an approval, a rejection and one
+-- the client asked for, and it means every rehearsal CONSUMES demo state —
+-- after one full run a patient has an approval, a rejection and one
 -- remaining case; after two, the queue is empty and the clinician beat cannot
 -- be shown at all. The integration suite consumes it the same way.
 --
 -- So this is not a fixture repair — it is the counterpart to a feature working
 -- correctly. Run it before every rehearsal and after every test run.
 --
--- WHAT IT TOUCHES
--- Only the demo patient's portal state. It does NOT delete records, encounters
--- or patients, and it does not re-seed: the chart, the A1c trend and the
--- clinician account all come from db/seed/seed.sql and are left alone.
+-- WHAT THIS DOES **NOT** DO: prepopulate the review queue. Patient
+-- summary_reviews rows are created lazily, by `records-service`'s own read
+-- path, the first time a patient (or an authorized clinician's read of that
+-- patient's summary) actually triggers `review_queue.enqueue_refusals`.
+-- Immediately after a reset, EVERY canonical patient's `pending_reviews`
+-- count is 0 — that is correct, not a bug: the queue has nothing in it until
+-- someone opens the deterministic results/summary path for that patient. See
+-- the verification query at the bottom, and the demo script in
+-- docs/runbook.md / .claude/skills/w8-planner/SKILL.md for exactly which
+-- request populates which patient's cases.
+--
+-- TWO DIFFERENT "clean states", by design (2026-08-22)
+-- 1042 and 1737 are demonstrated INVITE-READY: their portal account, grant
+-- and any invitation are deleted, so the demo can start from "front desk
+-- issues a code." 1738 and 1739 are demonstrated PRE-ACTIVATED: their portal
+-- account is a fixed, documented credential (see db/seed/generate_seed.py's
+-- PATIENT_DEMO_PASSWORD) that the reset RESTORES to active rather than
+-- deleting — a test or rehearsal that revoked a grant or deactivated an
+-- account must not require a re-seed to fix.
+--
+-- THE CLINICIAN MATRIX (2026-08-22) — two clinician accounts, not one, with a
+-- deliberate overlap:
+--     drkim    : 1042, 1737, 1738   (NOT 1739)
+--     drnguyen : 1738, 1739         (NOT 1042, NOT 1737)
+-- 1738 is the overlap: both clinicians hold an active grant for it, so a
+-- shared-queue listing and "one reviewer's decision is not overwritable by
+-- the other" are both demonstrable. Neither clinician's grant on the other
+-- three canonical patients is ever added here.
+--
+-- WHAT ELSE IT TOUCHES
+-- Only these four patients' portal/review state and the two clinicians' own
+-- grants on them — never 1330/1588 (the intentionally incomplete
+-- duplicate-chart candidates), never drpatel's separate treating-provider
+-- grant on 1738, never any other patient. It does NOT delete records,
+-- encounters, patients, or agent draft history: the chart, the trends and
+-- the clinician accounts all come from db/seed/seed.sql and are left alone.
+-- `agent_draft_provenance` rows are IMMUTABLE once validated (migration 020's
+-- guard) and are never touched here regardless — see the note before the
+-- verification table for what that means for a fully virgin agent-draft
+-- demonstration.
 --
 -- Safe to run repeatedly, and safe to run when nothing exists yet.
 
-\set demo_patient 1737
+\set canonical_patients '(1042, 1737, 1738, 1739)'
 
 BEGIN;
 
--- Review decisions. Removing these returns the refused results to `pending`
--- on the patient's next read, because the summary path re-queues anything it
--- refuses that has no review row at all.
-DELETE FROM patient_summary_reviews WHERE patient_id = :demo_patient;
+-- Review decisions, all four patients. Removing these returns any refused
+-- result to `pending` on the patient's next read, because the summary path
+-- re-queues anything it refuses that has no review row at all. This is a
+-- CLEAR, never a prepopulate: nothing is inserted into
+-- patient_summary_reviews anywhere in this file.
+DELETE FROM patient_summary_reviews WHERE patient_id IN :canonical_patients;
 
--- The patient's own portal account, its access grant and any invitation, so
--- the demo can start from "front desk issues a code" rather than from an
--- account that already exists.
+-- --- 1042 and 1737: INVITE-READY -------------------------------------------
+-- Portal account, its access grant and any invitation, so the demo can start
+-- from "front desk issues a code" rather than from an account that already
+-- exists.
 DELETE FROM patient_access_grants
- WHERE user_id IN (SELECT id FROM users WHERE patient_id = :demo_patient);
-DELETE FROM patient_invitations WHERE patient_id = :demo_patient;
-DELETE FROM users WHERE patient_id = :demo_patient;
+ WHERE user_id IN (SELECT id FROM users WHERE patient_id IN (1042, 1737));
+DELETE FROM patient_invitations WHERE patient_id IN (1042, 1737);
+DELETE FROM users WHERE patient_id IN (1042, 1737);
 
--- The reviewing clinician's ACTIVE grant.
+-- --- 1738 and 1739: PRE-ACTIVATED -------------------------------------------
+-- The account itself is restored to active rather than deleted — a rehearsal
+-- has no invitation beat to replay for these two, so there is nothing to
+-- reset it back TO except "still signed-in-able." Any leftover invitation
+-- (e.g. from a test that issued one anyway) is still cleared: an outstanding
+-- invitation for an already-active account is a contradiction, not a valid
+-- state, whichever patient it is for.
+DELETE FROM patient_invitations WHERE patient_id IN (1738, 1739);
+UPDATE users SET is_active = TRUE
+ WHERE patient_id IN (1738, 1739) AND role = 'patient' AND is_active = FALSE;
+
+-- --- Clinician accounts themselves — restored active, never deleted --------
+-- A test that deactivated drkim or drnguyen (or, before this reset, one that
+-- never distinguished them from an ordinary account) must not leave the
+-- demo unable to show either reviewer's half of the queue.
+UPDATE users SET is_active = TRUE WHERE username IN ('drkim', 'drnguyen') AND is_active = FALSE;
+
+-- --- Staff/clinician/self grants — restore ACTIVE, never merely EXISTS -----
 --
--- "A row exists" is not the condition that matters. The queue is scoped by
--- active_patient_ids_query (services/records-service/patient_access_gate.py),
--- which additionally requires revoked_at IS NULL and a non-expired
--- expires_at. A revoked or expired row therefore suppresses a
--- guarded-on-absence insert while leaving the grant inert — and the demo
--- operator sees a reset that reported success and a review queue that is
--- empty, with nothing on screen connecting the two.
+-- "A row exists" is not the condition that matters. The queue and every
+-- grant-scoped read are scoped by active_patient_ids_query
+-- (services/records-service/patient_access_gate.py), which additionally
+-- requires revoked_at IS NULL and a non-expired expires_at. A revoked or
+-- expired row therefore suppresses a guarded-on-absence insert while leaving
+-- the grant inert — and the demo operator sees a reset that reported success
+-- and an empty queue/chart, with nothing on screen connecting the two.
 --
 -- So this clears revoked_at and expires_at on an existing row rather than
--- skipping it, and inserts only when there is genuinely nothing there.
+-- skipping it, and inserts only when there is genuinely nothing there — one
+-- pass per (username, patient_id) pair, covering every grant the four
+-- canonical fixtures need, exactly matching db/seed/generate_seed.py's own
+-- INSERT INTO patient_access_grants for these four patients:
+--   frontdesk : 1042, 1737, 1738, 1739 (registers all four)
+--   rdelgado  : 1042                   (duplicate-records demo)
+--   drpatel   : 1738                   (treating provider — hypertension)
+--   drkim     : 1042, 1737, 1738       (clinician reviewer — NOT 1739)
+--   drnguyen  : 1738, 1739             (clinician reviewer — NOT 1042, NOT 1737)
+--   patient-1738, patient-1739         (self-grants — the pre-activated accounts)
+WITH pairs (username, patient_id) AS (
+    VALUES
+        ('frontdesk', 1042), ('frontdesk', 1737), ('frontdesk', 1738), ('frontdesk', 1739),
+        ('rdelgado', 1042),
+        ('drpatel', 1738),
+        ('drkim', 1042), ('drkim', 1737), ('drkim', 1738),
+        ('drnguyen', 1738), ('drnguyen', 1739),
+        ('patient-1738', 1738),
+        ('patient-1739', 1739)
+)
 UPDATE patient_access_grants g
    SET revoked_at = NULL,
        expires_at = NULL
-  FROM users u
+  FROM users u, pairs p
  WHERE u.id = g.user_id
-   AND u.username = 'drkim'
-   AND g.patient_id = :demo_patient
+   AND u.username = p.username
+   AND g.patient_id = p.patient_id
    AND (g.revoked_at IS NOT NULL OR g.expires_at IS NOT NULL);
 
+WITH pairs (username, patient_id) AS (
+    VALUES
+        ('frontdesk', 1042), ('frontdesk', 1737), ('frontdesk', 1738), ('frontdesk', 1739),
+        ('rdelgado', 1042),
+        ('drpatel', 1738),
+        ('drkim', 1042), ('drkim', 1737), ('drkim', 1738),
+        ('drnguyen', 1738), ('drnguyen', 1739),
+        ('patient-1738', 1738),
+        ('patient-1739', 1739)
+)
 INSERT INTO patient_access_grants (user_id, patient_id)
-SELECT u.id, :demo_patient
+SELECT u.id, p.patient_id
   FROM users u
- WHERE u.username = 'drkim'
-   AND NOT EXISTS (
+  JOIN pairs p ON p.username = u.username
+ WHERE NOT EXISTS (
         SELECT 1 FROM patient_access_grants g
-         WHERE g.user_id = u.id AND g.patient_id = :demo_patient
+         WHERE g.user_id = u.id AND g.patient_id = p.patient_id
        );
 
 COMMIT;
 
--- What the operator should see. Anything other than these values means the
--- database predates the current seed file. `make seed` will NOT fix that (it
--- fails on a non-empty database); re-seed with `docker compose down -v && make up`.
+-- What the operator should see, one row per canonical patient. Anything
+-- surprising here — a portal_account that should exist and does not, an
+-- active_reviewers list missing an expected name, a trend_results count
+-- under 2, an encounters/appointments count of 0 — means the database
+-- predates the current seed file. `make seed` will NOT fix that (it fails on
+-- a non-empty database); re-seed with `docker compose down -v && make up`.
+--
+-- `pending_reviews` is expected to be 0 for every row immediately after a
+-- reset — that is not a partial reset, it is the queue's own lazy-population
+-- design (see the note at the top of this file). Open each patient's
+-- deterministic results/summary path to populate it; the demo script names
+-- exactly which request does that for which patient.
+--
+-- A REAL Bedrock call against any of these charts also writes an
+-- agent_draft_provenance row, and that row is IMMUTABLE once validated
+-- (migration 020) — this script never deletes it, by design (see the note
+-- above). So a completely VIRGIN agent-draft demonstration (no prior version
+-- at all, not even a superseded one) is only possible starting from a FRESH
+-- volume:
+--     docker compose down -v && make up
+-- A reset alone is sufficient for every other beat, including a REPEAT
+-- agent-draft demonstration — the versioning working (a new version pending
+-- while the previous stays approved) is itself a valid, arguably better beat.
 \echo ''
-\echo '  after reset — expected:  reviews=0  portal_account=none  reviewer_grant=active  a1c_results=2'
+\echo '  after reset — one row per canonical patient:'
 SELECT
-    (SELECT count(*) FROM patient_summary_reviews WHERE patient_id = 1737) AS reviews,
-    (SELECT coalesce(max(username), 'none') FROM users WHERE patient_id = 1737) AS portal_account,
-    -- Asserts the grant is ACTIVE under the same predicate the queue uses, not
-    -- merely that drkim exists. Reporting the account's role told an operator
-    -- nothing about whether the reviewer could actually see a case.
-    (SELECT CASE
-              WHEN EXISTS (
-                   SELECT 1
-                     FROM patient_access_grants g
-                     JOIN users u ON u.id = g.user_id
-                    WHERE u.username = 'drkim'
-                      AND u.is_active
-                      AND g.patient_id = 1737
-                      AND g.revoked_at IS NULL
-                      AND (g.expires_at IS NULL OR g.expires_at > now())
-                   ) THEN 'active'
-              ELSE 'INACTIVE — re-seed: docker compose down -v && make up'
-            END) AS reviewer_grant,
-    (SELECT count(*) FROM records
-      WHERE patient_id = 1737 AND kind = 'lab_result' AND title = 'A1c') AS a1c_results;
+    p.id AS patient_id,
+    p.name,
+    coalesce(u.username, 'none') AS portal_account,
+    coalesce(ic.status, 'none') AS coverage,
+    coalesce(enc.n, 0) AS encounters,
+    coalesce(rec.n, 0) AS records,
+    coalesce(trend.n, 0) AS trend_results,
+    coalesce(appt.n, 0) AS appointments,
+    coalesce(rev.n, 0) AS pending_reviews,
+    coalesce(reviewers.names, 'NONE — re-seed: docker compose down -v && make up') AS active_reviewers,
+    coalesce(other_grants.names, 'none') AS other_active_grants
+FROM patients p
+LEFT JOIN users u ON u.patient_id = p.id AND u.role = 'patient'
+LEFT JOIN LATERAL (
+    SELECT status FROM insurance_coverages WHERE patient_id = p.id ORDER BY id DESC LIMIT 1
+) ic ON true
+LEFT JOIN LATERAL (SELECT count(*) AS n FROM encounters WHERE patient_id = p.id) enc ON true
+LEFT JOIN LATERAL (SELECT count(*) AS n FROM records WHERE patient_id = p.id) rec ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS n FROM records
+     WHERE patient_id = p.id AND kind = 'lab_result'
+       AND title IN ('A1c', 'LDL', 'Systolic BP', 'SpO2')
+) trend ON true
+LEFT JOIN LATERAL (SELECT count(*) AS n FROM appointments WHERE patient_id = p.id) appt ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS n FROM patient_summary_reviews WHERE patient_id = p.id AND state = 'pending'
+) rev ON true
+-- Active reviewers: accounts on the 'clinician' (or 'nursing_ma') role — the
+-- only roles holding summary_review.decide — with an active grant. Listed
+-- separately from other_active_grants so "who can actually decide a case for
+-- this patient" reads at a glance instead of being buried in a mixed list
+-- that also contains front-desk registration and treating-provider grants.
+LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT gu.username, ', ' ORDER BY gu.username) AS names
+      FROM patient_access_grants g
+      JOIN users gu ON gu.id = g.user_id
+     WHERE g.patient_id = p.id
+       AND gu.is_active
+       AND gu.role IN ('clinician', 'nursing_ma')
+       AND g.revoked_at IS NULL
+       AND (g.expires_at IS NULL OR g.expires_at > now())
+) reviewers ON true
+LEFT JOIN LATERAL (
+    SELECT string_agg(DISTINCT gu.username, ', ' ORDER BY gu.username) AS names
+      FROM patient_access_grants g
+      JOIN users gu ON gu.id = g.user_id
+     WHERE g.patient_id = p.id
+       AND gu.is_active
+       AND gu.role NOT IN ('clinician', 'nursing_ma')
+       AND g.revoked_at IS NULL
+       AND (g.expires_at IS NULL OR g.expires_at > now())
+) other_grants ON true
+WHERE p.id IN :canonical_patients
+ORDER BY p.id;

@@ -35,9 +35,10 @@ DB_DSN = os.getenv(
 #
 # 1737 is chosen deliberately: its chart exercises all three content outcomes
 # in one patient — a panel ("Na 140, K 4.1, Cr 0.9."), a single value repeated
-# across two encounters ("2.3 mIU/L." twice, so a change can be computed), and
-# visit notes that must refuse. Patient 1042 has no lab results at all, so the
-# content assertions below silently skipped against it and proved nothing.
+# across two encounters (an A1c value at two dates, so a change can be
+# computed), and a visit note that must refuse. Patient 1042 also carries a
+# curated LDL trend as of 2026-08-22, but this file keeps 1737 as the fixture
+# patient it was already written against.
 _PATIENT_A = 1737
 _PATIENT_B = 1629
 
@@ -217,7 +218,7 @@ def test_a_revoked_grant_closes_the_patients_own_view(patient_a_token):
 
 
 def test_a_repeated_single_value_carries_a_change_linked_to_its_source(patient_a_token):
-    """Patient 1737 has TSH "2.3 mIU/L." recorded at two encounters, so the
+    """Patient 1737 has an A1c value recorded at two encounters, so the
     later one must carry a change measured against the earlier — and must name
     the record it was measured against, which is the "link to its source"
     requirement.

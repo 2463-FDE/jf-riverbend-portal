@@ -35,6 +35,19 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class Patient(Base):
+    """Minimal read-only mirror of records-service's `patients` table — the
+    authoritative source for a patient's name (adr/0001: no shared service
+    library, so every service that needs a table defines its own matching
+    columns, same as `Appointment`/`PatientAccessGrant` below). Only the two
+    columns this service's identity-display and activation paths need."""
+
+    __tablename__ = "patients"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(Text, nullable=False)
+
+
 class PatientInvitation(Base):
     """A clinic-issued code that lets one patient activate one account.
 

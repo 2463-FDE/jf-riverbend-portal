@@ -173,6 +173,10 @@ def test_an_unexpired_invitation_still_blocks_a_second_one(clean_patient):
         "a genuinely live invitation must still refuse a second: " + second.text
     )
     assert "code" not in second.json(), "a refused issue must not leak a code"
+    # Machine-readable, not English text (2026-08-22) — distinct from the
+    # ACTIVE_PORTAL_ACCOUNT conflict, which the frontend must not offer a
+    # revoke control for.
+    assert second.json()["detail"]["reason"] == "LIVE_INVITATION"
 
 
 def test_staff_can_revoke_an_outstanding_invitation_and_then_reissue(clean_patient):
