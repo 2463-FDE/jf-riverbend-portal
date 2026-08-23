@@ -77,14 +77,15 @@ class BedrockConverseToolModel(ToolCapableModel):
         except ImportError as exc:
             # w9-fixes P0 4.6: a deployment can set a real BEDROCK_MODEL_ID
             # (so __init__ above never raises ProviderNotConfiguredError)
-            # while the image simply doesn't have boto3 installed — that's
-            # exactly this repo's own eligibility-service image, which
-            # deliberately doesn't pin boto3 (see its requirements.txt).
-            # Before this, that raised a bare ModuleNotFoundError here,
-            # which isn't an LLMClientError and escaped
+            # while the image simply doesn't have boto3 installed — this
+            # repo's own eligibility-service used to leave boto3 unpinned on
+            # exactly that theory (see its requirements.txt, now pinned).
+            # Before this, a missing SDK raised a bare ModuleNotFoundError
+            # here, which isn't an LLMClientError and escaped
             # RawBedrockAgentRuntime.handle_message's provider-error catch
             # as an unhandled 500. A missing SDK is a configuration problem,
-            # same as a missing model id/region above.
+            # same as a missing model id/region above — this stays as
+            # defense in depth for any other broken deployment.
             raise ProviderNotConfiguredError(type(exc).__name__) from exc
 
         client = boto3.client(
