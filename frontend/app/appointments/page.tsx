@@ -97,11 +97,18 @@ export default function AppointmentsPage() {
 
   function handlePatientIdChange(value: string) {
     setPatientId(value);
-    // Drop the previous patient's name and list immediately, whether the id
-    // was edited or cleared entirely — a name or an appointment left behind
-    // would sit above the wrong (or no) patient.
+    // w9-fixes P1 4.1: changing the patient must drop every trace of the
+    // PREVIOUS patient's transient state, not just their name/list — a
+    // leftover error/success banner, a typed reason, a pending
+    // book/cancel spinner, or a reused idempotency key could otherwise be
+    // misread as belonging to whoever is loaded next.
     setLoadedPatientId("");
     setAppts(null);
+    setMsg(null);
+    setReason("");
+    setBusySlot(null);
+    setBusyCancel(null);
+    idempotencyKeysRef.current.clear();
   }
 
   function handleLoad() {
@@ -111,6 +118,12 @@ export default function AppointmentsPage() {
   }
 
   async function book(slot: Slot) {
+    // w9-fixes P1 4.1: bind the mutation to the CONFIRMED patient, not
+    // whatever is currently typed — the id field can be edited again while
+    // a booking is in flight, and the raw patientId no longer reflects who
+    // this request is actually for.
+    const patientForRequest = loadedPatientId;
+    if (!isValidPatientId(patientForRequest)) return;
     setBusySlot(slot.id);
     setMsg(null);
     try {
@@ -118,40 +131,48 @@ export default function AppointmentsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          patient_id: Number(patientId) || patientId,
+          patient_id: Number(patientForRequest),
           slot_id: slot.id,
           idempotency_key: idempotencyKeyFor(slot.id),
-          provider: slot.provider,
+          // w9-fixes P0 4.2/4.3: provider/location/scheduled_for are no
+          // longer sent — the backend now derives all three from the
+          // slot_id itself and ignores anything the caller sends for them,
+          // so sending slot.provider here was already inert.
           reason: reason || "Office visit",
         }),
       });
       if (!r.ok) throw new Error();
       idempotencyKeysRef.current.delete(slot.id);
+      // A slow booking whose patient was since changed must not paint a
+      // stale success (or refresh the wrong id's list) over whoever is
+      // loaded now.
+      if (loadedPatientIdRef.current !== patientForRequest) return;
       setMsg({ kind: "ok", text: `Appointment booked with ${slot.provider}.` });
       setReason("");
-      // A successful booking confirms this id the same way pressing Load
-      // would, so the list staff just added to reflects it immediately.
-      setLoadedPatientId(patientId);
-      await Promise.all([loadAppts(patientId), loadSlots()]);
+      await Promise.all([loadAppts(patientForRequest), loadSlots()]);
     } catch {
+      if (loadedPatientIdRef.current !== patientForRequest) return;
       setMsg({ kind: "err", text: "Could not book that slot. Please try another." });
     } finally {
-      setBusySlot(null);
+      if (loadedPatientIdRef.current === patientForRequest) setBusySlot(null);
     }
   }
 
   async function cancel(appt: Appointment) {
+    const patientForRequest = loadedPatientId;
     setBusyCancel(appt.id);
     setMsg(null);
     try {
       const r = await apiFetch(`/api/appointments/${appt.id}/cancel`, { method: "POST" });
       if (!r.ok) throw new Error();
+      if (loadedPatientIdRef.current !== patientForRequest) return;
       setMsg({ kind: "ok", text: "Appointment cancelled." });
-      await loadAppts(loadedPatientId);
+      await loadAppts(patientForRequest);
     } catch {
+      if (loadedPatientIdRef.current !== patientForRequest) return;
       setMsg({ kind: "err", text: "Could not cancel that appointment." });
     } finally {
-      setBusyCancel(null);
+      if (loadedPatientIdRef.current === patientForRequest) setBusyCancel(null);
     }
   }
 
@@ -217,7 +238,7 @@ export default function AppointmentsPage() {
                         <div className="rb-listrow__title">{a.reason || "Office visit"}</div>
                         <div className="rb-listrow__meta">
                           <span><IconStethoscope width={15} height={15} /> {a.provider}</span>
-                          <span><IconClock width={15} height={15} /> {fmtDateTime(a.start_at)}</span>
+                          <span><IconClock width={15} height={15} /> {fmtDateTime(a.scheduled_for)}</span>
                           {a.location && <span><IconPin width={15} height={15} /> {a.location}</span>}
                         </div>
                       </div>
@@ -285,7 +306,8 @@ export default function AppointmentsPage() {
                   <button
                     className="rb-btn rb-btn--primary rb-btn--sm"
                     onClick={() => book(s)}
-                    disabled={busySlot === s.id}
+                    disabled={busySlot === s.id || !isValidPatientId(loadedPatientId)}
+                    title={isValidPatientId(loadedPatientId) ? undefined : "Load a patient first"}
                     type="button"
                   >
                     {busySlot === s.id ? "Booking…" : "Book"}

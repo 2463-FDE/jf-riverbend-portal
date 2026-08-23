@@ -85,3 +85,72 @@ describe("appointments — name-only identity box", () => {
     expect(screen.queryByText(/Maria Gonzalez/)).not.toBeInTheDocument();
   });
 });
+
+// w9-fixes P1 4.1 — editing the Patient ID field must drop every trace of
+// the previous patient's transient state (error/success banner, typed
+// reason, busy spinners) immediately, not just their name/list.
+describe("appointments — patient-context reset (w9-fixes 4.1)", () => {
+  const SLOT = {
+    id: 5,
+    provider: "Dr. X",
+    location: "Riverbend Main",
+    start_at: "2026-09-01T10:00:00Z",
+    end_at: "2026-09-01T10:30:00Z",
+    status: "open",
+  };
+
+  function mockBookingFailure() {
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/name")) {
+        const id = url.match(/patients\/(\d+)\/name/)?.[1] ?? "";
+        const names: Record<string, string> = { "1042": "Maria Gonzalez", "1738": "Thomas Johnson" };
+        return names[id]
+          ? jsonResponse({ id: Number(id), name: names[id] })
+          : jsonResponse({ error: "name unavailable" }, false);
+      }
+      if (init?.method === "POST" && url.includes("/appointments")) {
+        return jsonResponse({ error: "slot_taken" }, false);
+      }
+      if (url.includes("/appointments")) return jsonResponse({ items: [] });
+      if (url.includes("/slots")) return jsonResponse({ items: [SLOT] });
+      return jsonResponse({});
+    });
+  }
+
+  it("clears a prior error, typed reason, and busy state before the next patient loads", async () => {
+    mockBookingFailure();
+    render(<AppointmentsPage />);
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/reason for visit/i), { target: { value: "vaccination" } });
+    fireEvent.click(await screen.findByRole("button", { name: /^book$/i }));
+    await waitFor(() => expect(screen.getByText(/could not book that slot/i)).toBeInTheDocument());
+
+    // Editing the id — before pressing Load — must drop the stale banner
+    // and reason immediately.
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1738" } });
+    expect(screen.queryByText(/could not book that slot/i)).not.toBeInTheDocument();
+    expect((screen.getByLabelText(/reason for visit/i) as HTMLInputElement).value).toBe("");
+    expect(screen.queryByText("Maria Gonzalez")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() => expect(screen.getByText("Thomas Johnson")).toBeInTheDocument());
+    expect(screen.queryByText(/could not book that slot/i)).not.toBeInTheDocument();
+  });
+
+  it("disables Book until a patient is loaded", async () => {
+    mockBookingFailure();
+    render(<AppointmentsPage />);
+
+    const book = await screen.findByRole("button", { name: /^book$/i });
+    expect(book).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/patient id/i), { target: { value: "1042" } });
+    fireEvent.click(screen.getByRole("button", { name: /^load$/i }));
+    await waitFor(() => expect(screen.getByText("Maria Gonzalez")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /^book$/i })).not.toBeDisabled();
+  });
+});
