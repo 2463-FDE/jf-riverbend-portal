@@ -1669,10 +1669,20 @@ def create_thread(
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     db: Session = Depends(get_db),
 ):
-    """A patient starts a new thread with their care team. Gated exactly like
-    every other single-patient write here: role permission, THEN an active
-    grant for this specific patient_id — a patient's session-derived id is
-    the only one their own grant ever matches."""
+    """A patient starts a new thread with their care team.
+
+    Round-1 review (2026-08-23): permission + grant alone let a GRANTED
+    CLINICIAN call this route directly and originate a thread — contrary to
+    the client's UX (a clinician replies to a thread, closes it, reopens
+    it, but does not compose the first message) and to this route's own
+    docstring, which claimed a patient-only action the code did not
+    actually enforce. Fixed by requiring BOTH: the actor's own role is
+    'patient' AND their own users.patient_id equals the patient_id in the
+    path — not merely that they hold a grant for it. A patient's account
+    only ever has one self-grant, so in the correct case this is redundant
+    with the grant check; it is required so it cannot be true for anyone
+    else, permission and grant included.
+    """
     _verify_internal_token(x_internal_token)
     _authorize_or_deny(
         db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id,
@@ -1681,6 +1691,10 @@ def create_thread(
     )
     actor_id = parse_user_id(x_actor_id)
     if actor_id is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    actor = db.get(User, actor_id)
+    if actor is None or actor.role != "patient" or actor.patient_id != patient_id:
         raise HTTPException(status_code=403, detail="not authorized")
 
     subject = _clean_text(req.subject, max_len=_MESSAGE_SUBJECT_MAX, field="subject")
@@ -1694,16 +1708,23 @@ def create_thread(
             db, patient_id=patient_id, sender_user_id=actor_id,
             subject=subject, body=body, idempotency_key=idempotency_key,
         )
+        # Committed together with its audit row (round-1 review): a separate
+        # _write_audit call commits on its own, so an audit-write failure
+        # could 503 a request whose thread/message was already durable, with
+        # no trace of it — the same failure decide_review's own comment
+        # documents and fixes the same way.
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=f"messages_thread_create thread_id={thread.id} patient_id={patient_id}",
+            )
+        )
         db.commit()
     except SQLAlchemyError:
         db.rollback()
         log.exception("messaging: thread create failed patient_id=%s", patient_id)
         raise HTTPException(status_code=503, detail="could not start a new thread right now")
 
-    _write_audit(
-        db, actor=_actor_label(x_actor_name, x_actor_id),
-        message=f"messages_thread_create thread_id={thread.id} patient_id={patient_id}",
-    )
     patient = db.get(Patient, patient_id)
     return ThreadDetailOut(
         id=thread.id, patient_id=thread.patient_id,
@@ -1786,6 +1807,14 @@ def reply_to_thread(
         message = messaging.send_message(
             db, thread=thread, sender_user_id=actor_id, body=body, idempotency_key=idempotency_key,
         )
+        # Committed together with its audit row — see create_thread's own
+        # comment on why a separate _write_audit call is wrong here.
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=f"messages_reply thread_id={thread_id} message_id={message.id}",
+            )
+        )
         db.commit()
     except messaging.MessagingError as e:
         db.rollback()
@@ -1797,10 +1826,6 @@ def reply_to_thread(
         log.exception("messaging: reply failed thread_id=%s", thread_id)
         raise HTTPException(status_code=503, detail="could not send that message")
 
-    _write_audit(
-        db, actor=_actor_label(x_actor_name, x_actor_id),
-        message=f"messages_reply thread_id={thread_id} message_id={message.id}",
-    )
     sender = db.get(User, actor_id)
     return MessageOut(
         id=message.id, thread_id=message.thread_id, sender_user_id=actor_id,
@@ -1835,6 +1860,14 @@ def set_thread_status(
         if thread is None:
             raise HTTPException(status_code=404, detail="thread not found")
         messaging.set_status(db, thread=thread, status=req.status)
+        # Committed together with its audit row — see create_thread's own
+        # comment on why a separate _write_audit call is wrong here.
+        db.add(
+            AuditLog(
+                actor=_actor_label(x_actor_name, x_actor_id),
+                message=f"messages_set_status thread_id={thread_id} status={req.status}",
+            )
+        )
         db.commit()
     except messaging.MessagingError as e:
         db.rollback()
@@ -1846,10 +1879,6 @@ def set_thread_status(
         log.exception("messaging: status change failed thread_id=%s", thread_id)
         raise HTTPException(status_code=503, detail="could not update that thread")
 
-    _write_audit(
-        db, actor=_actor_label(x_actor_name, x_actor_id),
-        message=f"messages_set_status thread_id={thread_id} status={req.status}",
-    )
     return ThreadDetailOut(
         id=thread.id, patient_id=thread.patient_id, subject=thread.subject, status=thread.status,
         created_at=thread.created_at.isoformat() if thread.created_at else "",

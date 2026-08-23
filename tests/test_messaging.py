@@ -43,9 +43,9 @@ def client(monkeypatch):
         app_mod.User(id=UNGRANTED_CLINICIAN_ID, username="drpatel", full_name="Dr. Anil Patel",
                      role="clinician", is_active=True),
         app_mod.User(id=PATIENT_USER_ID, username="patient-1737", full_name="Priya Khan",
-                     role="patient", is_active=True),
+                     role="patient", patient_id=PATIENT, is_active=True),
         app_mod.User(id=OTHER_PATIENT_USER_ID, username="patient-1042", full_name="Maria Gonzalez",
-                     role="patient", is_active=True),
+                     role="patient", patient_id=OTHER_PATIENT, is_active=True),
     ])
     db.flush()
     db.add_all([
@@ -95,6 +95,27 @@ def test_a_patient_creates_and_reads_their_own_thread(client):
     assert fetched.status_code == 200
     assert fetched.json()["subject"] == "Question about my results"
     assert len(fetched.json()["messages"]) == 1
+
+
+def test_a_granted_clinician_cannot_originate_a_thread(client):
+    """Round-1 review: permission + grant alone let a granted clinician call
+    this route directly and start a thread — contrary to the client's UX
+    (a clinician replies, closes, reopens; a patient starts). drkim holds
+    both messages.write and an active grant for PATIENT, so only the
+    role+own-chart check added for this finding stops it."""
+    api, db = client
+    resp = _create(api, CLINICIAN)
+    assert resp.status_code == 403
+    assert "quick question" not in resp.text
+
+
+def test_a_patient_cannot_originate_a_thread_on_another_patients_chart(client):
+    """A patient's own role check is not enough by itself — it must also be
+    THEIR chart. OTHER_PATIENT_USER_ID is genuinely a patient, just not
+    PATIENT's patient, and holds no grant for PATIENT either."""
+    api, db = client
+    resp = _create(api, OTHER_PATIENT_H, patient_id=PATIENT)
+    assert resp.status_code == 403
 
 
 def test_a_clinician_with_an_active_grant_reads_and_replies(client):
@@ -284,6 +305,15 @@ def test_audit_rows_never_contain_the_message_body(client):
     )
 
     rows = db.execute(select(models.AuditLog.message)).scalars().all()
+    # Round-1 review: create/reply used to commit their state, then call
+    # _write_audit in a SEPARATE commit — an audit failure could 503 after
+    # the thread/message was already durable, with no record it happened.
+    # Fixed by adding the audit row to the SAME commit as the state change
+    # (see create_thread/reply_to_thread's own comments); asserting the
+    # rows actually exist here, not only that they are body-free, is what
+    # would have caught the old two-commit version silently losing them.
+    assert any("messages_thread_create" in r and f"thread_id={thread_id}" in r for r in rows if r)
+    assert any("messages_reply" in r and f"thread_id={thread_id}" in r for r in rows if r)
     joined = "\n".join(r for r in rows if r)
     assert secret_body not in joined
     assert "another sentinel body text" not in joined

@@ -741,15 +741,30 @@ def _ok_body(result) -> Optional[dict]:
     return result if isinstance(result, dict) else None
 
 
-def _authorized_coverage(db: Session, *, patient_id: int, coverage_id: int) -> InsuranceCoverage:
+def _authorized_coverage(
+    db: Session, *, patient_id: int, coverage_id: int, for_update: bool = False
+) -> InsuranceCoverage:
     """The coverage, or a 404 — identically, whether the id does not exist or
     belongs to a different patient. Never distinguish the two: a coverage id
-    is as guessable/sequential as any other integer primary key here."""
-    coverage = db.execute(
-        select(InsuranceCoverage).where(
-            InsuranceCoverage.id == coverage_id, InsuranceCoverage.patient_id == patient_id
-        )
-    ).scalar_one_or_none()
+    is as guessable/sequential as any other integer primary key here.
+
+    `for_update` (round-1 review, 2026-08-23): verify and the status check
+    both read `verification_job_id`, decide something from it, and write it
+    or the coverage's status back — without a lock, two concurrent calls can
+    both read the same "nothing in flight" state and each create its own
+    live payer job for the same coverage. SELECT ... FOR UPDATE serializes
+    them on this row for the rest of the transaction, so the second caller's
+    read reflects the first caller's write. (SQLite, used by this file's
+    tests, has no row-level lock and silently ignores the clause — the
+    tests exercise the mapping logic, not the concurrency guarantee itself,
+    which only a real concurrent-request test against Postgres could.)
+    """
+    query = select(InsuranceCoverage).where(
+        InsuranceCoverage.id == coverage_id, InsuranceCoverage.patient_id == patient_id
+    )
+    if for_update:
+        query = query.with_for_update()
+    coverage = db.execute(query).scalar_one_or_none()
     if coverage is None:
         raise HTTPException(status_code=404, detail="coverage not found")
     return coverage
@@ -803,9 +818,15 @@ def verify_patient_coverage(
 ):
     """Request a verification. Derives the member id server-side from the
     coverage row the path already named and authorized — the browser never
-    supplies or sees it in full (see _mask_member_id above)."""
+    supplies or sees it in full (see _mask_member_id above).
+
+    for_update=True (round-1 review): without a lock, two near-simultaneous
+    Verify clicks both read no-job-in-flight and both create a live payer
+    job for the same coverage. Held through this whole function, including
+    the reuse-check GET to eligibility-service — the second caller blocks
+    until the first's transaction ends and then reads the id it just wrote."""
     _require_patient_grant(db, session, patient_id)
-    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id)
+    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id, for_update=True)
     if not coverage.member_id:
         raise HTTPException(status_code=400, detail="this coverage has no member id on file")
 
@@ -858,8 +879,11 @@ def get_coverage_eligibility_status(
     session: dict = Depends(require_permission("billing.read")),
     db: Session = Depends(get_db),
 ):
+    # for_update=True (round-1 review): this route can also durably write
+    # coverage.status/verified_at below on a terminal result — the same
+    # concurrent-write hazard verify has, held the same way.
     _require_patient_grant(db, session, patient_id)
-    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id)
+    coverage = _authorized_coverage(db, patient_id=patient_id, coverage_id=coverage_id, for_update=True)
     if not coverage.verification_job_id:
         return {"category": "unknown", "message": "Not yet verified", "can_retry": False}
 

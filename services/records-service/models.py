@@ -83,6 +83,13 @@ class User(Base):
     # projection simply hadn't selected it before now.
     full_name = Column(Text)
     role = Column(Text)
+    # Added round-1 review (2026-08-23): create_thread must confirm the
+    # calling patient's OWN chart matches the path's patient_id, not merely
+    # that they hold a grant for it (a grant a clinician also holds would
+    # otherwise let them originate a thread the client's UX reserves for the
+    # patient). NULL for every staff account; set only for a patient's own
+    # account (017), same as gateway's own User model already has it.
+    patient_id = Column(Integer)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
