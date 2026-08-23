@@ -70,9 +70,22 @@ class BedrockConverseToolModel(ToolCapableModel):
             raise ProviderNotConfiguredError("AWS_REGION is not configured")
 
     def converse(self, messages: list, tools: list, *, timeout: float) -> ConverseTurn:
-        import boto3  # lazy import — see module docstring
-        from botocore.config import Config
-        from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+        try:
+            import boto3  # lazy import — see module docstring
+            from botocore.config import Config
+            from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+        except ImportError as exc:
+            # w9-fixes P0 4.6: a deployment can set a real BEDROCK_MODEL_ID
+            # (so __init__ above never raises ProviderNotConfiguredError)
+            # while the image simply doesn't have boto3 installed — that's
+            # exactly this repo's own eligibility-service image, which
+            # deliberately doesn't pin boto3 (see its requirements.txt).
+            # Before this, that raised a bare ModuleNotFoundError here,
+            # which isn't an LLMClientError and escaped
+            # RawBedrockAgentRuntime.handle_message's provider-error catch
+            # as an unhandled 500. A missing SDK is a configuration problem,
+            # same as a missing model id/region above.
+            raise ProviderNotConfiguredError(type(exc).__name__) from exc
 
         client = boto3.client(
             "bedrock-runtime",

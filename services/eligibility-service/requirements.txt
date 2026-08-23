@@ -7,11 +7,19 @@ redis==5.2.1
 # because this service now imports libs.tracing. See libs/tracing/requirements.txt.
 opentelemetry-api==1.29.0
 opentelemetry-sdk==1.29.0
-# Stage 2/3: this service now imports libs.eligibility_agent (visit-chat
-# endpoint). boto3 is intentionally NOT pinned here — the default raw_bedrock
-# runtime only imports it lazily inside a real Converse call, and this repo's
-# own config has no live Bedrock credential (BEDROCK_MODEL_ID=changeme). A
-# deployment that actually enables real Bedrock calls must add
-# libs/eligibility_agent/requirements.txt's boto3 pin here — see
-# adr/0005-eligibility-agent-runtime-and-resilience.md's "unresolved
-# production deployment" section.
+# w9-fixes P0 4.6: this service selects the raw_bedrock runtime by default
+# (ELIGIBILITY_AGENT_RUNTIME, unset here), whose bedrock_tool_port.py imports
+# boto3 lazily inside a real Converse call — the leaving-it-unpinned choice
+# below stopped being safe once a deployment actually sets a real
+# BEDROCK_MODEL_ID: __init__'s own config check passes, so nothing catches
+# the missing SDK until the first real visit-chat message, where it used to
+# surface as an unhandled 500 (bedrock_tool_port.py now normalizes a missing
+# SDK to ProviderNotConfiguredError too, as defense in depth, but a
+# configured deployment should have the dependency it needs regardless).
+# Pinned to the SAME bearer-token-capable versions already proven together
+# in services/records-service/requirements.txt, rather than
+# libs/eligibility_agent/requirements.txt's older boto3==1.35.90 (non-bearer)
+# — see that file's own requirements.txt for why bearer-token support matters
+# here (generic AWS_BEARER_TOKEN_<SERVICE> resolver).
+boto3==1.43.78
+botocore==1.43.78
