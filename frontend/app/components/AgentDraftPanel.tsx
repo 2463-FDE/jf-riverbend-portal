@@ -87,7 +87,7 @@ export default function AgentDraftPanel() {
     <section className="rb-agent-draft" aria-labelledby="agent-draft-heading">
       <h2 id="agent-draft-heading">AI summary draft</h2>
 
-      <div className="rb-field" style={{ maxWidth: 320 }}>
+      <div className="rb-field" style={{ maxWidth: 820 }}>
         <label className="rb-field__label" htmlFor="agent-draft-patient">
           Patient ID
         </label>
@@ -95,6 +95,7 @@ export default function AgentDraftPanel() {
           <input
             id="agent-draft-patient"
             className="rb-input"
+            style={{ flex: "0 1 160px" }}
             value={patientId}
             onChange={(e) => {
               setPatientId(e.target.value);
@@ -106,6 +107,7 @@ export default function AgentDraftPanel() {
           <button
             type="button"
             className="rb-btn"
+            style={{ flex: "0 0 112px" }}
             disabled={busy}
             onClick={() => { setLoadedPatientId(patientId); void call(base); }}
           >
@@ -114,12 +116,20 @@ export default function AgentDraftPanel() {
           <button
             type="button"
             className="rb-btn rb-btn--primary"
+            style={{ flex: "0 0 112px" }}
             disabled={busy}
             onClick={() => { setLoadedPatientId(patientId); void call(base, { method: "POST" }); }}
           >
             Generate
           </button>
-          <PatientName patientId={loadedPatientId} />
+          {/* Fixed wider than PatientName's own 260px default so this
+              panel's names never truncate — the wrapper, not PatientName
+              itself, carries the flex sizing here, since PatientName's own
+              inline flex only takes effect as a direct flex child; every
+              other caller keeps the narrower shared default. */}
+          <div style={{ flex: "0 1 340px" }}>
+            <PatientName patientId={loadedPatientId} />
+          </div>
         </div>
       </div>
 
