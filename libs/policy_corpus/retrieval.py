@@ -9,7 +9,7 @@ dependency-injectable (mirrors libs/rag_corpus/vector_store.py::
 PgVectorStore) so tests never need a real Postgres or pgvector package.
 """
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -39,21 +39,30 @@ class RetrievedChunk:
 
 
 class RetrievalLedger:
-    """Records exactly which citation_ids one retrieve() call actually
-    returned, so a later "the model cited X" step can reject any citation
-    never actually retrieved for THIS request (vector-rag.md: "Reject a
-    model citation that was not present in that request's retrieval
-    ledger"). Scoped to one call/turn — start a fresh ledger per request,
-    never reuse one across turns."""
+    """Records exactly which chunks one retrieve() call actually returned,
+    so a later "the model cited X" step can reject any citation never
+    actually retrieved for THIS request (vector-rag.md: "Reject a model
+    citation that was not present in that request's retrieval ledger") and
+    resolve a valid one back to its source/version/title for display.
+    Scoped to one call/turn — start a fresh ledger per request, never reuse
+    one across turns."""
 
     def __init__(self):
-        self._seen: Set[str] = set()
+        self._chunks: Dict[str, RetrievedChunk] = {}
 
     def record(self, chunks: List[RetrievedChunk]) -> None:
-        self._seen.update(chunk.citation_id for chunk in chunks)
+        for chunk in chunks:
+            self._chunks[chunk.citation_id] = chunk
 
     def is_valid_citation(self, citation_id: str) -> bool:
-        return citation_id in self._seen
+        return citation_id in self._chunks
+
+    def get(self, citation_id: str) -> Optional[RetrievedChunk]:
+        return self._chunks.get(citation_id)
+
+    @property
+    def citation_ids(self) -> Tuple[str, ...]:
+        return tuple(self._chunks)
 
 
 class PolicyRetriever:

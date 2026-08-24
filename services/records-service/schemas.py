@@ -364,3 +364,22 @@ class SendMessageRequest(BaseModel):
 
 class ThreadStatusRequest(BaseModel):
     status: str  # "open" | "closed"
+
+
+class PolicyQuestionRequest(BaseModel):
+    question: str
+
+
+class PolicyCitationOut(BaseModel):
+    citation_id: str
+    source_id: str
+    source_version: str
+    title: str
+    section_id: str
+
+
+class PolicyAnswerOut(BaseModel):
+    answer: str
+    citations: list[PolicyCitationOut]
+    label: str  # "real" | "fixture" | "fallback"
+    termination_reason: str  # "answered" | "no_evidence" | "provider_error" | "citation_invalid"

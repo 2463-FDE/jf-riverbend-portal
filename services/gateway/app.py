@@ -1697,6 +1697,22 @@ def proxy_decide_agent_draft(
                  headers=_agent_headers(session), forward_status=True)
 
 
+@app.post("/policy/ask")
+def proxy_ask_policy_navigator(payload: dict, session: dict = Depends(require_session)):
+    """w-9-2-planner P3: any authenticated session (staff or patient) may
+    ask — there is no patient_id and no data-type permission here, since
+    this never touches patient data. records-service re-derives the
+    caller's role from X-Actor-Id itself (never trusts a forwarded role)
+    and maps it to a read-only audience/workflow scope
+    (libs/policy_navigator.scope_for_role) that determines what policy text
+    is actually visible; `question` is the only thing forwarded from the
+    request body.
+    """
+    question = payload.get("question") if isinstance(payload, dict) else None
+    return _post("records", "/policy/ask", {"question": question},
+                 headers=_agent_headers(session), forward_status=True)
+
+
 @app.get("/patient/me/agent-summary")
 def proxy_own_agent_summary(
     session: dict = Depends(require_permission("own_record.read")),

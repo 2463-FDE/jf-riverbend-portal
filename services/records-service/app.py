@@ -57,6 +57,7 @@ from patient_access_gate import (
 import agent_drafts
 import messaging
 import patient_summary
+import policy_navigator_path
 import review_queue
 import summary_agent_path
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
@@ -76,6 +77,9 @@ from schemas import (
     PatientPage,
     PatientSummary,
     OwnResultsSummary,
+    PolicyAnswerOut,
+    PolicyCitationOut,
+    PolicyQuestionRequest,
     ReviewDecisionOut,
     ReviewDecisionRequest,
     ReviewQueueItem,
@@ -1883,4 +1887,42 @@ def set_thread_status(
         id=thread.id, patient_id=thread.patient_id, subject=thread.subject, status=thread.status,
         created_at=thread.created_at.isoformat() if thread.created_at else "",
         messages=messaging.messages_for(db, thread.id),
+    )
+
+
+_POLICY_QUESTION_MAX = 500
+
+
+@app.post("/policy/ask", response_model=PolicyAnswerOut)
+def ask_policy_navigator(
+    req: PolicyQuestionRequest,
+    x_actor_id: Optional[str] = Header(default=None, alias="X-Actor-Id"),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+    db: Session = Depends(get_db),
+):
+    """Read-only, stateless: explains approved synthetic policy for the
+    caller's own role-derived audience/workflow scope
+    (libs/policy_navigator.scope_for_role). No patient_id, no grant check —
+    this never touches patient data, only the scope-filtered corpus. Not
+    persisted; nothing here writes an audit_logs row or a draft."""
+    _verify_internal_token(x_internal_token)
+    question = (req.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="question must not be blank")
+    if len(question) > _POLICY_QUESTION_MAX:
+        raise HTTPException(status_code=422, detail=f"question must be at most {_POLICY_QUESTION_MAX} characters")
+
+    actor_role = _actor_role(db, parse_user_id(x_actor_id))
+    result = policy_navigator_path.ask_policy_navigator(question, actor_role=actor_role)
+    return PolicyAnswerOut(
+        answer=result.answer,
+        citations=[
+            PolicyCitationOut(
+                citation_id=c.citation_id, source_id=c.source_id, source_version=c.source_version,
+                title=c.title, section_id=c.section_id,
+            )
+            for c in result.citations
+        ],
+        label=result.label,
+        termination_reason=result.termination_reason,
     )
