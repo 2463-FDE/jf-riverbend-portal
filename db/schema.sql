@@ -789,3 +789,26 @@ CREATE TABLE IF NOT EXISTS policy_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS policy_chunks_document_id_idx ON policy_chunks (document_id);
+
+-- ---------------------------------------------------------------------------
+-- policy_chunk_embeddings — kept in sync with
+-- db/migrations/025_policy_chunk_embeddings.sql. Separate from policy_chunks
+-- itself (mirrors rag_embeddings' own separation of record identity from its
+-- embedding); fixed at VECTOR(1024) for amazon.titan-embed-text-v2:0. No
+-- HNSW/ANN index — an exact scan is the deliberate choice at this corpus's
+-- scale (vector-rag.md).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS policy_chunk_embeddings (
+    id           SERIAL PRIMARY KEY,
+    chunk_id     TEXT NOT NULL REFERENCES policy_chunks(chunk_id) ON DELETE CASCADE,
+    provider     TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    dimension    INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding    VECTOR(1024) NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (chunk_id, provider, model)
+);
+
+CREATE INDEX IF NOT EXISTS policy_chunk_embeddings_chunk_id_idx ON policy_chunk_embeddings (chunk_id);
