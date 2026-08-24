@@ -1,0 +1,296 @@
+{
+  "schema_version": 1,
+  "corpus_id": "riverbend-synthetic-training-policies-v1",
+  "notice": "SYNTHETIC TRAINING CORPUS. No real patient data or client production policy. A document describes approved training behavior; it does not prove that the application implements that behavior.",
+  "metadata_authority": "manifest",
+  "ingestion": {
+    "content_root": ".",
+    "allowed_extensions": [".md"],
+    "encoding": "utf-8",
+    "max_document_bytes": 20000,
+    "max_documents": 32,
+    "chunking": {
+      "strategy": "markdown_heading_sections",
+      "max_characters": 1200,
+      "overlap_characters": 120,
+      "minimum_characters": 80,
+      "preserve_heading_path": true
+    },
+    "required_chunk_metadata": [
+      "corpus_id",
+      "source_id",
+      "source_version",
+      "content_sha256",
+      "section_id",
+      "heading_path",
+      "audiences",
+      "workflows",
+      "topics",
+      "synthetic",
+      "approval_status"
+    ]
+  },
+  "retrieval_policy": {
+    "filter_before_text_access": [
+      "retrieval_enabled",
+      "approval_status",
+      "audiences",
+      "workflows"
+    ],
+    "caller_fixed_fields": ["audiences", "workflows"],
+    "model_may_only_narrow": ["topics"],
+    "prohibited_model_controls": [
+      "approval_status",
+      "audiences",
+      "workflows",
+      "content_path",
+      "patient_scope"
+    ],
+    "decision_authority": false,
+    "patient_data_in_corpus": false
+  },
+  "optional_stores": {
+    "vector": {
+      "needed_now": false,
+      "unit": "section_chunk",
+      "stable_key": "source_id@source_version#section_id",
+      "required_pre_filters": ["approval_status", "audiences", "workflows"],
+      "note": "Add an embedding model only when a measured retrieval evaluation shows deterministic workflow/topic retrieval is insufficient."
+    },
+    "graph": {
+      "needed_now": false,
+      "document_node_key": "source_id@source_version",
+      "edge_source": "documents.relationships",
+      "note": "The declared relationships are sufficient for a future graph projection; no graph database is required for this corpus size."
+    }
+  },
+  "documents": [
+    {
+      "source_id": "LAB-REL-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Laboratory Result Release Policy",
+      "owner": "Clinical Governance",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "laboratory_result_release_policy.md",
+      "content_sha256": "685d981ef7b084600f94d5d2fc21cdf9de058e547d81173863c6f18786042a40",
+      "audiences": ["patient", "clinician", "nursing_ma"],
+      "workflows": ["patient_summary", "summary_review"],
+      "topics": ["laboratory_results", "portal_release", "clinician_review"],
+      "allowed_uses": ["training_grounding", "policy_explanation"],
+      "prohibited_uses": ["clinical_decision", "release_authorization", "implementation_evidence"],
+      "relationships": [
+        {"type": "governed_by", "target_source_id": "SOP-AI-REVIEW-001"},
+        {"type": "governed_by", "target_source_id": "CLIN-THRESH-001"}
+      ]
+    },
+    {
+      "source_id": "EDU-A1C-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Patient A1c Education Guide",
+      "owner": "Patient Education / Clinical Governance",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "patient_a1c_education_guide.md",
+      "content_sha256": "29945e736423f8bbc96bf688b4cfbcd63bb1750a015b65d806f72f6c1faff3f4",
+      "audiences": ["patient", "clinician", "nursing_ma"],
+      "workflows": ["patient_summary", "summary_review"],
+      "topics": ["a1c", "patient_education", "laboratory_results"],
+      "allowed_uses": ["training_grounding", "patient_education"],
+      "prohibited_uses": ["diagnosis", "treatment_recommendation", "clinical_decision", "implementation_evidence"],
+      "relationships": [
+        {"type": "related_to", "target_source_id": "LAB-REL-001"},
+        {"type": "governed_by", "target_source_id": "CLIN-THRESH-001"}
+      ]
+    },
+    {
+      "source_id": "SOP-AI-REVIEW-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "AI Summary Review SOP",
+      "owner": "Clinical Governance",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "ai_summary_review_sop.md",
+      "content_sha256": "e81b45942d3c01135e0684cab5b79c438035553f060df36df38ec9feedc4b1bf",
+      "audiences": ["clinician", "nursing_ma"],
+      "workflows": ["summary_review", "rag_governance"],
+      "topics": ["ai_summary", "approval", "rejection", "supersession"],
+      "allowed_uses": ["training_grounding", "review_workflow_explanation"],
+      "prohibited_uses": ["autonomous_approval", "clinical_decision", "implementation_evidence"],
+      "relationships": [
+        {"type": "governs", "target_source_id": "LAB-REL-001"},
+        {"type": "governed_by", "target_source_id": "CLIN-SRC-PRIORITY-001"}
+      ]
+    },
+    {
+      "source_id": "CLIN-SRC-PRIORITY-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Clinical Source-Priority Policy",
+      "owner": "Clinical Governance / Health Information Management",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "clinical_source_priority_policy.md",
+      "content_sha256": "c74ac370527eaf55603f34ea1efe0b19159d63c60c2b1753e07c401bcd6c080c",
+      "audiences": ["clinician", "nursing_ma"],
+      "workflows": ["summary_review", "rag_governance"],
+      "topics": ["source_priority", "conflict_resolution", "provenance"],
+      "allowed_uses": ["training_grounding", "retrieval_policy_explanation"],
+      "prohibited_uses": ["model_selected_authority", "clinical_decision", "implementation_evidence"],
+      "relationships": [
+        {"type": "governs", "target_source_id": "SOP-AI-REVIEW-001"},
+        {"type": "governs", "target_source_id": "CLIN-THRESH-001"}
+      ]
+    },
+    {
+      "source_id": "CLIN-THRESH-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Clinical Threshold Policy",
+      "owner": "Clinical Governance",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "clinical_threshold_policy.md",
+      "content_sha256": "dd96c322f6bfc56dcd17f772c99a144ce4c39945e0048302af814e1b7ca1d2fb",
+      "audiences": ["clinician", "nursing_ma"],
+      "workflows": ["patient_summary", "summary_review", "rag_governance"],
+      "topics": ["thresholds", "reference_ranges", "clinical_interpretation"],
+      "allowed_uses": ["training_grounding", "validation_policy_explanation"],
+      "prohibited_uses": ["invented_threshold", "diagnosis", "clinical_decision", "implementation_evidence"],
+      "relationships": [
+        {"type": "governs", "target_source_id": "LAB-REL-001"},
+        {"type": "governs", "target_source_id": "EDU-A1C-001"}
+      ]
+    },
+    {
+      "source_id": "SCHED-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Appointment Scheduling Policy",
+      "owner": "Patient Access / Scheduling Operations",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "appointment_scheduling_policy.md",
+      "content_sha256": "dd97a6b81422460532e4f746d421c3e8cfbd1ab12a62a8b7eb38f448797cdae0",
+      "audiences": ["patient", "front_desk", "scheduler"],
+      "workflows": ["scheduling"],
+      "topics": ["booking", "cancellation", "rescheduling", "idempotency"],
+      "allowed_uses": ["training_grounding", "scheduling_policy_explanation"],
+      "prohibited_uses": ["autonomous_booking", "authorization_decision", "implementation_evidence"],
+      "relationships": [
+        {"type": "constrained_by", "target_source_id": "GUIDE-REC-ACCESS-001"}
+      ]
+    },
+    {
+      "source_id": "GUIDE-REC-ACCESS-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Patient Records Access Guide",
+      "owner": "Health Information Management / Security",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "patient_records_access_guide.md",
+      "content_sha256": "07348922ae9ba77325ba8d0227d8bb43f0040a58badcc457be316727e3ca75f3",
+      "audiences": ["patient", "front_desk", "clinician", "nursing_ma", "lab", "roi_clerk"],
+      "workflows": ["records_access", "patient_summary", "secure_messaging", "roi"],
+      "topics": ["authorization", "patient_scope", "records_access", "service_trust"],
+      "allowed_uses": ["training_grounding", "access_policy_explanation"],
+      "prohibited_uses": ["authorization_decision", "access_expansion", "implementation_evidence"],
+      "relationships": [
+        {"type": "governs", "target_source_id": "ROI-DISC-001"},
+        {"type": "governs", "target_source_id": "MSG-SECURE-001"}
+      ]
+    },
+    {
+      "source_id": "GUIDE-INTAKE-CONSENT-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "Intake and Consent Guide",
+      "owner": "Patient Access / Privacy / Clinical Operations",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "intake_and_consent_guide.md",
+      "content_sha256": "0dcadb865750714f7ffd5f81801573712dcb59b80c419418989ea816ad8e3729",
+      "audiences": ["patient", "front_desk", "nursing_ma"],
+      "workflows": ["intake_consent"],
+      "topics": ["intake", "consent", "duplicate_handling", "portal_activation"],
+      "allowed_uses": ["training_grounding", "intake_explanation"],
+      "prohibited_uses": ["consent_inference", "identity_merge", "authorization_decision", "implementation_evidence"],
+      "relationships": [
+        {"type": "constrained_by", "target_source_id": "GUIDE-REC-ACCESS-001"}
+      ]
+    },
+    {
+      "source_id": "ROI-DISC-001",
+      "source_version": "1.0",
+      "effective_date": "2026-08-01",
+      "title": "ROI and Disclosure Policy",
+      "owner": "Health Information Management / Privacy",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "roi_and_disclosure_policy.md",
+      "content_sha256": "4f947c9978c8796c483de4bea4ffae3810b6c90f352cff78b968e3bebb175693",
+      "audiences": ["roi_clerk"],
+      "workflows": ["roi"],
+      "topics": ["authorization", "minimum_necessary", "disclosure", "accounting"],
+      "allowed_uses": ["training_grounding", "pending_request_explanation"],
+      "prohibited_uses": ["release_authorization", "autonomous_disclosure", "legal_advice", "implementation_evidence"],
+      "relationships": [
+        {"type": "constrained_by", "target_source_id": "GUIDE-REC-ACCESS-001"}
+      ]
+    },
+    {
+      "source_id": "MSG-SECURE-001",
+      "source_version": "1.1",
+      "effective_date": "2026-08-23",
+      "title": "Secure Messaging Policy",
+      "owner": "Clinical Operations / Patient Access / Privacy",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "secure_messaging_policy.md",
+      "content_sha256": "d782848b698dcbe56971282b6bab472357b33a11894d2b85209c6ef019a9b358",
+      "audiences": ["patient", "clinician", "nursing_ma"],
+      "workflows": ["secure_messaging"],
+      "topics": ["care_team", "active_grants", "non_emergency", "thread_closure"],
+      "allowed_uses": ["training_grounding", "messaging_policy_explanation"],
+      "prohibited_uses": ["recipient_selection", "grant_change", "autonomous_clinical_reply", "emergency_triage", "implementation_evidence"],
+      "relationships": [
+        {"type": "constrained_by", "target_source_id": "GUIDE-REC-ACCESS-001"}
+      ]
+    },
+    {
+      "source_id": "GUIDE-COVERAGE-ELIG-001",
+      "source_version": "1.1",
+      "effective_date": "2026-08-23",
+      "title": "Coverage and Eligibility Status Guide",
+      "owner": "Patient Access / Eligibility Operations",
+      "approval_status": "approved_training",
+      "synthetic": true,
+      "retrieval_enabled": true,
+      "content_path": "coverage_and_eligibility_status_guide.md",
+      "content_sha256": "472b40cc0a41b947bbe46e5bdca249b3fb5e72321f65923fc0c8787ef14bfa7f",
+      "audiences": ["front_desk", "billing"],
+      "workflows": ["coverage_eligibility"],
+      "topics": ["coverage_status", "runtime_category", "benefits", "payer_verification"],
+      "allowed_uses": ["training_grounding", "eligibility_status_explanation"],
+      "prohibited_uses": ["benefit_determination", "payment_guarantee", "cost_estimate", "implementation_evidence"],
+      "relationships": [
+        {"type": "related_to", "target_source_id": "SCHED-001"},
+        {"type": "governed_by", "target_source_id": "CLIN-SRC-PRIORITY-001"}
+      ]
+    }
+  ]
+}
