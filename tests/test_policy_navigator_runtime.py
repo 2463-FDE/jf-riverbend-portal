@@ -112,6 +112,41 @@ def test_zero_retrieved_chunks_is_reported_as_no_evidence():
 
     assert result.termination_reason == "no_evidence"
     assert result.citations == ()
+    # Review fix PN-UNCITED-GROUNDING: the model's own wording is never
+    # trusted for this path — a deterministic reply is substituted, and
+    # substituted text is never labelled "real".
+    assert result.label == "fallback"
+    assert "no approved policy evidence" in result.answer.lower()
+
+
+def test_retrieved_evidence_with_no_citation_is_never_trusted_as_grounded():
+    # The exact PN-UNCITED-GROUNDING gap: real evidence WAS retrieved, but
+    # the model's final reply cites nothing — this must not vacuously pass
+    # as "answered" with an ungrounded claim sitting next to unused evidence.
+    chunk = _chunk("SRC-001@1.0#overview", "Coverage stays active for the plan year.")
+    retriever = _FakeRetriever([[chunk]])
+    model = ScriptedChatModel([_tool_call(), _final("Coverage stays active for the plan year.")])
+
+    result = run_policy_navigator("How long does coverage last?", scope=_SCOPE, retriever=retriever, model=model)
+
+    assert result.termination_reason == "no_evidence"
+    assert result.citations == ()
+    assert result.label == "fallback"
+
+
+def test_a_model_that_never_calls_retrieval_is_never_trusted():
+    # No tool call at all — straight to a final answer from general
+    # knowledge. The ledger stays empty and this must degrade exactly like
+    # any other ungrounded reply, never surface the model's own prose.
+    retriever = _FakeRetriever([[]])
+    model = ScriptedChatModel([_final("Coverage typically lasts one plan year.")])
+
+    result = run_policy_navigator("How long does coverage last?", scope=_SCOPE, retriever=retriever, model=model)
+
+    assert result.termination_reason == "no_evidence"
+    assert result.citations == ()
+    assert result.label == "fallback"
+    assert retriever.calls == []
 
 
 # --- citation validation: the safety net, not the prompt --------------------

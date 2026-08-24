@@ -33,6 +33,9 @@ DEFAULT_MAX_TURNS = 4
 _SAFE_PROVIDER_REPLY = (
     "I couldn't reach the policy navigator just now. Please try again in a moment."
 )
+_SAFE_NO_EVIDENCE_REPLY = (
+    "I found no approved policy evidence for this question within your authorized scope."
+)
 _SAFE_CITATION_INVALID_REPLY = (
     "I can't show that answer safely — it referenced policy text that wasn't actually retrieved "
     "for this question. Please try rephrasing your question."
@@ -167,8 +170,24 @@ def run_policy_navigator(
             model_id=model_id, termination_reason="citation_invalid",
         )
 
-    termination_reason = "answered" if ledger.citation_ids else "no_evidence"
+    if not cited_ids:
+        # Review fix PN-UNCITED-GROUNDING: "answered" must never be reachable
+        # without at least one retrieved, valid citation. Previously, a reply
+        # with zero bracketed citations vacuously passed the check above and
+        # was labelled "answered" whenever the ledger was non-empty (an
+        # ungrounded claim next to real retrieved evidence it never actually
+        # cited) — or, when the ledger WAS empty, the model's own raw prose
+        # was trusted verbatim as the "no_evidence" reply instead of a
+        # verified refusal. Both cases now get the SAME deterministic
+        # substitution, and — per ProvenanceLabel's own contract — text this
+        # module wrote, not the model, is never labelled "real".
+        log.info("policy navigator produced no grounded citation; returning a safe refusal")
+        return PolicyNavigatorResult(
+            answer=_SAFE_NO_EVIDENCE_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
+            model_id=model_id, termination_reason="no_evidence",
+        )
+
     return PolicyNavigatorResult(
         answer=answer_text, citations=_citations_from(ledger, cited_ids), label=resolved.value,
-        model_id=model_id, termination_reason=termination_reason,
+        model_id=model_id, termination_reason="answered",
     )
