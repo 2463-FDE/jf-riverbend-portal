@@ -733,3 +733,59 @@ CREATE TABLE IF NOT EXISTS thread_read_state (
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (thread_id, user_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- policy_documents / policy_chunks — synthetic policy RAG corpus foundation
+-- (w-9-2-planner P2). Kept in sync with db/migrations/024_policy_corpus.sql.
+--
+-- Deliberately separate from rag_embeddings (migration 010): that table is
+-- patient-scoped (mandatory patient_id FK) and fixed at VECTOR(16) for the
+-- fake embedding provider; policy retrieval is audience/workflow-scoped, not
+-- patient-scoped, and has no embedding column yet — see the migration file
+-- for why that is deferred rather than added speculatively.
+--
+-- No patient facts, message bodies, prompts, or provider responses belong in
+-- either table — only the manifest's own declared metadata and synthetic
+-- document text (docs/RagDocs/manifest.json's `patient_data_in_corpus: false`).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS policy_documents (
+    id                SERIAL PRIMARY KEY,
+    corpus_id         TEXT NOT NULL,
+    source_id         TEXT NOT NULL,
+    source_version    TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    owner             TEXT NOT NULL,
+    effective_date    DATE,
+    approval_status   TEXT NOT NULL,
+    synthetic         BOOLEAN NOT NULL,
+    retrieval_enabled BOOLEAN NOT NULL,
+    content_path      TEXT NOT NULL,
+    content_sha256    TEXT NOT NULL,
+    audiences         TEXT[] NOT NULL DEFAULT '{}',
+    workflows         TEXT[] NOT NULL DEFAULT '{}',
+    topics            TEXT[] NOT NULL DEFAULT '{}',
+    allowed_uses      TEXT[] NOT NULL DEFAULT '{}',
+    prohibited_uses   TEXT[] NOT NULL DEFAULT '{}',
+    relationships     JSONB NOT NULL DEFAULT '[]',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_id, source_version)
+);
+
+CREATE INDEX IF NOT EXISTS policy_documents_audiences_gin_idx ON policy_documents USING gin (audiences);
+CREATE INDEX IF NOT EXISTS policy_documents_workflows_gin_idx ON policy_documents USING gin (workflows);
+
+CREATE TABLE IF NOT EXISTS policy_chunks (
+    id             SERIAL PRIMARY KEY,
+    chunk_id       TEXT NOT NULL UNIQUE,
+    document_id    INTEGER NOT NULL REFERENCES policy_documents(id) ON DELETE CASCADE,
+    section_id     TEXT NOT NULL,
+    heading_path   TEXT[] NOT NULL DEFAULT '{}',
+    text           TEXT NOT NULL,
+    chunk_hash     TEXT NOT NULL,
+    char_count     INTEGER NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS policy_chunks_document_id_idx ON policy_chunks (document_id);
