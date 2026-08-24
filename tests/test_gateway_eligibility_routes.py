@@ -142,9 +142,24 @@ class _FakeAppointment:
         self.patient_id = patient_id
 
 
-def _authorize(monkeypatch, *, appointment=None, insurance_id=None):
+class _FakeCoverage:
+    def __init__(self, *, payer_name=None, plan_type=None, member_id=None, status=None, verified_at=None):
+        self.payer_name = payer_name
+        self.plan_type = plan_type
+        self.member_id = member_id
+        self.status = status
+        self.verified_at = verified_at
+
+
+def _authorize(monkeypatch, *, appointment=None, insurance_id=None, coverage=None):
     monkeypatch.setattr(app_mod, "find_authorized_appointment", lambda db, **kw: appointment)
-    monkeypatch.setattr(app_mod, "latest_insurance_member_id", lambda db, **kw: insurance_id)
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id is derived
+    # from the SAME row as coverage_on_file (coverage.member_id), never from
+    # a separately-mocked lookup — so a caller wanting insurance_id set but
+    # no other coverage fields gets a bare _FakeCoverage(member_id=...).
+    if coverage is None and insurance_id is not None:
+        coverage = _FakeCoverage(member_id=insurance_id)
+    monkeypatch.setattr(app_mod, "latest_insurance_coverage", lambda db, **kw: coverage)
 
 
 def test_visit_message_non_numeric_visit_id_is_rejected_without_a_grant_lookup(client, monkeypatch):
@@ -189,12 +204,68 @@ def test_visit_message_authorized_appointment_forwards_server_derived_fields(cli
 
     assert resp.status_code == 200
     assert captured["url"].endswith("/visits/1/messages")
-    assert captured["json"] == {"message": "am I covered?", "patient_id": 1042, "insurance_id": "BCBS-9981"}
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id is now
+    # always derived from the SAME row as coverage_on_file, so a fixture
+    # that gives an insurance_id necessarily produces a matching (masked)
+    # coverage_on_file rather than None.
+    assert captured["json"] == {
+        "message": "am I covered?",
+        "patient_id": 1042,
+        "insurance_id": "BCBS-9981",
+        "coverage_on_file": {
+            "payer_name": None,
+            "plan_type": None,
+            "member_id_masked": "*****9981",
+            "status": None,
+            "verified_at": None,
+        },
+    }
     assert "X-Request-Id" in captured["headers"]
     # Opaque, uuid4-hex shaped — not derived from the session/username.
     correlation_id = captured["headers"]["X-Request-Id"]
     assert len(correlation_id) == 32
     assert "frontdesk" not in correlation_id
+
+
+def test_visit_message_forwards_a_masked_coverage_on_file_snapshot(client, monkeypatch):
+    # w-9-2-planner P1a: coverage_on_file is server-derived the same way
+    # patient_id/insurance_id already are, and never carries the full member
+    # id — only the same masked form the Coverage & Eligibility page shows.
+    _authorize(
+        monkeypatch,
+        appointment=_FakeAppointment(patient_id=1737),
+        insurance_id="KAISER5591",
+        coverage=_FakeCoverage(
+            payer_name="Kaiser",
+            plan_type="HMO",
+            member_id="KAISER5591",
+            status="active",
+            verified_at=None,
+        ),
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(
+            200,
+            {"visit_id": "1", "reply": "ok", "tool_called": False, "termination_reason": "answered", "turns_used": 1},
+        )
+
+    monkeypatch.setattr(app_mod.httpx, "post", fake_post)
+
+    resp = client.post("/visits/1/messages", json={"message": "what's on file?"}, headers=_auth())
+
+    assert resp.status_code == 200
+    coverage_on_file = captured["json"]["coverage_on_file"]
+    assert coverage_on_file["payer_name"] == "Kaiser"
+    assert coverage_on_file["plan_type"] == "HMO"
+    assert coverage_on_file["status"] == "active"
+    assert coverage_on_file["member_id_masked"] == "******5591"
+    # The full member id legitimately appears in top-level insurance_id —
+    # verify_current_eligibility needs it for the live payer call. Only
+    # coverage_on_file's own copy must be masked.
+    assert "KAISER5591" not in str(coverage_on_file)
 
 
 def test_visit_message_ignores_client_supplied_patient_and_insurance_id(client, monkeypatch):
@@ -241,11 +312,40 @@ def test_visit_message_insurance_lookup_failure_returns_503(client, monkeypatch)
     def raise_db_error(db, **kw):
         raise app_mod.SQLAlchemyError("simulated insurance lookup failure")
 
-    monkeypatch.setattr(app_mod, "latest_insurance_member_id", raise_db_error)
+    monkeypatch.setattr(app_mod, "latest_insurance_coverage", raise_db_error)
 
     resp = client.post("/visits/1/messages", json={"message": "hi"}, headers=_auth())
 
     assert resp.status_code == 503
+
+
+def test_visit_message_derives_insurance_id_from_the_same_row_as_coverage_on_file(client, monkeypatch):
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id must come
+    # from the SAME coverage row as coverage_on_file, not a second,
+    # independently-selected row. A coverage row with no member_id must
+    # yield insurance_id=None even if an older row on file does have one —
+    # verification should decline rather than verify a stale identity.
+    _authorize(
+        monkeypatch,
+        appointment=_FakeAppointment(patient_id=1042),
+        coverage=_FakeCoverage(payer_name="Aetna", plan_type="PPO", member_id=None, status="active"),
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(
+            200,
+            {"visit_id": "1", "reply": "ok", "tool_called": False, "termination_reason": "answered", "turns_used": 1},
+        )
+
+    monkeypatch.setattr(app_mod.httpx, "post", fake_post)
+
+    resp = client.post("/visits/1/messages", json={"message": "am I covered?"}, headers=_auth())
+
+    assert resp.status_code == 200
+    assert captured["json"]["insurance_id"] is None
+    assert captured["json"]["coverage_on_file"]["payer_name"] == "Aetna"
 
 
 def test_visit_message_downstream_unreachable_is_a_502(client, monkeypatch):

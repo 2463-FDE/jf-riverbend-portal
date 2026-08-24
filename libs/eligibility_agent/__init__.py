@@ -8,8 +8,8 @@ POST /visits/{visit_id}/messages endpoint — see that service's
 agent_wiring.py.
 """
 from .contracts import (
-    CheckEligibilityArgs,
     EligibilityStatus,
+    NoToolArguments,
     TerminationReason,
     ToolInvocationResult,
     VisitContext,
@@ -27,6 +27,6 @@ __all__ = [
     "VisitContext",
     "VisitTurnResult",
     "TerminationReason",
-    "CheckEligibilityArgs",
+    "NoToolArguments",
     "ToolInvocationResult",
 ]

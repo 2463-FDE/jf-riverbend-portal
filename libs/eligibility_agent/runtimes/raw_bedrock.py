@@ -18,12 +18,21 @@ from libs.safe_logging import get_safe_logger
 
 from ..bedrock_tool_port import BedrockConverseToolModel, ConverseTurn, ToolCapableModel
 from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult, parse_as_of
-from ..eligibility_tool import TOOL_NAME, TOOL_SPEC, CheckEligibilityTool, EligibilityToolConfig
+from ..eligibility_tool import (
+    COVERAGE_TOOL_NAME,
+    COVERAGE_TOOL_SPEC,
+    VERIFY_TOOL_NAME,
+    VERIFY_TOOL_SPEC,
+    EligibilityToolConfig,
+    GetCoverageOnFileTool,
+    VerifyCurrentEligibilityTool,
+)
 from ..memory import VisitMemoryPort
 
 log = get_safe_logger(__name__)
 
-_ALLOWED_TOOLS = frozenset({TOOL_NAME})
+_TOOL_SPECS = [VERIFY_TOOL_SPEC, COVERAGE_TOOL_SPEC]
+_ALLOWED_TOOLS = frozenset({VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME})
 
 _SAFE_PROVIDER_ERROR_REPLY = (
     "I couldn't reach the eligibility assistant just now. Please try again in a "
@@ -57,7 +66,12 @@ class RawBedrockAgentRuntime:
 
     def handle_message(self, visit_id: str, user_message: str) -> VisitTurnResult:
         context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
-        tool = CheckEligibilityTool(context, config=self._tool_config, transport=self._tool_transport)
+        tools_by_name = {
+            VERIFY_TOOL_NAME: VerifyCurrentEligibilityTool(
+                context, config=self._tool_config, transport=self._tool_transport
+            ),
+            COVERAGE_TOOL_NAME: GetCoverageOnFileTool(context),
+        }
 
         messages: list = [{"role": "user", "content": [{"text": user_message}]}]
         tool_called = False
@@ -65,7 +79,7 @@ class RawBedrockAgentRuntime:
 
         for turn in range(1, self._max_turns + 1):
             try:
-                response = self._model.converse(messages, [TOOL_SPEC], timeout=self._timeout_seconds)
+                response = self._model.converse(messages, _TOOL_SPECS, timeout=self._timeout_seconds)
             except LLMClientError as exc:
                 # The provider-error base — covers timeout, transient, and the
                 # non-retryable/response-shape failures the tool port now
@@ -98,11 +112,21 @@ class RawBedrockAgentRuntime:
                     log.warning("agent tool call rejected (reason=unknown_tool)")
                     payload = {"error": "unknown_tool"}
                 else:
-                    result = tool.invoke(call.arguments)
+                    result = tools_by_name[call.name].invoke(call.arguments)
                     payload = result.payload
                     if result.ok:
                         tool_called = True
-                        if "status" in payload:
+                        # Only a VERIFIED (genuinely new, live) outcome from
+                        # verify_current_eligibility may update
+                        # eligibility_status/eligibility_checked_at.
+                        # get_coverage_on_file is a pure read of what's
+                        # already stored — persisting its payload here would
+                        # let a stored-lookup masquerade as a fresh check.
+                        # simulated/unavailable outcomes echo the stored
+                        # status back rather than asserting a new one, so
+                        # they must not overwrite it either — see
+                        # eligibility_tool.py's own docstring on this.
+                        if call.name == VERIFY_TOOL_NAME and payload.get("outcome") == "verified":
                             eligibility_status = EligibilityStatus(payload["status"])
                             # Persist the payer's real verification time (as_of),
                             # NOT now() — a stale fallback carries its original,

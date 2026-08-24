@@ -13,7 +13,9 @@ Stage 3 additions:
     see _start_worker below.
   * A visit-scoped chat endpoint wired to the Stage 2 AgentRuntime
     (agent_wiring.py), reusing this service's own resilient check() via the
-    check_eligibility tool's HTTP call to /eligibility.
+    verify_current_eligibility tool's HTTP call to /eligibility. A second
+    tool, get_coverage_on_file, answers from the stored coverage snapshot
+    bound to the visit instead (w-9-2-planner P1a) — never a new call.
   * Metadata-only OpenTelemetry spans (libs/tracing) — correlation IDs and
     outcome/status attributes only, never a member ID, prompt, or payload.
 """
@@ -279,7 +281,12 @@ def post_visit_message(
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
 ):
     correlation_id = x_request_id or new_correlation_id()
-    bind_visit_context(visit_id, patient_id=req.patient_id, insurance_id=req.insurance_id)
+    bind_visit_context(
+        visit_id,
+        patient_id=req.patient_id,
+        insurance_id=req.insurance_id,
+        coverage_on_file=req.coverage_on_file.model_dump() if req.coverage_on_file else None,
+    )
 
     with safe_span(
         _TRACER_NAME,

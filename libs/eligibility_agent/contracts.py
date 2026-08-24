@@ -50,11 +50,25 @@ def parse_as_of(as_of) -> Optional[datetime]:
 class VisitContext(BaseModel):
     """Structured, visit-scoped memory. NOT a chat transcript — this is the
     entire persistence surface for a visit; there is deliberately no field
-    here for prior messages, prompts, or model responses."""
+    here for prior messages, prompts, or model responses.
+
+    coverage_* fields (w-9-2-planner P1a) are the STORED coverage-on-file
+    snapshot — payer/plan/masked member id/status/last-verified-time —
+    server-derived the same way insurance_id already is (see
+    services/gateway/app.py::proxy_visit_message) and read verbatim by
+    get_coverage_on_file. They are DISTINCT from eligibility_status/
+    eligibility_checked_at below, which record the outcome of a NEW
+    verify_current_eligibility attempt — never conflate the two, or a stored
+    record would look like a fresh payer check."""
 
     visit_id: str
     patient_id: Optional[int] = None
     insurance_id: Optional[str] = None
+    coverage_payer_name: Optional[str] = None
+    coverage_plan_type: Optional[str] = None
+    coverage_member_id_masked: Optional[str] = None
+    coverage_status: Optional[str] = None
+    coverage_verified_at: Optional[datetime] = None
     eligibility_status: Optional[EligibilityStatus] = None
     eligibility_checked_at: Optional[datetime] = None
     updated_at: datetime
@@ -75,16 +89,15 @@ class VisitTurnResult(BaseModel):
     turns_used: int
 
 
-class CheckEligibilityArgs(BaseModel):
-    """The check_eligibility tool's argument schema — deliberately EMPTY.
-
-    The model may call check_eligibility with no arguments at all; it always
-    checks the insurance already on file for the bound visit. `extra="forbid"`
+class NoToolArguments(BaseModel):
+    """Shared argument schema for both eligibility tools — deliberately
+    EMPTY. The model may call either tool with no arguments at all; each
+    always acts on the visit already bound server-side. `extra="forbid"`
     means ANY additional key the model supplies (attempting to smuggle in an
     endpoint, credential, member_id, or an arbitrary patient_id) fails
-    validation before the tool implementation ever runs — and the
-    implementation itself never reads model-supplied identifiers regardless
-    (see eligibility_tool.py). Two independent layers, not one.
+    validation before the tool implementation ever runs — and neither
+    implementation ever reads model-supplied identifiers regardless (see
+    eligibility_tool.py). Two independent layers, not one.
     """
 
     model_config = ConfigDict(extra="forbid")
