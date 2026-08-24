@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import pytest
 
 from conftest import load_module
-from libs.eligibility_agent.contracts import TerminationReason, VisitContext, VisitTurnResult
+from libs.eligibility_agent.contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult
 
 agent_wiring = load_module("services/eligibility-service/agent_wiring.py", "eligibility_agent_wiring")
 
@@ -52,6 +52,17 @@ class _FakeRuntime:
     def handle_message(self, visit_id, message):
         self.calls.append((visit_id, message))
         return self._result
+
+
+class _FakeStreamingRuntime(_FakeRuntime):
+    def __init__(self, result, events):
+        super().__init__(result)
+        self._events = events
+        self.stream_calls = []
+
+    def handle_message_stream(self, visit_id, message):
+        self.stream_calls.append((visit_id, message))
+        yield from self._events
 
 
 # --- get_agent_runtime: unconfigured provider degrades, and only once --------
@@ -155,6 +166,80 @@ def test_handle_visit_message_delegates_to_the_real_runtime(monkeypatch):
 
     assert result is expected
     assert fake_runtime.calls == [("visit-1", "am I covered?")]
+
+
+# --- stream_visit_message (w-9-2-planner P1b) --------------------------------
+
+
+def test_stream_visit_message_degrades_safely_when_runtime_unavailable(monkeypatch):
+    monkeypatch.setattr(agent_wiring, "get_agent_runtime", lambda: None)
+
+    events = list(agent_wiring.stream_visit_message("visit-1", "am I covered?"))
+
+    assert len(events) == 1
+    assert events[0].kind == "error"
+    assert "manually" in events[0].text.lower()
+    assert events[0].termination_reason == TerminationReason.PROVIDER_ERROR
+
+
+def test_stream_visit_message_delegates_to_a_streaming_capable_runtime(monkeypatch):
+    from libs.eligibility_agent.contracts import VisitStreamEvent
+
+    scripted = [
+        VisitStreamEvent(kind="delta", text="You're "),
+        VisitStreamEvent(kind="delta", text="covered."),
+        VisitStreamEvent(kind="done", tool_called=True, termination_reason=TerminationReason.ANSWERED, turns_used=2),
+    ]
+    fake_runtime = _FakeStreamingRuntime(result=None, events=scripted)
+    monkeypatch.setattr(agent_wiring, "get_agent_runtime", lambda: fake_runtime)
+
+    events = list(agent_wiring.stream_visit_message("visit-1", "am I covered?"))
+
+    assert events == scripted
+    assert fake_runtime.stream_calls == [("visit-1", "am I covered?")]
+
+
+def test_stream_visit_message_falls_back_to_one_shot_replay_for_a_non_streaming_runtime(monkeypatch):
+    # A runtime without handle_message_stream (langchain — never wired into
+    # a running service) must still produce a usable, correctly-shaped
+    # stream: the complete reply as one delta, then one done event.
+    expected = VisitTurnResult(
+        visit_id="visit-1",
+        reply="You're covered.",
+        tool_called=True,
+        eligibility_status=EligibilityStatus.ACTIVE,
+        termination_reason=TerminationReason.ANSWERED,
+        turns_used=2,
+    )
+    fake_runtime = _FakeRuntime(expected)  # no handle_message_stream attribute at all
+    monkeypatch.setattr(agent_wiring, "get_agent_runtime", lambda: fake_runtime)
+
+    events = list(agent_wiring.stream_visit_message("visit-1", "am I covered?"))
+
+    assert [e.kind for e in events] == ["delta", "done"]
+    assert events[0].text == "You're covered."
+    assert events[1].eligibility_status == EligibilityStatus.ACTIVE
+    assert events[1].turns_used == 2
+
+
+def test_stream_visit_message_fallback_provider_error_is_one_error_event_not_delta_plus_error(monkeypatch):
+    # Regression guard: the safe reply text must not be sent twice (once as
+    # a delta, once as the error event's text).
+    expected = VisitTurnResult(
+        visit_id="visit-1",
+        reply=agent_wiring.UNAVAILABLE_REPLY,
+        tool_called=False,
+        termination_reason=TerminationReason.PROVIDER_ERROR,
+        turns_used=0,
+    )
+    fake_runtime = _FakeRuntime(expected)
+    monkeypatch.setattr(agent_wiring, "get_agent_runtime", lambda: fake_runtime)
+
+    events = list(agent_wiring.stream_visit_message("visit-1", "check now"))
+
+    assert len(events) == 1
+    assert events[0].kind == "error"
+    assert events[0].text == agent_wiring.UNAVAILABLE_REPLY
 
 
 # --- bind_visit_context -------------------------------------------------------

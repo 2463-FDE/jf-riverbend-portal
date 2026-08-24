@@ -17,7 +17,7 @@ assumption every Settings-at-import-time class in this repo already makes).
 """
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator, Optional
 
 import redis as redis_lib
 
@@ -28,6 +28,7 @@ from libs.eligibility_agent import (
     TerminationReason,
     VisitContext,
     VisitMemoryPort,
+    VisitStreamEvent,
     VisitTurnResult,
     build_agent_runtime,
 )
@@ -94,6 +95,46 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
 
 
 _UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitly None"
+
+
+def stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEvent]:
+    """w-9-2-planner P1b: streaming counterpart to handle_visit_message.
+    Degrades the same way — a missing/misconfigured runtime yields one
+    "error" event carrying UNAVAILABLE_REPLY, never raises. A runtime that
+    doesn't implement handle_message_stream (langchain — a comparison
+    spike never wired into a running service) falls back to its own
+    blocking handle_message and replays the complete reply as a single
+    delta followed by one terminal event; every OTHER caller of this
+    function (the streaming endpoint) never needs to know which case it
+    got."""
+    runtime = get_agent_runtime()
+    if runtime is None:
+        yield VisitStreamEvent(
+            kind="error",
+            text=UNAVAILABLE_REPLY,
+            tool_called=False,
+            eligibility_status=None,
+            termination_reason=TerminationReason.PROVIDER_ERROR,
+            turns_used=0,
+        )
+        return
+
+    stream = getattr(runtime, "handle_message_stream", None)
+    if stream is None:
+        result = runtime.handle_message(visit_id, message)
+        is_error = result.termination_reason == TerminationReason.PROVIDER_ERROR
+        if result.reply and not is_error:
+            yield VisitStreamEvent(kind="delta", text=result.reply)
+        yield VisitStreamEvent(
+            kind="error" if is_error else "done",
+            text=result.reply if is_error else None,
+            tool_called=result.tool_called,
+            eligibility_status=result.eligibility_status,
+            termination_reason=result.termination_reason,
+            turns_used=result.turns_used,
+        )
+        return
+    yield from stream(visit_id, message)
 
 
 def bind_visit_context(

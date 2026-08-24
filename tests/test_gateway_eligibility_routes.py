@@ -6,6 +6,8 @@ so these tests check both "no unauthenticated exposure was added" and that
 upstream status codes (404/409/503) are faithfully forwarded rather than
 flattened to a blanket 200, which the frontend polling surface depends on.
 """
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -359,3 +361,174 @@ def test_visit_message_downstream_unreachable_is_a_502(client, monkeypatch):
     resp = client.post("/visits/1/messages", json={"message": "hi"}, headers=_auth())
 
     assert resp.status_code == 502
+
+
+# --- visit-chat streaming route (w-9-2-planner P1b) --------------------------
+#
+# Authorization must happen entirely BEFORE the downstream stream ever
+# opens — these tests assert that an unauthorized/invalid request never
+# opens an httpx.Client at all, the same "denial before any call" property
+# already proven for the blocking route and for appointments elsewhere in
+# this suite.
+#
+# w-9-2-planner P1b review fix (STREAM-UPSTREAM-STATUS): the route now opens
+# the upstream connection with httpx.Client(...).send(request, stream=True)
+# instead of the httpx.stream(...) context manager, specifically so the
+# upstream status code can be inspected and forwarded BEFORE any
+# StreamingResponse (which commits to 200) is ever constructed. The fake
+# below stands in for both the Client and the response it returns, since
+# send() on it simply returns itself.
+
+
+class _FakeStreamingClient:
+    def __init__(self, *, status_code=200, chunks=None, json_body=None, send_error=None):
+        self.status_code = status_code
+        self._chunks = chunks or []
+        self._json_body = json_body
+        self._send_error = send_error
+        self.closed = False
+        self.built_request = None
+
+    def build_request(self, method, url, json=None, headers=None):
+        self.built_request = {"method": method, "url": url, "json": json, "headers": headers}
+        return self.built_request
+
+    def send(self, request, stream=False):
+        if self._send_error is not None:
+            raise self._send_error
+        return self
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+    def json(self):
+        if self._json_body is None:
+            raise ValueError("no body")
+        return self._json_body
+
+    @property
+    def text(self):
+        return json.dumps(self._json_body) if self._json_body is not None else ""
+
+    def close(self):
+        self.closed = True
+
+
+def test_visit_message_stream_non_numeric_visit_id_is_rejected_before_any_stream_call(client, monkeypatch):
+    called = []
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: called.append(1) or _FakeStreamingClient())
+
+    resp = client.post("/visits/not-a-number/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 403
+    assert called == []
+
+
+def test_visit_message_stream_unauthorized_appointment_is_rejected_before_any_stream_call(client, monkeypatch):
+    _authorize(monkeypatch, appointment=None)
+    called = []
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: called.append(1) or _FakeStreamingClient())
+
+    resp = client.post("/visits/999/messages/stream", json={"message": "am I covered?"}, headers=_auth())
+
+    assert resp.status_code == 403
+    assert called == []
+
+
+def test_visit_message_stream_grant_lookup_failure_is_503_before_any_stream_call(client, monkeypatch):
+    called = []
+
+    def raise_db_error(db, **kw):
+        raise app_mod.SQLAlchemyError("simulated grant lookup failure")
+
+    monkeypatch.setattr(app_mod, "find_authorized_appointment", raise_db_error)
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: called.append(1) or _FakeStreamingClient())
+
+    resp = client.post("/visits/1/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 503
+    assert called == []
+
+
+def test_visit_message_stream_relays_the_authorized_streams_bytes_using_server_derived_fields(client, monkeypatch):
+    _authorize(monkeypatch, appointment=_FakeAppointment(patient_id=1042), insurance_id="BCBS-9981")
+    fake_client = _FakeStreamingClient(
+        status_code=200, chunks=[b'{"kind": "delta", "text": "You"}\n', b'{"kind": "done"}\n']
+    )
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: fake_client)
+
+    resp = client.post(
+        "/visits/1/messages/stream",
+        json={"message": "am I covered?", "patient_id": 9999, "insurance_id": "SMUGGLED"},
+        headers=_auth(),
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    assert resp.text == '{"kind": "delta", "text": "You"}\n{"kind": "done"}\n'
+    assert fake_client.built_request["method"] == "POST"
+    assert fake_client.built_request["url"].endswith("/visits/1/messages/stream")
+    # Ignores caller-supplied patient_id/insurance_id — server-derived only,
+    # same guarantee as the blocking route.
+    assert fake_client.built_request["json"]["patient_id"] == 1042
+    assert fake_client.built_request["json"]["insurance_id"] == "BCBS-9981"
+    assert fake_client.closed is True  # connection released once fully relayed
+
+
+def test_visit_message_stream_forwards_a_non_2xx_upstream_status_instead_of_flattening_to_200(client, monkeypatch):
+    # The exact defect STREAM-UPSTREAM-STATUS closes: eligibility-service
+    # replying 401/422/503 must not be hidden behind an always-200 stream.
+    _authorize(monkeypatch, appointment=_FakeAppointment(patient_id=1042), insurance_id=None)
+    fake_client = _FakeStreamingClient(status_code=503, json_body={"detail": "eligibility-service unavailable"})
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: fake_client)
+
+    resp = client.post("/visits/1/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "eligibility-service unavailable"}
+    assert fake_client.closed is True  # never left dangling once the status is known bad
+
+
+def test_visit_message_stream_connection_open_failure_is_a_real_502_not_a_flattened_200(client, monkeypatch):
+    # Before any upstream status is even known (DNS/connection-refused), the
+    # failure must be a real 502 — not disguised as a successful 200 stream
+    # the way a naive try/except around the whole relay used to produce.
+    # Mirrors _post's own forward_status=True 502 shape exactly (same
+    # {"error": str(e)} body) — not a new leakage surface introduced here.
+    _authorize(monkeypatch, appointment=_FakeAppointment(patient_id=1042), insurance_id=None)
+    fake_client = _FakeStreamingClient(send_error=httpx.ConnectError("connection refused"))
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: fake_client)
+
+    resp = client.post("/visits/1/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 502
+    assert fake_client.closed is True
+
+
+def test_visit_message_stream_mid_stream_failure_after_a_committed_200_ends_in_one_sanitized_error_line(
+    client, monkeypatch
+):
+    # Once the 200 status is already committed (a real upstream connection
+    # opened successfully), a failure DURING iteration has no HTTP status
+    # left to change — it must still end the stream with one sanitized
+    # terminal event, not a silently truncated response read as complete.
+    _authorize(monkeypatch, appointment=_FakeAppointment(patient_id=1042), insurance_id=None)
+    secret_detail = "connection refused to 10.0.0.7:1234 — do not leak this"
+
+    class _MidStreamFailure(_FakeStreamingClient):
+        def iter_bytes(self):
+            yield b'{"kind": "delta", "text": "Part"}\n'
+            raise httpx.ReadError(secret_detail)
+
+    fake_client = _MidStreamFailure(status_code=200)
+    monkeypatch.setattr(app_mod.httpx, "Client", lambda **k: fake_client)
+
+    resp = client.post("/visits/1/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 200
+    assert secret_detail not in resp.text
+    lines = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert lines[0] == {"kind": "delta", "text": "Part"}
+    assert lines[-1]["kind"] == "error"
+    assert lines[-1]["termination_reason"] == "provider_error"
+    assert fake_client.closed is True

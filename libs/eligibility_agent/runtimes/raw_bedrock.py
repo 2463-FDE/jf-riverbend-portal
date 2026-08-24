@@ -1,23 +1,36 @@
 """Default AgentRuntime: an explicit Bedrock Converse tool-calling loop.
 
-No framework — a hand-written loop over ToolCapableModel.converse(), per the
-approved plan's "no framework" requirement for the default runtime. Turns are
-bounded by a plain `for` loop over a fixed range (not a manually-incremented
-counter that could be gotten wrong), so termination is structurally
-guaranteed, not just intended. Every tool call is dispatched through an
-explicit allowlist and strict Pydantic argument validation before the tool
-ever runs; a provider failure or an exhausted turn budget always produces a
-safe, generic reply rather than raising or leaking any diagnostic detail to
-the user.
+No framework — a hand-written loop over ToolCapableModel.converse()/
+converse_stream(), per the approved plan's "no framework" requirement for
+the default runtime. Turns are bounded by a plain `for` loop over a fixed
+range (not a manually-incremented counter that could be gotten wrong), so
+termination is structurally guaranteed, not just intended. Every tool call
+is dispatched through an explicit allowlist and strict Pydantic argument
+validation before the tool ever runs; a provider failure or an exhausted
+turn budget always produces a safe, generic reply rather than raising or
+leaking any diagnostic detail to the user.
+
+handle_message and handle_message_stream (w-9-2-planner P1b) share the same
+turn-bounded loop shape and the same tool-dispatch/persistence-scoping rule
+via _dispatch_tool_call below — a single source of truth for "only a
+VERIFIED verify_current_eligibility outcome may update eligibility_status",
+so the two loops cannot drift into disagreeing about it.
 """
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator, Optional
 
 from libs.llm_client.errors import LLMClientError
 from libs.safe_logging import get_safe_logger
 
 from ..bedrock_tool_port import BedrockConverseToolModel, ConverseTurn, ToolCapableModel
-from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult, parse_as_of
+from ..contracts import (
+    EligibilityStatus,
+    TerminationReason,
+    VisitContext,
+    VisitStreamEvent,
+    VisitTurnResult,
+    parse_as_of,
+)
 from ..eligibility_tool import (
     COVERAGE_TOOL_NAME,
     COVERAGE_TOOL_SPEC,
@@ -64,14 +77,58 @@ class RawBedrockAgentRuntime:
         self._tool_transport = tool_transport
         self._now = now
 
-    def handle_message(self, visit_id: str, user_message: str) -> VisitTurnResult:
-        context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
-        tools_by_name = {
+    def _tools_for(self, context: VisitContext) -> dict:
+        return {
             VERIFY_TOOL_NAME: VerifyCurrentEligibilityTool(
                 context, config=self._tool_config, transport=self._tool_transport
             ),
             COVERAGE_TOOL_NAME: GetCoverageOnFileTool(context),
         }
+
+    def _dispatch_tool_call(self, call, tools_by_name: dict, context: VisitContext):
+        """Returns (payload, ok, context) for one tool call. `context` is
+        the SAME object passed in unless this call is a VERIFIED
+        verify_current_eligibility outcome, in which case it is the newly
+        persisted copy — see the module docstring for why this is the one
+        place that decision is made, shared by both loops below."""
+        if call.name not in _ALLOWED_TOOLS:
+            log.warning("agent tool call rejected (reason=unknown_tool)")
+            return {"error": "unknown_tool"}, False, context
+
+        result = tools_by_name[call.name].invoke(call.arguments)
+        payload = result.payload
+        if not result.ok:
+            log.warning("agent tool call rejected (reason=%s)", payload.get("error", "invalid"))
+            return payload, False, context
+
+        # Only a VERIFIED (genuinely new, live) outcome from
+        # verify_current_eligibility may update eligibility_status/
+        # eligibility_checked_at. get_coverage_on_file is a pure read of
+        # what's already stored — persisting its payload here would let a
+        # stored-lookup masquerade as a fresh check. simulated/unavailable
+        # outcomes echo the stored status back rather than asserting a new
+        # one, so they must not overwrite it either — see
+        # eligibility_tool.py's own docstring on this.
+        if call.name == VERIFY_TOOL_NAME and payload.get("outcome") == "verified":
+            status = EligibilityStatus(payload["status"])
+            # Persist the payer's real verification time (as_of), NOT
+            # now() — a stale fallback carries its original, older
+            # checked_at and must not look freshly checked. Absent/
+            # unparseable as_of preserves the prior time.
+            checked_at = parse_as_of(payload.get("as_of")) or context.eligibility_checked_at
+            context = context.model_copy(
+                update={
+                    "eligibility_status": status,
+                    "eligibility_checked_at": checked_at,
+                    "updated_at": self._now(),
+                }
+            )
+            self._memory.put(context)
+        return payload, True, context
+
+    def handle_message(self, visit_id: str, user_message: str) -> VisitTurnResult:
+        context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
+        tools_by_name = self._tools_for(context)
 
         messages: list = [{"role": "user", "content": [{"text": user_message}]}]
         tool_called = False
@@ -108,41 +165,10 @@ class RawBedrockAgentRuntime:
             messages.append({"role": "assistant", "content": _assistant_content(response)})
             tool_result_blocks = []
             for call in response.tool_calls:
-                if call.name not in _ALLOWED_TOOLS:
-                    log.warning("agent tool call rejected (reason=unknown_tool)")
-                    payload = {"error": "unknown_tool"}
-                else:
-                    result = tools_by_name[call.name].invoke(call.arguments)
-                    payload = result.payload
-                    if result.ok:
-                        tool_called = True
-                        # Only a VERIFIED (genuinely new, live) outcome from
-                        # verify_current_eligibility may update
-                        # eligibility_status/eligibility_checked_at.
-                        # get_coverage_on_file is a pure read of what's
-                        # already stored — persisting its payload here would
-                        # let a stored-lookup masquerade as a fresh check.
-                        # simulated/unavailable outcomes echo the stored
-                        # status back rather than asserting a new one, so
-                        # they must not overwrite it either — see
-                        # eligibility_tool.py's own docstring on this.
-                        if call.name == VERIFY_TOOL_NAME and payload.get("outcome") == "verified":
-                            eligibility_status = EligibilityStatus(payload["status"])
-                            # Persist the payer's real verification time (as_of),
-                            # NOT now() — a stale fallback carries its original,
-                            # older checked_at and must not look freshly checked.
-                            # Absent/unparseable as_of preserves the prior time.
-                            checked_at = parse_as_of(payload.get("as_of")) or context.eligibility_checked_at
-                            context = context.model_copy(
-                                update={
-                                    "eligibility_status": eligibility_status,
-                                    "eligibility_checked_at": checked_at,
-                                    "updated_at": self._now(),
-                                }
-                            )
-                            self._memory.put(context)
-                    else:
-                        log.warning("agent tool call rejected (reason=%s)", payload.get("error", "invalid"))
+                payload, ok, context = self._dispatch_tool_call(call, tools_by_name, context)
+                if ok:
+                    tool_called = True
+                    eligibility_status = context.eligibility_status
                 tool_result_blocks.append(
                     {"toolResult": {"toolUseId": call.id, "content": [{"json": payload}]}}
                 )
@@ -151,6 +177,93 @@ class RawBedrockAgentRuntime:
         return VisitTurnResult(
             visit_id=visit_id,
             reply=_SAFE_MAX_TURNS_REPLY,
+            tool_called=tool_called,
+            eligibility_status=eligibility_status,
+            termination_reason=TerminationReason.MAX_TURNS,
+            turns_used=self._max_turns,
+        )
+
+    def handle_message_stream(self, visit_id: str, user_message: str) -> Iterator[VisitStreamEvent]:
+        """w-9-2-planner P1b: same bounded loop and dispatch rule as
+        handle_message, but forwards each text_delta from the model AS IT
+        ARRIVES instead of buffering a complete reply. Tool calls are never
+        forwarded — only dispatched internally, exactly like handle_message
+        — so a tool-resolution turn (the normal case for this agent)
+        produces no output at all until the model's actual answer starts
+        streaming; the caller may show a spinner in the meantime, per
+        agents.md.
+
+        Ends in exactly one terminal event: "done" (safe categorical
+        metadata, mirroring VisitTurnResult) or "error" (one sanitized
+        message, never a partial answer represented as complete). If the
+        caller simply stops iterating (a client disconnect), this generator
+        is closed by Python at its current `yield` — the `finally` in
+        BedrockConverseToolModel.converse_stream already closes the
+        underlying provider stream, and no further tool/model calls happen
+        for this visit."""
+        context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
+        tools_by_name = self._tools_for(context)
+
+        messages: list = [{"role": "user", "content": [{"text": user_message}]}]
+        tool_called = False
+        eligibility_status: Optional[EligibilityStatus] = context.eligibility_status
+
+        for turn in range(1, self._max_turns + 1):
+            collected_tool_calls = []
+            try:
+                for event in self._model.converse_stream(messages, _TOOL_SPECS, timeout=self._timeout_seconds):
+                    if event.kind == "text_delta" and event.text:
+                        yield VisitStreamEvent(kind="delta", text=event.text)
+                    elif event.kind == "tool_call" and event.tool_call is not None:
+                        collected_tool_calls.append(event.tool_call)
+            except LLMClientError as exc:
+                log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
+                yield VisitStreamEvent(
+                    kind="error",
+                    text=_SAFE_PROVIDER_ERROR_REPLY,
+                    tool_called=tool_called,
+                    eligibility_status=eligibility_status,
+                    termination_reason=TerminationReason.PROVIDER_ERROR,
+                    turns_used=turn,
+                )
+                return
+
+            if not collected_tool_calls:
+                yield VisitStreamEvent(
+                    kind="done",
+                    tool_called=tool_called,
+                    eligibility_status=eligibility_status,
+                    termination_reason=TerminationReason.ANSWERED,
+                    turns_used=turn,
+                )
+                return
+
+            messages.append(
+                {"role": "assistant", "content": [
+                    {"toolUse": {"toolUseId": c.id, "name": c.name, "input": c.arguments}} for c in collected_tool_calls
+                ]}
+            )
+            tool_result_blocks = []
+            for call in collected_tool_calls:
+                payload, ok, context = self._dispatch_tool_call(call, tools_by_name, context)
+                if ok:
+                    tool_called = True
+                    eligibility_status = context.eligibility_status
+                tool_result_blocks.append(
+                    {"toolResult": {"toolUseId": call.id, "content": [{"json": payload}]}}
+                )
+            messages.append({"role": "user", "content": tool_result_blocks})
+
+        # w-9-2-planner P1b review fix (STREAM-MAX-TURNS-BLANK): the blocking
+        # handle_message above returns _SAFE_MAX_TURNS_REPLY as its reply on
+        # this same branch; the streaming path was emitting a bare "done"
+        # with no text at all. VisitStreamEvent's own contract (see
+        # contracts.py) says "done" never carries reply text — it must
+        # arrive as a "delta" first, exactly like every other piece of
+        # user-facing answer text.
+        yield VisitStreamEvent(kind="delta", text=_SAFE_MAX_TURNS_REPLY)
+        yield VisitStreamEvent(
+            kind="done",
             tool_called=tool_called,
             eligibility_status=eligibility_status,
             termination_reason=TerminationReason.MAX_TURNS,

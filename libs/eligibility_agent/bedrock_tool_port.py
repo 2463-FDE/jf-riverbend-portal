@@ -15,10 +15,11 @@ ProviderTransientError/ProviderNotConfiguredError vocabulary rather than
 inventing a parallel one, since it's the same retryable-vs-not distinction
 for the same underlying AWS SDK, just behind a different method shape.
 """
+import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 from libs.llm_client.errors import (
     ProviderCallError,
@@ -33,6 +34,20 @@ _RETRYABLE_ERROR_CODES = {
     "ServiceUnavailableException",
     "ModelNotReadyException",
     "InternalServerException",
+}
+
+# w-9-2-planner P1b review fix (CS-ERROR-EVENTS): ConverseStream delivers a
+# mid-stream provider failure as one of these top-level event keys, not as a
+# raised ClientError — the SDK iterator itself keeps yielding normally, so a
+# loop that only recognizes contentBlockStart/Delta/Stop and messageStop
+# silently treats the failure as if the turn simply ended. Each maps to the
+# same timeout/transient/call-error vocabulary converse() already uses.
+_STREAM_ERROR_EVENT_TYPES = {
+    "throttlingException": ProviderTransientError,
+    "serviceUnavailableException": ProviderTransientError,
+    "internalServerException": ProviderTransientError,
+    "modelStreamErrorException": ProviderTransientError,
+    "validationException": ProviderCallError,
 }
 
 
@@ -50,6 +65,21 @@ class ConverseTurn:
     stop_reason: str = ""
 
 
+@dataclass(frozen=True)
+class ConverseStreamEvent:
+    """One increment of a streamed turn — w-9-2-planner P1b. `kind` is
+    "text_delta" (a piece of user-facing answer text, safe to forward to the
+    browser as it arrives), "tool_call" (a fully-assembled tool call, never
+    forwarded to the browser — internal dispatch only), or "stop" (the turn
+    ended; carries Bedrock's own stop_reason, itself just a short enum
+    string, not raw provider output)."""
+
+    kind: str
+    text: Optional[str] = None
+    tool_call: Optional[ToolCall] = None
+    stop_reason: str = ""
+
+
 class ToolCapableModel(ABC):
     """A single-turn, tool-capable model call — the seam that makes the
     raw_bedrock AgentRuntime swappable/testable, mirroring how
@@ -58,6 +88,21 @@ class ToolCapableModel(ABC):
     @abstractmethod
     def converse(self, messages: list, tools: list, *, timeout: float) -> ConverseTurn:
         raise NotImplementedError
+
+    def converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
+        """Default, non-streaming fallback: a single blocking converse()
+        call, replayed as one text_delta (if any) + any tool_calls + a stop
+        event. Real incremental delivery is only implemented for
+        BedrockConverseToolModel below (this repo's actual default runtime);
+        every other ToolCapableModel adapter (Ollama, test doubles) still
+        WORKS through this fallback, just without token-level granularity —
+        an honest degrade, not a broken one."""
+        turn = self.converse(messages, tools, timeout=timeout)
+        if turn.text:
+            yield ConverseStreamEvent(kind="text_delta", text=turn.text)
+        for call in turn.tool_calls:
+            yield ConverseStreamEvent(kind="tool_call", tool_call=call)
+        yield ConverseStreamEvent(kind="stop", stop_reason=turn.stop_reason)
 
 
 class BedrockConverseToolModel(ToolCapableModel):
@@ -144,3 +189,113 @@ class BedrockConverseToolModel(ToolCapableModel):
             tool_calls=tool_calls,
             stop_reason=response.get("stopReason", ""),
         )
+
+    def converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
+        """w-9-2-planner P1b: Bedrock's ConverseStream API, translated to
+        ConverseStreamEvent. Text deltas are yielded AS THEY ARRIVE — the
+        caller (RawBedrockAgentRuntime) forwards exactly these to the
+        browser, live. A toolUse content block's `input` streams as
+        fragments of a JSON string across several deltas — accumulated
+        silently here and parsed once as a whole on contentBlockStop; a
+        tool call is never itself forwarded to the browser, only dispatched
+        internally by the runtime.
+
+        Error translation mirrors converse() above: the same timeout/
+        transient/call-error vocabulary, whether raised before the stream
+        opens or partway through iterating it (a stream that fails mid-turn
+        after already yielding some text still ends in a raised
+        LLMClientError here, never a silent truncation reported as
+        complete — the runtime's own try/except around this generator is
+        what turns that into one sanitized terminal error event)."""
+        try:
+            import boto3  # lazy import — see module docstring
+            from botocore.config import Config
+            from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+        except ImportError as exc:
+            raise ProviderNotConfiguredError(type(exc).__name__) from exc
+
+        client = boto3.client(
+            "bedrock-runtime",
+            region_name=self._region,
+            config=Config(connect_timeout=timeout, read_timeout=timeout, retries={"max_attempts": 0}),
+        )
+        tool_config = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": t["name"],
+                        "description": t["description"],
+                        "inputSchema": {"json": t["input_schema"]},
+                    }
+                }
+                for t in tools
+            ]
+        }
+        try:
+            response = client.converse_stream(modelId=self._model_id, messages=messages, toolConfig=tool_config)
+            event_stream = response["stream"]
+        except (ConnectTimeoutError, ReadTimeoutError) as exc:
+            raise ProviderTimeoutError(type(exc).__name__) from exc
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code in _RETRYABLE_ERROR_CODES:
+                raise ProviderTransientError(type(exc).__name__) from exc
+            raise ProviderCallError(error_code or type(exc).__name__) from exc
+
+        pending_tool_use: Optional[dict] = None  # {"id", "name", "input_json": [fragments]}
+        saw_stop = False
+        try:
+            for event in event_stream:
+                error_key = next((k for k in _STREAM_ERROR_EVENT_TYPES if k in event), None)
+                if error_key is not None:
+                    # An in-band failure event, not a raised ClientError — the
+                    # SDK iterator would otherwise just end normally right
+                    # here, reading as a clean (but truncated) completion.
+                    raise _STREAM_ERROR_EVENT_TYPES[error_key](error_key)
+                if "contentBlockStart" in event:
+                    start = event["contentBlockStart"].get("start", {})
+                    if "toolUse" in start:
+                        pending_tool_use = {
+                            "id": start["toolUse"]["toolUseId"],
+                            "name": start["toolUse"]["name"],
+                            "input_json": [],
+                        }
+                elif "contentBlockDelta" in event:
+                    delta = event["contentBlockDelta"].get("delta", {})
+                    if "text" in delta:
+                        yield ConverseStreamEvent(kind="text_delta", text=delta["text"])
+                    elif "toolUse" in delta and pending_tool_use is not None:
+                        pending_tool_use["input_json"].append(delta["toolUse"].get("input", ""))
+                elif "contentBlockStop" in event:
+                    if pending_tool_use is not None:
+                        raw = "".join(pending_tool_use["input_json"])
+                        try:
+                            arguments = json.loads(raw) if raw else {}
+                        except (ValueError, TypeError):
+                            arguments = {}
+                        yield ConverseStreamEvent(
+                            kind="tool_call",
+                            tool_call=ToolCall(
+                                id=pending_tool_use["id"], name=pending_tool_use["name"], arguments=arguments
+                            ),
+                        )
+                        pending_tool_use = None
+                elif "messageStop" in event:
+                    saw_stop = True
+                    yield ConverseStreamEvent(kind="stop", stop_reason=event["messageStop"].get("stopReason", ""))
+            if not saw_stop:
+                # The iterator exhausted without ever delivering messageStop
+                # or a recognized error event — a truncated stream must not
+                # be treated as a normal completion (see CS-ERROR-EVENTS).
+                raise ProviderCallError("StreamEndedWithoutStop")
+        except (ConnectTimeoutError, ReadTimeoutError) as exc:
+            raise ProviderTimeoutError(type(exc).__name__) from exc
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code in _RETRYABLE_ERROR_CODES:
+                raise ProviderTransientError(type(exc).__name__) from exc
+            raise ProviderCallError(error_code or type(exc).__name__) from exc
+        finally:
+            close = getattr(event_stream, "close", None)
+            if callable(close):
+                close()

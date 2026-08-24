@@ -13,6 +13,7 @@ from .contracts import (
     TerminationReason,
     ToolInvocationResult,
     VisitContext,
+    VisitStreamEvent,
     VisitTurnResult,
 )
 from .memory import RedisVisitMemory, VisitMemoryPort
@@ -26,6 +27,7 @@ __all__ = [
     "EligibilityStatus",
     "VisitContext",
     "VisitTurnResult",
+    "VisitStreamEvent",
     "TerminationReason",
     "NoToolArguments",
     "ToolInvocationResult",
