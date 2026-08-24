@@ -277,3 +277,19 @@ export interface EligibilityResult {
   message?: string;
   can_retry?: boolean;
 }
+
+// w-9-2-planner P3 — policy navigator (read-only).
+export interface PolicyCitation {
+  citation_id: string;
+  source_id: string;
+  source_version: string;
+  title: string;
+  section_id: string;
+}
+
+export interface PolicyAnswer {
+  answer: string;
+  citations: PolicyCitation[];
+  label: string; // "real" | "fixture" | "fallback"
+  termination_reason: string; // "answered" | "no_evidence" | "provider_error" | "citation_invalid"
+}

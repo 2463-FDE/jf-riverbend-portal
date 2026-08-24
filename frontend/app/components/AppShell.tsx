@@ -56,6 +56,15 @@ const NAV_COVERAGE: NavItem = {
   icon: <IconBilling className="rb-nav__icon" />,
 };
 
+// w-9-2-planner P3: no permission gate — any authenticated session may ask
+// (services/gateway/app.py::proxy_ask_policy_navigator uses require_session,
+// not require_permission). Shown to every role, patients included.
+const NAV_POLICY: NavItem = {
+  href: "/policy",
+  label: "Policy navigator",
+  icon: <IconRecords className="rb-nav__icon" />,
+};
+
 // What a patient sees. Every entry in NAV above is a staff route that a
 // patient account is refused — the `patient` role holds no staff permission
 // at all — so showing them that menu would be five links that each fail. The
@@ -67,6 +76,7 @@ const NAV_PATIENT: NavItem[] = [
   { href: "/", label: "Home", icon: <IconDashboard className="rb-nav__icon" /> },
   { href: "/my-results", label: "Your results", icon: <IconLab className="rb-nav__icon" /> },
   NAV_MESSAGES,
+  NAV_POLICY,
 ];
 
 // Shown only to roles that actually hold summary_review.decide. `staff` was
@@ -107,7 +117,7 @@ function navFor(user: PortalUser | null): NavItem[] {
   let items = _MAY_REVIEW.has(role) ? [...NAV, NAV_REVIEW] : [...NAV];
   if (_MAY_MESSAGE.has(role)) items = [...items, NAV_MESSAGES];
   if (_MAY_VIEW_COVERAGE.has(role)) items = [...items, NAV_COVERAGE];
-  return items;
+  return [...items, NAV_POLICY];
 }
 
 function Logo({ className }: { className?: string }) {
