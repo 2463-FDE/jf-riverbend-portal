@@ -6,6 +6,10 @@ httpx==0.28.1
 pydantic==2.10.4
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
+# db/policy_corpus_ingest.py imports this eagerly (it's a standalone script,
+# not a lazy-import library module) — tests/test_policy_corpus_ingest_script.py
+# needs it importable. Matches libs/rag_corpus/requirements.txt's pin.
+pgvector==0.4.2
 fastapi==0.115.6
 PyYAML==6.0.2
 
