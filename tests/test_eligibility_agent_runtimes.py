@@ -729,10 +729,18 @@ def test_stream_bounded_by_max_turns_emits_done_with_max_turns_reason():
 
     events = list(runtime.handle_message_stream("visit-1", "keep checking"))
 
+    # w-9-2-planner P1b review fix (STREAM-MAX-TURNS-BLANK): the streaming
+    # path used to emit a bare "done" with no reply text at all on this
+    # branch — unlike handle_message's equivalent, which returns
+    # _SAFE_MAX_TURNS_REPLY as its reply. The text must arrive as a "delta"
+    # (VisitStreamEvent's own contract: "done" never carries reply text).
     done = events[-1]
     assert done.kind == "done"
     assert done.termination_reason == TerminationReason.MAX_TURNS
     assert done.turns_used == max_turns
+    deltas = [e for e in events if e.kind == "delta"]
+    assert deltas, "expected a delta carrying the max-turns reply text"
+    assert "try again" in deltas[-1].text.lower()
 
 
 def test_stream_stopping_early_never_triggers_further_model_or_tool_calls():

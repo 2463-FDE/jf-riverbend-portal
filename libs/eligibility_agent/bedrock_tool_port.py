@@ -36,6 +36,20 @@ _RETRYABLE_ERROR_CODES = {
     "InternalServerException",
 }
 
+# w-9-2-planner P1b review fix (CS-ERROR-EVENTS): ConverseStream delivers a
+# mid-stream provider failure as one of these top-level event keys, not as a
+# raised ClientError — the SDK iterator itself keeps yielding normally, so a
+# loop that only recognizes contentBlockStart/Delta/Stop and messageStop
+# silently treats the failure as if the turn simply ended. Each maps to the
+# same timeout/transient/call-error vocabulary converse() already uses.
+_STREAM_ERROR_EVENT_TYPES = {
+    "throttlingException": ProviderTransientError,
+    "serviceUnavailableException": ProviderTransientError,
+    "internalServerException": ProviderTransientError,
+    "modelStreamErrorException": ProviderTransientError,
+    "validationException": ProviderCallError,
+}
+
 
 @dataclass(frozen=True)
 class ToolCall:
@@ -229,8 +243,15 @@ class BedrockConverseToolModel(ToolCapableModel):
             raise ProviderCallError(error_code or type(exc).__name__) from exc
 
         pending_tool_use: Optional[dict] = None  # {"id", "name", "input_json": [fragments]}
+        saw_stop = False
         try:
             for event in event_stream:
+                error_key = next((k for k in _STREAM_ERROR_EVENT_TYPES if k in event), None)
+                if error_key is not None:
+                    # An in-band failure event, not a raised ClientError — the
+                    # SDK iterator would otherwise just end normally right
+                    # here, reading as a clean (but truncated) completion.
+                    raise _STREAM_ERROR_EVENT_TYPES[error_key](error_key)
                 if "contentBlockStart" in event:
                     start = event["contentBlockStart"].get("start", {})
                     if "toolUse" in start:
@@ -260,7 +281,13 @@ class BedrockConverseToolModel(ToolCapableModel):
                         )
                         pending_tool_use = None
                 elif "messageStop" in event:
+                    saw_stop = True
                     yield ConverseStreamEvent(kind="stop", stop_reason=event["messageStop"].get("stopReason", ""))
+            if not saw_stop:
+                # The iterator exhausted without ever delivering messageStop
+                # or a recognized error event — a truncated stream must not
+                # be treated as a normal completion (see CS-ERROR-EVENTS).
+                raise ProviderCallError("StreamEndedWithoutStop")
         except (ConnectTimeoutError, ReadTimeoutError) as exc:
             raise ProviderTimeoutError(type(exc).__name__) from exc
         except ClientError as exc:

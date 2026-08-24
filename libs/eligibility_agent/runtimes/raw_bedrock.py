@@ -254,6 +254,14 @@ class RawBedrockAgentRuntime:
                 )
             messages.append({"role": "user", "content": tool_result_blocks})
 
+        # w-9-2-planner P1b review fix (STREAM-MAX-TURNS-BLANK): the blocking
+        # handle_message above returns _SAFE_MAX_TURNS_REPLY as its reply on
+        # this same branch; the streaming path was emitting a bare "done"
+        # with no text at all. VisitStreamEvent's own contract (see
+        # contracts.py) says "done" never carries reply text — it must
+        # arrive as a "delta" first, exactly like every other piece of
+        # user-facing answer text.
+        yield VisitStreamEvent(kind="delta", text=_SAFE_MAX_TURNS_REPLY)
         yield VisitStreamEvent(
             kind="done",
             tool_called=tool_called,

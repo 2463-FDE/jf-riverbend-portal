@@ -234,6 +234,7 @@ def test_converse_stream_never_emits_a_text_delta_for_tool_use_input_fragments(m
         {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "t1", "name": "verify_current_eligibility"}}}},
         {"contentBlockDelta": {"delta": {"toolUse": {"input": "{}"}}}},
         {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "tool_use"}},
     ]
     _install_fake_boto3(monkeypatch, stream_events=events)
 
@@ -259,6 +260,50 @@ def test_converse_stream_mid_stream_failure_raises_rather_than_truncating_silent
 
     collected = []
     with pytest.raises(ProviderTransientError):
+        for event in _model().converse_stream([], _TOOLS, timeout=10):
+            collected.append(event)
+    assert [e.text for e in collected if e.kind == "text_delta"] == ["Partial"]
+
+
+@pytest.mark.parametrize(
+    "event_key,expected_error",
+    [
+        ("throttlingException", ProviderTransientError),
+        ("serviceUnavailableException", ProviderTransientError),
+        ("internalServerException", ProviderTransientError),
+        ("modelStreamErrorException", ProviderTransientError),
+        ("validationException", ProviderCallError),
+    ],
+)
+def test_converse_stream_in_band_error_events_raise_rather_than_end_silently(monkeypatch, event_key, expected_error):
+    # w-9-2-planner P1b review fix (CS-ERROR-EVENTS): Bedrock delivers a
+    # mid-stream failure as one of these top-level event keys, not as a
+    # raised ClientError — the SDK iterator itself keeps going normally. A
+    # loop that only recognizes contentBlock*/messageStop must not treat
+    # this as a clean (if truncated) completion.
+    events = [
+        {"contentBlockDelta": {"delta": {"text": "Partial"}}},
+        {event_key: {"message": "provider trouble"}},
+    ]
+    _install_fake_boto3(monkeypatch, stream_events=events)
+
+    collected = []
+    with pytest.raises(expected_error):
+        for event in _model().converse_stream([], _TOOLS, timeout=10):
+            collected.append(event)
+    assert [e.text for e in collected if e.kind == "text_delta"] == ["Partial"]
+    assert all(e.kind != "stop" for e in collected)
+
+
+def test_converse_stream_ending_without_a_stop_event_raises_provider_call_error(monkeypatch):
+    # Defense in depth: a stream that exhausts without ever delivering
+    # messageStop or a recognized error event must not be treated as a
+    # normal, complete answer.
+    events = [{"contentBlockDelta": {"delta": {"text": "Partial"}}}]
+    _install_fake_boto3(monkeypatch, stream_events=events)
+
+    collected = []
+    with pytest.raises(ProviderCallError):
         for event in _model().converse_stream([], _TOOLS, timeout=10):
             collected.append(event)
     assert [e.text for e in collected if e.kind == "text_delta"] == ["Partial"]

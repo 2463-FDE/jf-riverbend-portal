@@ -1010,26 +1010,54 @@ def proxy_visit_message_stream(
     sanitization boundary (never a prompt, tool payload, retrieved text, or
     raw error) is enforced upstream, in libs/eligibility_agent and
     agent_wiring.py, not re-implemented at this layer.
+
+    w-9-2-planner P1b review fix (STREAM-UPSTREAM-STATUS): a
+    StreamingResponse commits to HTTP 200 the moment it's constructed and
+    returned — well before its generator body ever runs — so a naive
+    `with httpx.stream(...) as upstream:` INSIDE the generator can only ever
+    surface a non-2xx upstream status (401/422/503) as a 200 stream carrying
+    a sanitized error line. That is inconsistent with proxy_visit_message's
+    own forward_status=True, and hides the real status from any caller that
+    checks it. The connection is opened here, BEFORE returning any response,
+    with the same status forwarded verbatim (mirrors _post's forward_status
+    shape) for a non-2xx; only once a 2xx is confirmed does this method
+    switch into streaming, reusing that same already-open connection rather
+    than opening a second one.
     """
     downstream_payload = _authorize_visit_and_build_payload(visit_id, payload, session, db)
 
-    def relay():
-        try:
-            with httpx.stream(
+    client = httpx.Client(timeout=60)
+    try:
+        upstream = client.send(
+            client.build_request(
                 "POST",
                 f"{SERVICES['eligibility']}/visits/{visit_id}/messages/stream",
                 json=downstream_payload,
                 headers=_internal_headers(_correlation_headers()),
-                timeout=60,
-            ) as upstream:
-                for chunk in upstream.iter_bytes():
-                    yield chunk
+            ),
+            stream=True,
+        )
+    except Exception as e:
+        client.close()
+        log.error("proxy stream %s failed to open: %s", visit_id, e)
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+    if upstream.status_code >= 300:
+        body = _safe_json(upstream)
+        upstream.close()
+        client.close()
+        return JSONResponse(status_code=upstream.status_code, content=body)
+
+    def relay():
+        try:
+            for chunk in upstream.iter_bytes():
+                yield chunk
         except Exception as e:
-            # Mirrors _post's own except-and-degrade shape for this route's
-            # non-streaming twin — a downstream outage here must still end
-            # the stream with one sanitized terminal event, not a silently
-            # truncated response the browser reads as a complete answer.
-            log.error("proxy stream %s failed: %s", visit_id, e)
+            # Unlike the pre-stream-open failure above, the 200 status is
+            # already committed by this point — a mid-stream outage must
+            # still end the stream with one sanitized terminal event, not a
+            # silently truncated response the browser reads as complete.
+            log.error("proxy stream %s failed mid-stream: %s", visit_id, e)
             yield (
                 json.dumps(
                     {
@@ -1043,6 +1071,9 @@ def proxy_visit_message_stream(
                 )
                 + "\n"
             ).encode("utf-8")
+        finally:
+            upstream.close()
+            client.close()
 
     return StreamingResponse(relay(), media_type="application/x-ndjson")
 
