@@ -6,6 +6,8 @@ client swapped for an in-memory fake — no live Redis, no live Bedrock (the
 chat endpoint's real degrade path is exercised as-is, since this repo's own
 default config has no Bedrock credential — see agent_wiring.py).
 """
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -208,3 +210,104 @@ def test_visit_message_never_echoes_patient_or_insurance_identifiers(client):
     assert resp.status_code == 200
     assert "SECRET-MEM-9" not in resp.text
     assert "42" not in resp.text
+
+
+# --- visit-chat streaming endpoint (w-9-2-planner P1b) -----------------------
+
+
+def _ndjson_lines(resp):
+    return [json.loads(line) for line in resp.text.strip().split("\n") if line]
+
+
+def test_visit_message_stream_degrades_to_one_error_event_without_a_configured_credential(client):
+    resp = client.post("/visits/visit-1/messages/stream", json={"message": "am I covered?"})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    events = _ndjson_lines(resp)
+    assert len(events) == 1
+    assert events[0]["kind"] == "error"
+    assert "manually" in events[0]["text"].lower()
+    assert events[0]["termination_reason"] == "provider_error"
+
+
+def test_visit_message_stream_rejects_an_empty_message(client):
+    resp = client.post("/visits/visit-1/messages/stream", json={"message": ""})
+
+    assert resp.status_code == 422
+
+
+def test_visit_message_stream_never_echoes_patient_or_insurance_identifiers(client):
+    resp = client.post(
+        "/visits/visit-1/messages/stream",
+        json={"message": "check please", "patient_id": 42, "insurance_id": "SECRET-MEM-9"},
+    )
+
+    assert resp.status_code == 200
+    assert "SECRET-MEM-9" not in resp.text
+    assert "42" not in resp.text
+
+
+def test_visit_message_stream_forwards_a_scripted_runtimes_events_as_ndjson_lines(client, monkeypatch):
+    from libs.eligibility_agent.contracts import EligibilityStatus, TerminationReason, VisitStreamEvent
+
+    scripted = [
+        VisitStreamEvent(kind="delta", text="You're "),
+        VisitStreamEvent(kind="delta", text="covered."),
+        VisitStreamEvent(
+            kind="done",
+            tool_called=True,
+            eligibility_status=EligibilityStatus.ACTIVE,
+            termination_reason=TerminationReason.ANSWERED,
+            turns_used=2,
+        ),
+    ]
+    monkeypatch.setattr(app_mod, "stream_visit_message", lambda visit_id, message: iter(scripted))
+
+    resp = client.post("/visits/visit-1/messages/stream", json={"message": "am I covered?"})
+
+    assert resp.status_code == 200
+    events = _ndjson_lines(resp)
+    assert [e["kind"] for e in events] == ["delta", "delta", "done"]
+    assert events[0]["text"] == "You're "
+    assert events[1]["text"] == "covered."
+    assert events[2]["eligibility_status"] == "active"
+    assert events[2]["turns_used"] == 2
+    # The terminal event never repeats the already-streamed reply text.
+    assert events[2]["text"] is None
+
+
+def test_visit_message_stream_never_forwards_a_tool_payload_or_raw_error(client, monkeypatch):
+    from libs.eligibility_agent.contracts import TerminationReason, VisitStreamEvent
+
+    secret = "member-secret-do-not-leak"
+
+    def _boom(visit_id, message):
+        raise AssertionError(f"the endpoint itself must never see or forward tool internals for {secret}")
+
+    # A real provider failure degrades to exactly one sanitized error event —
+    # simulated here by scripting the runtime layer directly, since the
+    # sanitization contract belongs to agent_wiring/raw_bedrock (already
+    # covered in their own test suites); this asserts the HTTP layer passes
+    # that sanitized event through unchanged, never adding raw detail.
+    monkeypatch.setattr(
+        app_mod,
+        "stream_visit_message",
+        lambda visit_id, message: iter(
+            [
+                VisitStreamEvent(
+                    kind="error",
+                    text="I couldn't reach the eligibility assistant just now. Please try again in a moment, or check eligibility manually.",
+                    termination_reason=TerminationReason.PROVIDER_ERROR,
+                    turns_used=1,
+                )
+            ]
+        ),
+    )
+
+    resp = client.post("/visits/visit-1/messages/stream", json={"message": "check now"})
+
+    events = _ndjson_lines(resp)
+    assert len(events) == 1
+    assert events[0]["kind"] == "error"
+    assert secret not in resp.text

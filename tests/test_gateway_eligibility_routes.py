@@ -6,6 +6,8 @@ so these tests check both "no unauthenticated exposure was added" and that
 upstream status codes (404/409/503) are faithfully forwarded rather than
 flattened to a blanket 200, which the frontend polling surface depends on.
 """
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -359,3 +361,109 @@ def test_visit_message_downstream_unreachable_is_a_502(client, monkeypatch):
     resp = client.post("/visits/1/messages", json={"message": "hi"}, headers=_auth())
 
     assert resp.status_code == 502
+
+
+# --- visit-chat streaming route (w-9-2-planner P1b) --------------------------
+#
+# Authorization must happen entirely BEFORE the downstream stream ever
+# opens — these tests assert that an unauthorized/invalid request never
+# calls httpx.stream at all, the same "denial before any call" property
+# already proven for the blocking route and for appointments elsewhere in
+# this suite.
+
+
+class _FakeStreamResponse:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+
+def test_visit_message_stream_non_numeric_visit_id_is_rejected_before_any_stream_call(client, monkeypatch):
+    called = []
+    monkeypatch.setattr(app_mod.httpx, "stream", lambda *a, **k: called.append(1) or _FakeStreamResponse([]))
+
+    resp = client.post("/visits/not-a-number/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 403
+    assert called == []
+
+
+def test_visit_message_stream_unauthorized_appointment_is_rejected_before_any_stream_call(client, monkeypatch):
+    _authorize(monkeypatch, appointment=None)
+    called = []
+    monkeypatch.setattr(app_mod.httpx, "stream", lambda *a, **k: called.append(1) or _FakeStreamResponse([]))
+
+    resp = client.post("/visits/999/messages/stream", json={"message": "am I covered?"}, headers=_auth())
+
+    assert resp.status_code == 403
+    assert called == []
+
+
+def test_visit_message_stream_grant_lookup_failure_is_503_before_any_stream_call(client, monkeypatch):
+    called = []
+
+    def raise_db_error(db, **kw):
+        raise app_mod.SQLAlchemyError("simulated grant lookup failure")
+
+    monkeypatch.setattr(app_mod, "find_authorized_appointment", raise_db_error)
+    monkeypatch.setattr(app_mod.httpx, "stream", lambda *a, **k: called.append(1) or _FakeStreamResponse([]))
+
+    resp = client.post("/visits/1/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 503
+    assert called == []
+
+
+def test_visit_message_stream_relays_the_authorized_streams_bytes_using_server_derived_fields(client, monkeypatch):
+    _authorize(monkeypatch, appointment=_FakeAppointment(patient_id=1042), insurance_id="BCBS-9981")
+    captured = {}
+
+    def fake_stream(method, url, json=None, headers=None, timeout=None):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = json
+        return _FakeStreamResponse([b'{"kind": "delta", "text": "You"}\n', b'{"kind": "done"}\n'])
+
+    monkeypatch.setattr(app_mod.httpx, "stream", fake_stream)
+
+    resp = client.post(
+        "/visits/1/messages/stream",
+        json={"message": "am I covered?", "patient_id": 9999, "insurance_id": "SMUGGLED"},
+        headers=_auth(),
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    assert resp.text == '{"kind": "delta", "text": "You"}\n{"kind": "done"}\n'
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/visits/1/messages/stream")
+    # Ignores caller-supplied patient_id/insurance_id — server-derived only,
+    # same guarantee as the blocking route.
+    assert captured["json"]["patient_id"] == 1042
+    assert captured["json"]["insurance_id"] == "BCBS-9981"
+
+
+def test_visit_message_stream_downstream_failure_ends_in_one_sanitized_error_line(client, monkeypatch):
+    _authorize(monkeypatch, appointment=_FakeAppointment(patient_id=1042), insurance_id=None)
+    secret_detail = "connection refused to 10.0.0.7:1234 — do not leak this"
+
+    def fake_stream(method, url, json=None, headers=None, timeout=None):
+        raise httpx.ConnectError(secret_detail)
+
+    monkeypatch.setattr(app_mod.httpx, "stream", fake_stream)
+
+    resp = client.post("/visits/1/messages/stream", json={"message": "hi"}, headers=_auth())
+
+    assert resp.status_code == 200  # the stream itself opened fine; the failure is IN the body
+    assert secret_detail not in resp.text
+    line = json.loads(resp.text.strip())
+    assert line["kind"] == "error"
+    assert line["termination_reason"] == "provider_error"

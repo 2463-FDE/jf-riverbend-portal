@@ -89,6 +89,30 @@ class VisitTurnResult(BaseModel):
     turns_used: int
 
 
+class VisitStreamEvent(BaseModel):
+    """w-9-2-planner P1b: one increment of a streamed visit turn.
+
+    kind="delta" — `text` is a piece of final, user-facing answer text,
+    safe to forward to the browser as it arrives. kind="done" — the turn
+    ended normally; carries the SAME safe categorical metadata
+    VisitTurnResult does (tool_called/eligibility_status/
+    termination_reason/turns_used), never the reply text again (already
+    streamed as delta events). kind="error" — one sanitized terminal
+    event; `text` here is always the fixed, safe reply string, never a raw
+    provider error. Exactly one of "done"/"error" ends a stream; a client
+    that sees neither and the connection simply closes was disconnected
+    (see raw_bedrock.py::handle_message_stream's cancellation handling),
+    not answered.
+    """
+
+    kind: str
+    text: Optional[str] = None
+    tool_called: Optional[bool] = None
+    eligibility_status: Optional[EligibilityStatus] = None
+    termination_reason: Optional[TerminationReason] = None
+    turns_used: Optional[int] = None
+
+
 class NoToolArguments(BaseModel):
     """Shared argument schema for both eligibility tools — deliberately
     EMPTY. The model may call either tool with no arguments at all; each

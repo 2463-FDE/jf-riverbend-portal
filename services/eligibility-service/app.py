@@ -21,13 +21,14 @@ Stage 3 additions:
 """
 import hmac
 import asyncio
+import json
 from typing import Optional
 
 import redis as redis_lib
 from fastapi import Depends, FastAPI, HTTPException, Header, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from agent_wiring import bind_visit_context, handle_visit_message
+from agent_wiring import bind_visit_context, handle_visit_message, stream_visit_message
 from check import check
 from config import settings
 from contracts import EligibilityStatus
@@ -308,3 +309,67 @@ def post_visit_message(
         termination_reason=result.termination_reason.value,
         turns_used=result.turns_used,
     )
+
+
+@app.post("/visits/{visit_id}/messages/stream", dependencies=[Depends(_verify_internal_token)])
+def post_visit_message_stream(
+    visit_id: str,
+    req: VisitMessageRequest,
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+):
+    """w-9-2-planner P1b: streaming counterpart to post_visit_message above
+    — same auth (internal-token dependency, unchanged), same
+    bind_visit_context call, same trace span shape. Never a different
+    authorization boundary: the gateway performs its own grant check
+    BEFORE ever opening this stream (see services/gateway/app.py::
+    proxy_visit_message_stream), exactly like the non-streaming route.
+
+    Body is newline-delimited JSON (one VisitStreamEvent per line) rather
+    than SSE's `data: ...\\n\\n` framing — this is consumed by a plain
+    fetch()+ReadableStream reader on the frontend, not EventSource (which
+    cannot send the Authorization header this route still requires upstream
+    of the gateway), so NDJSON avoids SSE ceremony this caller never uses.
+    Each line is exactly what VisitStreamEvent's own docstring promises:
+    delta text, or one terminal done/error event with safe categorical
+    metadata — never a prompt, tool payload, retrieved text, or raw error.
+    """
+    correlation_id = x_request_id or new_correlation_id()
+    bind_visit_context(
+        visit_id,
+        patient_id=req.patient_id,
+        insurance_id=req.insurance_id,
+        coverage_on_file=req.coverage_on_file.model_dump() if req.coverage_on_file else None,
+    )
+
+    def event_source():
+        tool_called = False
+        turns_used = 0
+        termination_reason = None
+        with safe_span(
+            _TRACER_NAME,
+            "eligibility.agent.turn.stream",
+            {"correlation_id": correlation_id, "message_length": len(req.message)},
+        ) as span:
+            for event in stream_visit_message(visit_id, req.message):
+                if event.tool_called is not None:
+                    tool_called = event.tool_called
+                if event.turns_used is not None:
+                    turns_used = event.turns_used
+                if event.termination_reason is not None:
+                    termination_reason = event.termination_reason
+                yield json.dumps(
+                    {
+                        "kind": event.kind,
+                        "text": event.text,
+                        "tool_called": event.tool_called,
+                        "eligibility_status": event.eligibility_status.value if event.eligibility_status else None,
+                        "termination_reason": event.termination_reason.value if event.termination_reason else None,
+                        "turns_used": event.turns_used,
+                    }
+                ).encode("utf-8") + b"\n"
+            span.set_attribute("tool_called", tool_called)
+            span.set_attribute("turns_used", turns_used)
+            if termination_reason is not None:
+                span.set_attribute("termination_reason", termination_reason.value)
+
+    return StreamingResponse(event_source(), media_type="application/x-ndjson")

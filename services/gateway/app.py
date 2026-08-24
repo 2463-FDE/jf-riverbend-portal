@@ -39,7 +39,7 @@ from typing import Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -981,6 +981,80 @@ def proxy_visit_message(
     ever contacting the payer — see visit_authorization.py's
     latest_insurance_coverage.
     """
+    downstream_payload = _authorize_visit_and_build_payload(visit_id, payload, session, db)
+    return _post(
+        "eligibility",
+        f"/visits/{visit_id}/messages",
+        downstream_payload,
+        headers=_correlation_headers(),
+        forward_status=True,
+    )
+
+
+@app.post("/visits/{visit_id}/messages/stream")
+def proxy_visit_message_stream(
+    visit_id: str,
+    payload: dict,
+    session: dict = Depends(require_permission("patients.read")),
+    db: Session = Depends(get_db),
+):
+    """w-9-2-planner P1b: streaming counterpart to proxy_visit_message.
+
+    Authorization is IDENTICAL and happens ENTIRELY before any downstream
+    call opens — _authorize_visit_and_build_payload below is the exact
+    same function proxy_visit_message calls, so there is no second,
+    separately-maintained copy of the grant check to drift out of sync.
+    Only once that returns successfully does this relay a byte stream from
+    eligibility-service's own streaming endpoint straight through; nothing
+    about the stream's CONTENTS is inspected or altered here — the
+    sanitization boundary (never a prompt, tool payload, retrieved text, or
+    raw error) is enforced upstream, in libs/eligibility_agent and
+    agent_wiring.py, not re-implemented at this layer.
+    """
+    downstream_payload = _authorize_visit_and_build_payload(visit_id, payload, session, db)
+
+    def relay():
+        try:
+            with httpx.stream(
+                "POST",
+                f"{SERVICES['eligibility']}/visits/{visit_id}/messages/stream",
+                json=downstream_payload,
+                headers=_internal_headers(_correlation_headers()),
+                timeout=60,
+            ) as upstream:
+                for chunk in upstream.iter_bytes():
+                    yield chunk
+        except Exception as e:
+            # Mirrors _post's own except-and-degrade shape for this route's
+            # non-streaming twin — a downstream outage here must still end
+            # the stream with one sanitized terminal event, not a silently
+            # truncated response the browser reads as a complete answer.
+            log.error("proxy stream %s failed: %s", visit_id, e)
+            yield (
+                json.dumps(
+                    {
+                        "kind": "error",
+                        "text": "The eligibility assistant isn't available right now. Please check eligibility manually.",
+                        "tool_called": None,
+                        "eligibility_status": None,
+                        "termination_reason": "provider_error",
+                        "turns_used": None,
+                    }
+                )
+                + "\n"
+            ).encode("utf-8")
+
+    return StreamingResponse(relay(), media_type="application/x-ndjson")
+
+
+def _authorize_visit_and_build_payload(visit_id: str, payload: dict, session: dict, db: Session) -> dict:
+    """Shared authorization + payload-derivation for both the blocking and
+    streaming visit-message routes — see proxy_visit_message's own
+    docstring for the full rationale (visit_id must resolve to a real,
+    grant-authorized appointment; patient_id/insurance_id/coverage_on_file
+    are always server-derived, never taken from `payload`). Raises
+    HTTPException on any authorization/lookup failure; the caller does not
+    need its own try/except around this call."""
     try:
         appointment_id = int(visit_id)
     except (TypeError, ValueError):
@@ -1030,19 +1104,12 @@ def proxy_visit_message(
         else None
     )
 
-    downstream_payload = {
+    return {
         "message": message,
         "patient_id": appointment.patient_id,
         "insurance_id": insurance_id,
         "coverage_on_file": coverage_on_file,
     }
-    return _post(
-        "eligibility",
-        f"/visits/{visit_id}/messages",
-        downstream_payload,
-        headers=_correlation_headers(),
-        forward_status=True,
-    )
 
 
 # --------------------------------------------------------------------------- #

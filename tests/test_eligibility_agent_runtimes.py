@@ -637,3 +637,130 @@ def test_a_prior_verified_status_survives_an_unavailable_reattempt(runtime_name,
 
     assert result.eligibility_status == EligibilityStatus.ACTIVE
     assert memory.get("visit-1").eligibility_status == EligibilityStatus.ACTIVE
+
+
+# --- w-9-2-planner P1b: handle_message_stream (raw_bedrock only — langchain --
+# is a comparison spike never wired into a running service, see that
+# module's own docstring) --------------------------------------------------
+#
+# FakeToolCapableModel doesn't override converse_stream, so it runs through
+# ToolCapableModel's own default fallback (one chunk per turn from a
+# blocking converse() call) — sufficient to test the RUNTIME's own loop,
+# dispatch, persistence-scoping, and termination behavior; token-level
+# chunking itself is bedrock_tool_port.py's concern, covered in
+# test_bedrock_tool_port.py.
+
+
+def _stream_runtime(script, memory, tool_transport, max_turns=4, tool_config=_CONFIGURED):
+    return RawBedrockAgentRuntime(
+        memory=memory,
+        model=FakeToolCapableModel(script),
+        max_turns=max_turns,
+        tool_config=tool_config,
+        tool_transport=tool_transport,
+    )
+
+
+def test_stream_forwards_the_final_answer_as_delta_events_then_one_done_event():
+    memory = FakeVisitMemory()
+    runtime = _stream_runtime([("text", "Hello there")], memory, never_called_transport())
+
+    events = list(runtime.handle_message_stream("visit-1", "hi"))
+
+    assert [e.kind for e in events] == ["delta", "done"]
+    assert events[0].text == "Hello there"
+    assert events[1].termination_reason == TerminationReason.ANSWERED
+    assert events[1].turns_used == 1
+
+
+def test_stream_never_forwards_a_tool_call_as_a_delta_and_persists_a_verified_outcome():
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    runtime = _stream_runtime(
+        [("tool_call", {}), ("text", "You're covered.")], memory, eligibility_transport("active")
+    )
+
+    events = list(runtime.handle_message_stream("visit-1", "am I covered?"))
+
+    deltas = [e for e in events if e.kind == "delta"]
+    assert [d.text for d in deltas] == ["You're covered."]  # the tool call itself never appears as a delta
+    done = events[-1]
+    assert done.kind == "done"
+    assert done.eligibility_status == EligibilityStatus.ACTIVE
+    assert memory.get("visit-1").eligibility_status == EligibilityStatus.ACTIVE
+
+
+def test_stream_get_coverage_on_file_never_updates_eligibility_status():
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_payer_name="Kaiser", coverage_status="active")
+    runtime = _stream_runtime(
+        [("tool_call_named", COVERAGE_TOOL_NAME, {}), ("text", "Here's what's on file.")],
+        memory,
+        never_called_transport(),
+    )
+
+    events = list(runtime.handle_message_stream("visit-1", "what's on file?"))
+
+    done = events[-1]
+    assert done.kind == "done"
+    assert done.eligibility_status is None
+    assert memory.get("visit-1").eligibility_status is None
+
+
+def test_stream_provider_error_emits_exactly_one_error_event_never_a_partial_answer():
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    runtime = _stream_runtime([("error", ProviderTimeoutError("boom"))], memory, never_called_transport())
+
+    events = list(runtime.handle_message_stream("visit-1", "check now"))
+
+    assert len(events) == 1
+    assert events[0].kind == "error"
+    assert "try again" in events[0].text.lower()
+    assert events[0].termination_reason == TerminationReason.PROVIDER_ERROR
+
+
+def test_stream_bounded_by_max_turns_emits_done_with_max_turns_reason():
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    max_turns = 3
+    script = [("tool_call", {})] * max_turns
+    runtime = _stream_runtime(script, memory, eligibility_transport("active"), max_turns=max_turns)
+
+    events = list(runtime.handle_message_stream("visit-1", "keep checking"))
+
+    done = events[-1]
+    assert done.kind == "done"
+    assert done.termination_reason == TerminationReason.MAX_TURNS
+    assert done.turns_used == max_turns
+
+
+def test_stream_stopping_early_never_triggers_further_model_or_tool_calls():
+    # Simulates a client disconnect mid-stream: the caller stops iterating
+    # after the first event. A script step that would raise if reached
+    # proves nothing beyond that point was ever touched.
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+
+    def _unreachable(*a, **k):
+        raise AssertionError("must not make another model call after the caller stopped iterating")
+
+    class _OneShotThenExplode(ToolCapableModel):
+        def __init__(self):
+            self._used = False
+
+        def converse(self, messages, tools, *, timeout):
+            if self._used:
+                _unreachable()
+            self._used = True
+            return ConverseTurn(text="first chunk", tool_calls=[])
+
+    runtime = RawBedrockAgentRuntime(
+        memory=memory, model=_OneShotThenExplode(), tool_config=_CONFIGURED, tool_transport=never_called_transport()
+    )
+
+    gen = runtime.handle_message_stream("visit-1", "hi")
+    first = next(gen)
+    gen.close()
+
+    assert first.kind == "delta"
