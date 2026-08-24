@@ -41,23 +41,32 @@ def main() -> None:
     if not model_id or model_id == "changeme":
         raise SystemExit("POLICY_EMBEDDING_MODEL_ID is not configured — see .env.example")
 
-    conn = psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
-        dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_USER", "riverbend_app"),
-        password=os.getenv("DB_PASSWORD", ""),
-    )
-    register_vector(conn)
-
+    # Review fix PN-CONN-LEAK: validate the embedding provider (which also
+    # requires AWS_REGION) BEFORE opening any Postgres connection — the old
+    # order left a connection open with nothing to close it whenever
+    # BedrockPolicyEmbeddingProvider's own construction failed.
     embedding_client = EmbeddingClient(
         config=EmbeddingConfig(provider=_PROVIDER),
         provider=BedrockPolicyEmbeddingProvider(model_id=model_id),
     )
 
-    report = ingest_corpus(
-        conn, _MANIFEST_PATH, embedding_client,
-        provider=_PROVIDER, model=model_id, expected_dimension=_DIMENSION, vector_cast=Vector,
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
+        dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_USER", "riverbend_app"),
+        password=os.getenv("DB_PASSWORD", ""),
     )
-    conn.close()
+    try:
+        # register_vector and ingest_corpus are both inside this try: any
+        # failure in either — not just ingest_corpus — must still close the
+        # connection rather than leaking it.
+        register_vector(conn)
+        report = ingest_corpus(
+            conn, _MANIFEST_PATH, embedding_client,
+            provider=_PROVIDER, model=model_id, expected_dimension=_DIMENSION, vector_cast=Vector,
+        )
+    finally:
+        conn.close()
+
     print(
         f"documents_upserted={report.documents_upserted} "
         f"documents_deactivated={report.documents_deactivated} "
