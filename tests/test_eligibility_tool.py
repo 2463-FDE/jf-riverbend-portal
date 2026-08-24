@@ -99,6 +99,38 @@ def test_a_degraded_response_with_an_error_type_is_unavailable_not_verified():
     assert "stored record remains active" in result.payload["note"].lower()
 
 
+def test_http_error_status_with_a_json_body_is_unavailable_not_verified():
+    # w-9-2-planner P1a review fix (B3-http-errors-verified): a 500/403
+    # response whose JSON body happens to lack an "error" key used to be
+    # parsed as a normal success — outcome="verified" with a defaulted
+    # status="unknown" that then got PERSISTED, overwriting a known-good
+    # stored status. The status code must be checked BEFORE any parsing.
+    def handler(request):
+        return httpx.Response(500, json={"detail": "internal server error"})
+
+    tool = _verify_tool(_context("BCBS1", coverage_status="active"), httpx.MockTransport(handler))
+
+    result = tool.invoke({})
+
+    assert result.payload["outcome"] == "unavailable"
+    assert result.payload["status"] == "active"  # the STORED status is preserved, not overwritten
+
+
+def test_a_2xx_response_missing_the_status_field_is_unavailable_not_verified():
+    # Defense in depth: EligibilityResponse.status is a required field, so a
+    # 2xx body missing it means an unexpected shape, not a genuine "unknown"
+    # check result — must not be silently defaulted and marked "verified".
+    def handler(request):
+        return httpx.Response(200, json={"checked_at": "2026-07-17T12:00:00Z"})
+
+    tool = _verify_tool(_context("BCBS1", coverage_status="active"), httpx.MockTransport(handler))
+
+    result = tool.invoke({})
+
+    assert result.payload["outcome"] == "unavailable"
+    assert result.payload["status"] == "active"
+
+
 def test_extra_argument_rejected_before_any_network_call():
     def handler(request):
         raise AssertionError("must not call eligibility-service with malformed arguments")

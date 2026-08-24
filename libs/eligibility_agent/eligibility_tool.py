@@ -221,6 +221,18 @@ class VerifyCurrentEligibilityTool:
                 },
             )
 
+        # w-9-2-planner P1a review fix (B3-http-errors-verified): a non-2xx
+        # payer response used to be parsed as if it were a normal success
+        # body. Since an HTTP-error body (e.g. FastAPI's {"detail": "..."})
+        # has no "error" key, error_type stayed None and outcome fell through
+        # to "verified" with a defaulted status="unknown" — which then got
+        # PERSISTED, overwriting a known-good stored eligibility_status with
+        # "unknown" from a call that never actually completed. The status
+        # code is now checked before any parsing, and a 2xx body missing the
+        # required "status" field (EligibilityResponse.status is mandatory —
+        # its absence means the shape is unexpected, not that the payer
+        # genuinely returned "unknown") is treated as an error too, rather
+        # than silently defaulted.
         error_type = None
         status = EligibilityStatus.UNKNOWN
         checked_at = None
@@ -231,10 +243,17 @@ class VerifyCurrentEligibilityTool:
                     params={"insurance_id": ctx.insurance_id},
                     headers={"X-Internal-Token": self._config.internal_service_token},
                 )
-            data = resp.json()
-            status = EligibilityStatus(data.get("status", "unknown"))
-            checked_at = data.get("checked_at")
-            error_type = data.get("error")
+            if resp.status_code >= 300:
+                error_type = f"HTTPStatus{resp.status_code}"
+            else:
+                data = resp.json()
+                raw_status = data.get("status")
+                if raw_status is None:
+                    error_type = "MalformedEligibilityResponse"
+                else:
+                    status = EligibilityStatus(raw_status)
+                    checked_at = data.get("checked_at")
+                    error_type = data.get("error")
         except Exception as exc:
             # Never log the insurance_id or a raw exception message — the
             # error TYPE is enough for operational triage.

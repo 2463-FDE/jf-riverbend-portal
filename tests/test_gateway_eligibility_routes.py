@@ -153,11 +153,12 @@ class _FakeCoverage:
 
 def _authorize(monkeypatch, *, appointment=None, insurance_id=None, coverage=None):
     monkeypatch.setattr(app_mod, "find_authorized_appointment", lambda db, **kw: appointment)
-    monkeypatch.setattr(app_mod, "latest_insurance_member_id", lambda db, **kw: insurance_id)
-    # w-9-2-planner P1a: proxy_visit_message now also derives a stored
-    # coverage-on-file snapshot — defaults to None (no coverage on file) so
-    # every existing test here that doesn't care about it keeps working
-    # without touching a real DB session.
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id is derived
+    # from the SAME row as coverage_on_file (coverage.member_id), never from
+    # a separately-mocked lookup — so a caller wanting insurance_id set but
+    # no other coverage fields gets a bare _FakeCoverage(member_id=...).
+    if coverage is None and insurance_id is not None:
+        coverage = _FakeCoverage(member_id=insurance_id)
     monkeypatch.setattr(app_mod, "latest_insurance_coverage", lambda db, **kw: coverage)
 
 
@@ -203,11 +204,21 @@ def test_visit_message_authorized_appointment_forwards_server_derived_fields(cli
 
     assert resp.status_code == 200
     assert captured["url"].endswith("/visits/1/messages")
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id is now
+    # always derived from the SAME row as coverage_on_file, so a fixture
+    # that gives an insurance_id necessarily produces a matching (masked)
+    # coverage_on_file rather than None.
     assert captured["json"] == {
         "message": "am I covered?",
         "patient_id": 1042,
         "insurance_id": "BCBS-9981",
-        "coverage_on_file": None,  # no coverage row in this test's fixture
+        "coverage_on_file": {
+            "payer_name": None,
+            "plan_type": None,
+            "member_id_masked": "*****9981",
+            "status": None,
+            "verified_at": None,
+        },
     }
     assert "X-Request-Id" in captured["headers"]
     # Opaque, uuid4-hex shaped — not derived from the session/username.
@@ -301,11 +312,40 @@ def test_visit_message_insurance_lookup_failure_returns_503(client, monkeypatch)
     def raise_db_error(db, **kw):
         raise app_mod.SQLAlchemyError("simulated insurance lookup failure")
 
-    monkeypatch.setattr(app_mod, "latest_insurance_member_id", raise_db_error)
+    monkeypatch.setattr(app_mod, "latest_insurance_coverage", raise_db_error)
 
     resp = client.post("/visits/1/messages", json={"message": "hi"}, headers=_auth())
 
     assert resp.status_code == 503
+
+
+def test_visit_message_derives_insurance_id_from_the_same_row_as_coverage_on_file(client, monkeypatch):
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id must come
+    # from the SAME coverage row as coverage_on_file, not a second,
+    # independently-selected row. A coverage row with no member_id must
+    # yield insurance_id=None even if an older row on file does have one —
+    # verification should decline rather than verify a stale identity.
+    _authorize(
+        monkeypatch,
+        appointment=_FakeAppointment(patient_id=1042),
+        coverage=_FakeCoverage(payer_name="Aetna", plan_type="PPO", member_id=None, status="active"),
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse(
+            200,
+            {"visit_id": "1", "reply": "ok", "tool_called": False, "termination_reason": "answered", "turns_used": 1},
+        )
+
+    monkeypatch.setattr(app_mod.httpx, "post", fake_post)
+
+    resp = client.post("/visits/1/messages", json={"message": "am I covered?"}, headers=_auth())
+
+    assert resp.status_code == 200
+    assert captured["json"]["insurance_id"] is None
+    assert captured["json"]["coverage_on_file"]["payer_name"] == "Aetna"
 
 
 def test_visit_message_downstream_unreachable_is_a_502(client, monkeypatch):

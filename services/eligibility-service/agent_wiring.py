@@ -93,12 +93,15 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
     return runtime.handle_message(visit_id, message)
 
 
+_UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitly None"
+
+
 def bind_visit_context(
     visit_id: str,
     *,
     patient_id: Optional[int] = None,
     insurance_id: Optional[str] = None,
-    coverage_on_file: Optional[dict] = None,
+    coverage_on_file=_UNSET,
 ) -> None:
     """Seed/update the visit's structured memory with the patient/insurance/
     stored-coverage binding the front desk already has on file, so
@@ -110,11 +113,22 @@ def bind_visit_context(
     the plain dict services/gateway/app.py::proxy_visit_message derives
     server-side from the patient's actual insurance_coverages row
     (payer_name, plan_type, member_id_masked, status, verified_at) — never
-    taken from the request as anything the model could see or edit. A no-op
-    if none of the three are given. Memory-store failures degrade the same
-    way RedisVisitMemory.put always does: silently, logged TYPE-only, never
+    taken from the request as anything the model could see or edit.
+
+    w-9-2-planner P1a review fix (B2-stale-snapshot): the gateway always
+    passes `coverage_on_file` explicitly on every call to post_visit_message,
+    including an explicit `None` when the patient's coverage on file has been
+    removed. That explicit-None must CLEAR any coverage_* fields already
+    bound to this visit, not leave them stale — which requires distinguishing
+    "coverage_on_file not passed at all" (the omitted-kwarg default, used by
+    callers that don't touch coverage) from "explicitly passed as None" (a
+    signal to clear it). `_UNSET`, not `None`, is the omitted default.
+
+    A no-op if patient_id/insurance_id are both None AND coverage_on_file was
+    never passed. Memory-store failures degrade the same way
+    RedisVisitMemory.put always does: silently, logged TYPE-only, never
     raised into the request handler."""
-    if patient_id is None and insurance_id is None and coverage_on_file is None:
+    if patient_id is None and insurance_id is None and coverage_on_file is _UNSET:
         return
     memory = get_visit_memory()
     existing = memory.get(visit_id)
@@ -123,12 +137,12 @@ def bind_visit_context(
         updates["patient_id"] = patient_id
     if insurance_id is not None:
         updates["insurance_id"] = insurance_id
-    if coverage_on_file is not None:
-        updates["coverage_payer_name"] = coverage_on_file.get("payer_name")
-        updates["coverage_plan_type"] = coverage_on_file.get("plan_type")
-        updates["coverage_member_id_masked"] = coverage_on_file.get("member_id_masked")
-        updates["coverage_status"] = coverage_on_file.get("status")
-        updates["coverage_verified_at"] = coverage_on_file.get("verified_at")
+    if coverage_on_file is not _UNSET:
+        updates["coverage_payer_name"] = coverage_on_file.get("payer_name") if coverage_on_file else None
+        updates["coverage_plan_type"] = coverage_on_file.get("plan_type") if coverage_on_file else None
+        updates["coverage_member_id_masked"] = coverage_on_file.get("member_id_masked") if coverage_on_file else None
+        updates["coverage_status"] = coverage_on_file.get("status") if coverage_on_file else None
+        updates["coverage_verified_at"] = coverage_on_file.get("verified_at") if coverage_on_file else None
     if existing is not None:
         context = existing.model_copy(update=updates)
     else:

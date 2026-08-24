@@ -260,3 +260,31 @@ def test_bind_visit_context_coverage_on_file_does_not_clobber_other_fields(monke
     assert stored.coverage_payer_name == "Kaiser"
     assert stored.insurance_id == "OLD"  # untouched
     assert stored.eligibility_status == "active"  # untouched — a stored snapshot, not a verification
+
+
+def test_bind_visit_context_explicit_none_coverage_clears_a_stale_snapshot(monkeypatch):
+    # w-9-2-planner P1a review fix (B2-stale-snapshot): the gateway sends an
+    # explicit coverage_on_file=None when a patient's coverage has been
+    # removed. That must CLEAR the previously bound coverage_* fields, not be
+    # treated the same as "coverage_on_file wasn't passed" (which must leave
+    # them untouched — see the omitted-kwarg tests above).
+    fake_memory = _FakeVisitMemory()
+    monkeypatch.setattr(agent_wiring, "get_visit_memory", lambda: fake_memory)
+
+    agent_wiring.bind_visit_context(
+        "visit-1",
+        patient_id=1737,
+        insurance_id="MEM1",
+        coverage_on_file={"payer_name": "Kaiser", "plan_type": "HMO", "status": "active"},
+    )
+    assert fake_memory.get("visit-1").coverage_payer_name == "Kaiser"
+
+    agent_wiring.bind_visit_context("visit-1", patient_id=1737, insurance_id=None, coverage_on_file=None)
+
+    stored = fake_memory.get("visit-1")
+    assert stored.coverage_payer_name is None
+    assert stored.coverage_plan_type is None
+    assert stored.coverage_member_id_masked is None
+    assert stored.coverage_status is None
+    assert stored.coverage_verified_at is None
+    assert stored.patient_id == 1737  # untouched by the clear

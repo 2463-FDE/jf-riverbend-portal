@@ -57,7 +57,6 @@ from visit_authorization import (
     find_authorized_appointment,
     has_active_grant,
     latest_insurance_coverage,
-    latest_insurance_member_id,
     parse_user_id,
 )
 
@@ -1004,20 +1003,21 @@ def proxy_visit_message(
 
     message = payload.get("message") if isinstance(payload, dict) else None
     try:
-        insurance_id = latest_insurance_member_id(db, patient_id=appointment.patient_id)
         coverage = latest_insurance_coverage(db, patient_id=appointment.patient_id)
     except SQLAlchemyError as e:
         log.error("visit message: insurance lookup failed (error_type=%s)", type(e).__name__)
         raise HTTPException(status_code=503, detail="patient store unavailable")
 
-    # w-9-2-planner P1a: the same server-derived, never-caller-supplied
-    # principle as insurance_id above, now extended to a stored-coverage
-    # snapshot get_coverage_on_file can answer from directly — payer/plan/
-    # status/last-verified, masked the same way the Coverage & Eligibility
-    # page's own _mask_member_id already does. `coverage` may lack a
-    # member_id (has_member_id-gated elsewhere) yet still carry a real
-    # payer/plan/status worth showing, so this is intentionally NOT the same
-    # row insurance_id above is filtered from.
+    # w-9-2-planner P1a review fix (B1-row-mismatch): insurance_id and
+    # coverage_on_file must describe the SAME coverage row. A separate
+    # latest_insurance_member_id() query can select a different (older) row
+    # than latest_insurance_coverage() whenever the newest row lacks a
+    # member_id — that mismatch could hand verify_current_eligibility an
+    # identifier for coverage other than the one shown as "on file". If the
+    # single most-recent row has no member_id, insurance_id is None (live
+    # verification declines) rather than falling back to a different row.
+    insurance_id = coverage.member_id if coverage is not None else None
+
     coverage_on_file = (
         {
             "payer_name": coverage.payer_name,
