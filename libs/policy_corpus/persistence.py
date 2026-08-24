@@ -31,9 +31,17 @@ class DimensionMismatchError(ValueError):
     vector, but this gives a clear, application-level error first.)"""
 
 
+class EmbeddingCountMismatchError(ValueError):
+    """The embedding provider returned a different number of vectors than
+    texts requested (review fix EMBED-COUNT-MISMATCH) — zipping the two
+    directly would silently drop the remaining chunks with no embedding at
+    all while ingestion still reported success and committed."""
+
+
 @dataclass(frozen=True)
 class IngestionReport:
     documents_upserted: int
+    documents_deactivated: int
     chunks_written: int
     chunks_skipped: int
     embeddings_written: int
@@ -138,6 +146,39 @@ def upsert_embedding(
         )
 
 
+def deactivate_stale_documents(conn, current_identities: List[Tuple[str, str]]) -> int:
+    """Review fix STALE-RETRIEVAL: retrieval's own filters
+    (retrieval_enabled/approval_status/synthetic) only ever reflect whatever
+    a document's row said the LAST time it was ingestable — ingest_corpus
+    simply stops touching a document once it's no longer in
+    load_ingestable_documents()'s result, so its stale row kept
+    retrieval_enabled=true forever, remaining retrievable after being
+    removed, disabled, or un-approved in the manifest. This flips
+    retrieval_enabled=false on every currently-active row whose
+    (source_id, source_version) is NOT in the manifest's current
+    ingestable set. Rows are deactivated, never deleted — preserving
+    audit-relevant history. Returns the number of rows deactivated."""
+    with conn.cursor() as cur:
+        if current_identities:
+            source_ids = [sid for sid, _ in current_identities]
+            versions = [ver for _, ver in current_identities]
+            cur.execute(
+                """
+                UPDATE policy_documents SET retrieval_enabled = false, updated_at = now()
+                WHERE retrieval_enabled = true
+                  AND (source_id, source_version) NOT IN (
+                      SELECT * FROM unnest(%s::text[], %s::text[])
+                  )
+                """,
+                (source_ids, versions),
+            )
+        else:
+            cur.execute(
+                "UPDATE policy_documents SET retrieval_enabled = false, updated_at = now() WHERE retrieval_enabled = true"
+            )
+        return cur.rowcount
+
+
 def ingest_corpus(
     conn, manifest_path: str, embedding_client, *, provider: str, model: str,
     expected_dimension: int = None, vector_cast=None,
@@ -151,10 +192,12 @@ def ingest_corpus(
     documents_upserted = 0
     chunks_written = chunks_skipped = 0
     embeddings_written = embeddings_skipped = 0
+    current_identities: List[Tuple[str, str]] = []
     try:
         for doc, text in load_ingestable_documents(manifest_path):
             document_id = upsert_document(conn, doc, corpus_id=manifest.corpus_id)
             documents_upserted += 1
+            current_identities.append((doc.source_id, doc.source_version))
 
             chunks = chunk_markdown(
                 source_id=doc.source_id, source_version=doc.source_version,
@@ -169,12 +212,18 @@ def ingest_corpus(
             embeddings_skipped += len(chunks) - len(to_embed)
             if to_embed:
                 vectors = embedding_client.embed([c.text for c in to_embed])
+                if len(vectors) != len(to_embed):
+                    raise EmbeddingCountMismatchError(
+                        f"embedding provider returned {len(vectors)} vectors for {len(to_embed)} texts"
+                    )
                 for chunk, vector in zip(to_embed, vectors):
                     upsert_embedding(
                         conn, chunk_id=chunk.chunk_id, provider=provider, model=model, vector=vector,
                         chunk_text=chunk.text, expected_dimension=expected_dimension, vector_cast=vector_cast,
                     )
                     embeddings_written += 1
+
+        documents_deactivated = deactivate_stale_documents(conn, current_identities)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -182,6 +231,7 @@ def ingest_corpus(
 
     return IngestionReport(
         documents_upserted=documents_upserted,
+        documents_deactivated=documents_deactivated,
         chunks_written=chunks_written,
         chunks_skipped=chunks_skipped,
         embeddings_written=embeddings_written,

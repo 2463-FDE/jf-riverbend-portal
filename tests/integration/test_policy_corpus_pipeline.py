@@ -14,6 +14,7 @@ Run with:  pytest -m integration tests/integration/test_policy_corpus_pipeline.p
 Skipped by default in CI (`pytest -m "not integration"`).
 """
 import hashlib
+import json
 import os
 
 import pytest
@@ -111,6 +112,39 @@ def test_first_ingest_writes_every_chunk_and_embedding_then_second_is_a_no_op():
     assert second.embeddings_written == 0
     assert second.chunks_skipped == first.chunks_written
     assert second.embeddings_skipped == first.chunks_written
+
+
+def test_a_document_dropped_from_the_manifest_becomes_unretrievable_after_reingestion(tmp_path):
+    # Review fix STALE-RETRIEVAL: a document's stored retrieval_enabled must
+    # actually flip false on reingestion once it's no longer in the
+    # manifest's ingestable set — not just rely on a filter that only ever
+    # reflects whatever the row said the last time it WAS ingestable.
+    _ingest()
+    real_content_root = os.path.dirname(_MANIFEST_PATH)
+    manifest = json.loads(open(_MANIFEST_PATH, encoding="utf-8").read())
+    manifest["ingestion"]["content_root"] = real_content_root
+    dropped = manifest["documents"].pop()  # GUIDE-COVERAGE-ELIG-001, per manifest order
+    kept_source_id = manifest["documents"][0]["source_id"]
+    reduced_manifest_path = tmp_path / "manifest.json"
+    reduced_manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    conn = _connection()
+    report = ingest_corpus(
+        conn, str(reduced_manifest_path), _DeterministicEmbeddingClient(),
+        provider=_PROVIDER, model=_MODEL, expected_dimension=_DIMENSION, vector_cast=Vector,
+    )
+    conn.close()
+    assert report.documents_deactivated == 1
+
+    scope = RetrievalScope(audiences=tuple(dropped["audiences"]), workflows=tuple(dropped["workflows"]))
+    results = _retriever().retrieve("what does active coverage status mean?", scope, limit=10)
+    assert all(r.source_id != dropped["source_id"] for r in results)
+
+    # the untouched document must remain retrievable — deactivation is
+    # scoped to exactly what left the manifest, not a blanket wipe.
+    kept_scope = RetrievalScope(audiences=("patient", "clinician", "nursing_ma"), workflows=("patient_summary",))
+    kept_results = _retriever().retrieve("laboratory result release", kept_scope, limit=10)
+    assert any(r.source_id == kept_source_id for r in kept_results)
 
 
 def _retriever():

@@ -10,7 +10,9 @@ from .contracts import ChunkingConfig, IngestionConfig, PolicyChunk, PolicyDocum
 from .manifest import ManifestValidationError, load_ingestable_documents, load_manifest
 from .persistence import (
     DimensionMismatchError,
+    EmbeddingCountMismatchError,
     IngestionReport,
+    deactivate_stale_documents,
     existing_embedding_hashes,
     ingest_corpus,
     upsert_chunks,
@@ -22,6 +24,7 @@ from .retrieval import PolicyRetriever, RetrievalLedger, RetrievalScope, Retriev
 __all__ = [
     "chunk_markdown", "ChunkingConfig", "IngestionConfig", "PolicyChunk", "PolicyDocumentMeta", "PolicyManifest",
     "ManifestValidationError", "load_ingestable_documents", "load_manifest", "BedrockPolicyEmbeddingProvider",
-    "DimensionMismatchError", "IngestionReport", "existing_embedding_hashes", "ingest_corpus", "upsert_chunks",
-    "upsert_document", "upsert_embedding", "PolicyRetriever", "RetrievalLedger", "RetrievalScope", "RetrievedChunk",
+    "DimensionMismatchError", "EmbeddingCountMismatchError", "IngestionReport", "deactivate_stale_documents",
+    "existing_embedding_hashes", "ingest_corpus", "upsert_chunks", "upsert_document", "upsert_embedding",
+    "PolicyRetriever", "RetrievalLedger", "RetrievalScope", "RetrievedChunk",
 ]

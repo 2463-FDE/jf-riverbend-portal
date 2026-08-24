@@ -5,12 +5,17 @@ tests/test_rag_vector_store.py's fake-connection approach; real pgvector
 behavior against a live database belongs in
 tests/integration/test_policy_corpus_pipeline.py.
 """
+import hashlib
+import json
+
 import pytest
 
 from libs.policy_corpus.contracts import PolicyChunk, PolicyDocumentMeta
 from libs.policy_corpus.persistence import (
     DimensionMismatchError,
+    EmbeddingCountMismatchError,
     existing_embedding_hashes,
+    ingest_corpus,
     upsert_chunks,
     upsert_document,
     upsert_embedding,
@@ -42,9 +47,18 @@ class _FakeCursor:
             row_id = existing["id"] if existing else self._conn.next_document_id
             if existing is None:
                 self._conn.next_document_id += 1
-            self._conn.documents[key] = {"id": row_id, "params": params}
+            self._conn.documents[key] = {"id": row_id, "params": params, "retrieval_enabled": params[8]}
             self.rowcount = 1
             self._returning = (row_id,)
+
+        elif normalized.startswith("UPDATE policy_documents SET retrieval_enabled = false"):
+            current = set(zip(*params)) if params else None
+            count = 0
+            for key, row in self._conn.documents.items():
+                if row["retrieval_enabled"] and (current is None or key not in current):
+                    row["retrieval_enabled"] = False
+                    count += 1
+            self.rowcount = count
 
         elif "INSERT INTO policy_chunks" in normalized:
             chunk_id, document_id, section_id, heading_path, text, chunk_hash, char_count = params
@@ -203,3 +217,74 @@ def test_existing_embedding_hashes_of_an_empty_chunk_id_list_never_touches_the_c
 
     assert result == {}
     assert conn.executed == []
+
+
+# --- ingest_corpus: STALE-RETRIEVAL and EMBED-COUNT-MISMATCH review fixes --
+
+
+def _write_manifest(tmp_path, doc_ids):
+    docs = []
+    for source_id in doc_ids:
+        text = f"# {source_id}\nbody text for {source_id}"
+        (tmp_path / f"{source_id}.md").write_text(text, encoding="utf-8")
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        docs.append(
+            {
+                "source_id": source_id, "source_version": "1.0", "effective_date": "2026-08-01",
+                "title": source_id, "owner": "Owner", "approval_status": "approved_training",
+                "synthetic": True, "retrieval_enabled": True, "content_path": f"{source_id}.md",
+                "content_sha256": digest, "audiences": ["patient"], "workflows": ["patient_summary"],
+                "topics": [], "allowed_uses": [], "prohibited_uses": [], "relationships": [],
+            }
+        )
+    manifest = {
+        "schema_version": 1, "corpus_id": "test-corpus", "notice": "SYNTHETIC.",
+        "ingestion": {
+            "content_root": ".", "allowed_extensions": [".md"], "encoding": "utf-8",
+            "max_document_bytes": 20000, "max_documents": 32,
+            "chunking": {
+                "strategy": "markdown_heading_sections", "max_characters": 1200,
+                "overlap_characters": 120, "minimum_characters": 80, "preserve_heading_path": True,
+            },
+            "required_chunk_metadata": ["source_id", "source_version", "section_id"],
+        },
+        "documents": docs,
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return str(manifest_path)
+
+
+class _FakeEmbeddingClient:
+    def __init__(self, vector_count_offset=0):
+        self._offset = vector_count_offset
+
+    def embed(self, texts):
+        return [[0.1, 0.2] for _ in texts][: len(texts) + self._offset]
+
+
+def test_ingest_corpus_deactivates_a_document_dropped_from_the_manifest(tmp_path):
+    manifest_path = _write_manifest(tmp_path, ["POL-A", "POL-B"])
+    conn = _FakeConnection()
+    ingest_corpus(conn, manifest_path, _FakeEmbeddingClient(), provider="bedrock", model="titan-v2")
+    assert conn.documents[("POL-A", "1.0")]["retrieval_enabled"] is True
+    assert conn.documents[("POL-B", "1.0")]["retrieval_enabled"] is True
+
+    manifest_path_v2 = _write_manifest(tmp_path, ["POL-A"])  # POL-B dropped
+    report = ingest_corpus(conn, manifest_path_v2, _FakeEmbeddingClient(), provider="bedrock", model="titan-v2")
+
+    assert report.documents_deactivated == 1
+    assert conn.documents[("POL-A", "1.0")]["retrieval_enabled"] is True  # untouched
+    assert conn.documents[("POL-B", "1.0")]["retrieval_enabled"] is False  # deactivated, not deleted
+    assert ("POL-B", "1.0") in conn.documents  # still present — audit history preserved
+
+
+def test_ingest_corpus_raises_on_embedding_count_mismatch_and_rolls_back(tmp_path):
+    manifest_path = _write_manifest(tmp_path, ["POL-A"])
+    conn = _FakeConnection()
+
+    with pytest.raises(EmbeddingCountMismatchError):
+        ingest_corpus(conn, manifest_path, _FakeEmbeddingClient(vector_count_offset=-1), provider="bedrock", model="titan-v2")
+
+    assert conn.committed is False
+    assert conn.rolled_back is True
