@@ -21,7 +21,15 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REAL_MANIFEST_PATH = os.path.join(REPO_ROOT, "docs", "RagDocs", "manifest.json")
 
 
-def _write_manifest(tmp_path, documents, *, max_documents=32, max_document_bytes=20000):
+def _write_manifest(tmp_path, documents, *, max_documents=32, max_document_bytes=20000, chunking_overrides=None):
+    chunking = {
+        "strategy": "markdown_heading_sections",
+        "max_characters": 1200,
+        "overlap_characters": 120,
+        "minimum_characters": 80,
+        "preserve_heading_path": True,
+    }
+    chunking.update(chunking_overrides or {})
     manifest = {
         "schema_version": 1,
         "corpus_id": "test-corpus",
@@ -32,13 +40,7 @@ def _write_manifest(tmp_path, documents, *, max_documents=32, max_document_bytes
             "encoding": "utf-8",
             "max_document_bytes": max_document_bytes,
             "max_documents": max_documents,
-            "chunking": {
-                "strategy": "markdown_heading_sections",
-                "max_characters": 1200,
-                "overlap_characters": 120,
-                "minimum_characters": 80,
-                "preserve_heading_path": True,
-            },
+            "chunking": chunking,
             "required_chunk_metadata": ["source_id", "source_version", "section_id"],
         },
         "documents": documents,
@@ -154,6 +156,66 @@ def test_rejects_content_hash_mismatch(tmp_path):
 
     with pytest.raises(ManifestValidationError, match="content_sha256 mismatch"):
         load_ingestable_documents(manifest_path)
+
+
+def test_rejects_an_unsupported_chunking_strategy(tmp_path):
+    digest = _write_content(tmp_path, "policy.md", "# Title\nbody")
+    manifest_path = _write_manifest(
+        tmp_path,
+        [_doc_entry(content_path="policy.md", content_sha256=digest)],
+        chunking_overrides={"strategy": "semantic_paragraphs"},
+    )
+
+    with pytest.raises(ManifestValidationError, match="unsupported chunking.strategy"):
+        load_manifest(manifest_path)
+
+
+def test_rejects_a_non_positive_max_characters(tmp_path):
+    digest = _write_content(tmp_path, "policy.md", "# Title\nbody")
+    manifest_path = _write_manifest(
+        tmp_path,
+        [_doc_entry(content_path="policy.md", content_sha256=digest)],
+        chunking_overrides={"max_characters": 0},
+    )
+
+    with pytest.raises(ManifestValidationError, match="max_characters must be positive"):
+        load_manifest(manifest_path)
+
+
+def test_rejects_overlap_characters_not_less_than_max_characters(tmp_path):
+    digest = _write_content(tmp_path, "policy.md", "# Title\nbody")
+    manifest_path = _write_manifest(
+        tmp_path,
+        [_doc_entry(content_path="policy.md", content_sha256=digest)],
+        chunking_overrides={"max_characters": 100, "overlap_characters": 100},
+    )
+
+    with pytest.raises(ManifestValidationError, match="overlap_characters"):
+        load_manifest(manifest_path)
+
+
+def test_rejects_negative_overlap_characters(tmp_path):
+    digest = _write_content(tmp_path, "policy.md", "# Title\nbody")
+    manifest_path = _write_manifest(
+        tmp_path,
+        [_doc_entry(content_path="policy.md", content_sha256=digest)],
+        chunking_overrides={"overlap_characters": -1},
+    )
+
+    with pytest.raises(ManifestValidationError, match="overlap_characters"):
+        load_manifest(manifest_path)
+
+
+def test_rejects_minimum_characters_greater_than_max_characters(tmp_path):
+    digest = _write_content(tmp_path, "policy.md", "# Title\nbody")
+    manifest_path = _write_manifest(
+        tmp_path,
+        [_doc_entry(content_path="policy.md", content_sha256=digest)],
+        chunking_overrides={"max_characters": 100, "overlap_characters": 10, "minimum_characters": 101},
+    )
+
+    with pytest.raises(ManifestValidationError, match="minimum_characters"):
+        load_manifest(manifest_path)
 
 
 def test_rejects_a_manifest_over_the_max_documents_cap(tmp_path):
@@ -274,20 +336,27 @@ def test_splits_an_oversized_section_into_overlapping_pieces():
     assert chunks[0].text[-20:] == chunks[1].text[:20]
 
 
-def test_merges_a_too_small_trailing_fragment_into_its_predecessor():
+def test_a_small_trailing_remainder_never_pushes_a_chunk_past_max_characters():
+    # w-9-2-planner P2 review fix (CHUNK-MAX-OVERFLOW): 210 chars with
+    # max_characters=100/overlap=0 leaves a naive trailing remainder of only
+    # 10 chars. Merging that remainder into its predecessor (the previous
+    # behavior) produced a 110-char chunk — silently over the configured
+    # cap. The final piece must instead be right-aligned to the body's end,
+    # so EVERY piece stays within max_characters, never an average.
     config = ChunkingConfig(
         strategy="markdown_heading_sections", max_characters=100, overlap_characters=0, minimum_characters=50,
         preserve_heading_path=True,
     )
-    # 210 chars: naive non-overlapping split would be [100, 100, 10] — the
-    # trailing 10-char fragment is below minimum_characters=50 and must be
-    # merged into the piece before it instead of surviving as an orphan.
     body = "A" * 210
     markdown = f"# Title\n{body}"
     chunks = chunk_markdown(source_id="POL-1", source_version="1.0", markdown_text=markdown, config=config)
 
-    assert len(chunks) == 2
-    assert len(chunks[-1].text) == 110  # 100 + the merged 10-char tail
+    assert all(len(c.text) <= 100 for c in chunks)
+    assert len(chunks) == 3
+    assert [len(c.text) for c in chunks] == [100, 100, 100]
+    # Right-alignment means the last piece is the body's final 100 chars —
+    # no small orphan tail ever survives.
+    assert body[-100:] == chunks[-1].text
 
 
 def test_same_input_produces_identical_chunks_across_runs():

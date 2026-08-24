@@ -32,25 +32,58 @@ class ManifestValidationError(ValueError):
     never raised for a document that is merely excluded from ingestion."""
 
 
+# The only strategy chunking.py actually implements. A manifest declaring
+# anything else must fail loudly at load time rather than be silently
+# chunked as if it had said "markdown_heading_sections" anyway.
+_SUPPORTED_CHUNKING_STRATEGIES = frozenset({"markdown_heading_sections"})
+
+
+def _validate_chunking_config(config: ChunkingConfig) -> None:
+    """w-9-2-planner P2 review fix (CHUNK-CONFIG-UNVALIDATED): the manifest
+    declares these as ingestion-contract fields (docs/RagDocs/manifest.json's
+    `ingestion.chunking`) alongside paths and hashes, but nothing checked
+    them — a malformed value (max_characters=0, an unrecognized strategy)
+    loaded without error and silently produced empty or nonsensical chunks
+    instead of failing the same way a bad path or hash mismatch does."""
+    if config.strategy not in _SUPPORTED_CHUNKING_STRATEGIES:
+        raise ManifestValidationError(
+            f"unsupported chunking.strategy {config.strategy!r} (supported: {sorted(_SUPPORTED_CHUNKING_STRATEGIES)})"
+        )
+    if config.max_characters <= 0:
+        raise ManifestValidationError(f"chunking.max_characters must be positive, got {config.max_characters}")
+    if not (0 <= config.overlap_characters < config.max_characters):
+        raise ManifestValidationError(
+            f"chunking.overlap_characters ({config.overlap_characters}) must be in "
+            f"[0, max_characters={config.max_characters})"
+        )
+    if config.minimum_characters > config.max_characters:
+        raise ManifestValidationError(
+            f"chunking.minimum_characters ({config.minimum_characters}) must be <= "
+            f"max_characters ({config.max_characters})"
+        )
+
+
 def load_manifest(path: str) -> PolicyManifest:
     with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
 
     ingestion_raw = raw["ingestion"]
     chunking_raw = ingestion_raw["chunking"]
+    chunking = ChunkingConfig(
+        strategy=chunking_raw["strategy"],
+        max_characters=chunking_raw["max_characters"],
+        overlap_characters=chunking_raw["overlap_characters"],
+        minimum_characters=chunking_raw["minimum_characters"],
+        preserve_heading_path=chunking_raw["preserve_heading_path"],
+    )
+    _validate_chunking_config(chunking)
     ingestion = IngestionConfig(
         content_root=ingestion_raw["content_root"],
         allowed_extensions=tuple(ingestion_raw["allowed_extensions"]),
         encoding=ingestion_raw["encoding"],
         max_document_bytes=ingestion_raw["max_document_bytes"],
         max_documents=ingestion_raw["max_documents"],
-        chunking=ChunkingConfig(
-            strategy=chunking_raw["strategy"],
-            max_characters=chunking_raw["max_characters"],
-            overlap_characters=chunking_raw["overlap_characters"],
-            minimum_characters=chunking_raw["minimum_characters"],
-            preserve_heading_path=chunking_raw["preserve_heading_path"],
-        ),
+        chunking=chunking,
         required_chunk_metadata=tuple(ingestion_raw["required_chunk_metadata"]),
     )
 

@@ -10,10 +10,16 @@ stored one and skip unchanged chunks (vector-rag.md's idempotent-reingestion
 requirement; the actual skip-on-match comparison is a later slice's job once
 there is somewhere to compare against).
 
-Scope note: a tiny trailing FRAGMENT produced by sub-splitting an
-over-length section is merged back into its predecessor rather than kept as
-an orphan (`minimum_characters` applies there). A short but genuine section
-— a heading with little content of its own — is still emitted as its own
+Scope note: sub-splitting an over-length section right-aligns its final
+piece to the end of the body (see `_split_body`) instead of merging a small
+trailing fragment into its predecessor — a merge can silently push a piece
+back over `max_characters`, the exact budget this config exists to enforce
+(review fix CHUNK-MAX-OVERFLOW). Right-alignment guarantees every piece is
+<= `max_characters` by construction and never leaves a tiny orphan tail,
+at the cost of a larger-than-configured overlap on that last piece only —
+an acceptable trade since nothing here reads `overlap_characters` as a
+precise guarantee, only a lower bound. A short but genuine section — a
+heading with little content of its own — is still emitted as its own
 chunk; merging it across a heading boundary would blur `heading_path` and
 citation identity for no clear benefit at this corpus's scale.
 """
@@ -62,24 +68,28 @@ def _split_into_sections(markdown_text: str) -> List[Tuple[Tuple[str, ...], str]
 
 
 def _split_body(body: str, config: ChunkingConfig) -> List[str]:
-    if len(body) <= config.max_characters:
+    n = len(body)
+    if n <= config.max_characters:
         return [body]
 
     step = max(config.max_characters - config.overlap_characters, 1)
-    pieces = []
+    starts = []
     start = 0
-    n = len(body)
-    while start < n:
-        end = min(start + config.max_characters, n)
-        pieces.append(body[start:end])
-        if end >= n:
-            break
+    while start + config.max_characters < n:
+        starts.append(start)
         start += step
 
-    if len(pieces) > 1 and len(pieces[-1]) < config.minimum_characters:
-        pieces[-2] = pieces[-2] + pieces[-1]
-        pieces.pop()
-    return pieces
+    # Right-align the final piece to the body's end instead of letting a
+    # small remainder become either its own tiny orphan or, worse, get
+    # merged into its predecessor past max_characters (CHUNK-MAX-OVERFLOW).
+    # Every piece this produces is exactly max_characters long (except a
+    # short body handled by the early return above), so the cap is a hard
+    # guarantee, never an average.
+    last_start = n - config.max_characters
+    if not starts or starts[-1] != last_start:
+        starts.append(last_start)
+
+    return [body[s : s + config.max_characters] for s in starts]
 
 
 def chunk_markdown(
