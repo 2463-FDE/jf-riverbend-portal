@@ -159,6 +159,21 @@ export interface VisitMessageResponse {
   turns_used: number;
 }
 
+// w-9-2-planner P1b — one line of the streaming counterpart's
+// newline-delimited JSON body (POST /api/visits/[id]/messages/stream).
+// "delta" carries a piece of final answer text; "done"/"error" is always
+// exactly the last line, carrying safe categorical metadata only — never
+// the reply text again (already streamed) except for "error", whose text
+// is a fixed, safe message, never a raw provider error.
+export interface VisitStreamEvent {
+  kind: "delta" | "done" | "error";
+  text?: string | null;
+  tool_called?: boolean | null;
+  eligibility_status?: "active" | "inactive" | "unknown" | "pending" | "stale" | null;
+  termination_reason?: "answered" | "max_turns" | "provider_error" | null;
+  turns_used?: number | null;
+}
+
 // Stage 3: async eligibility job lifecycle (services/eligibility-service/jobs.py).
 export type EligibilityJobStatus =
   | "queued"
