@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Policy ID | CLIN-SRC-PRIORITY-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Clinical Governance / Health Information Management |
 | Review Date | August 1, 2027 |
 | Applies To | Patient Summaries, RAG Retrieval, Clinical Review |
@@ -84,6 +84,19 @@ The retriever must exclude sources that are:
 - Outside the authorized audience or patient scope.
 - Untrusted external content not approved for the workflow.
 
+### Claim-Specific Evidence Priority
+
+Source priority is applied only after authorization and is specific to the claim being supported:
+
+1. An authorized, final patient-specific clinical record is authoritative for that patient's recorded values, dates, and signed statements. It cannot by itself authorize a new diagnosis, prescription, or treatment target in generated text.
+2. Current approved application policy governs Riverbend workflow, authorization, review, and release behavior.
+3. Current official or federal guidance may support general clinical education. Within this tier, prefer the source's current effective or update date.
+4. A professional guideline may be named only when the locally available evidence supports the claim. A citation-only record cannot support a quotation or factual assertion from a body that is not present.
+5. A systematic review or peer-reviewed open source may support a claim only when its approved text is locally available and in scope.
+6. Approved patient-education derivatives and synthetic teaching examples are the lowest evidence tier and cannot override higher-authority sources.
+
+Documents serving different purposes must not be forced into one ranking. For example, a federal education source may explain a test, while an approved Riverbend policy controls whether a result is released.
+
 ## 4. Patient-Specific Facts Take Precedence
 
 When an approved educational guide and a final patient result both mention A1c:
@@ -127,6 +140,8 @@ conflict detected
 ```
 
 The AI must not resolve ambiguity based on wording, recency guesses, model confidence, or source similarity score alone.
+
+When an unresolved conflict remains, the response must identify both citation IDs, state that the sources disagree, refuse a definitive conclusion, and route the issue to clinician review. Missing, stale, or conflicting evidence must never be filled from model memory.
 
 ## 7. Retrieval Rules
 

@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Policy ID | ROI-DISC-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Health Information Management / Privacy |
 | Review Date | August 1, 2027 |
 | Applies To | Release of Information, Patient Records, Disclosure Workflows |
@@ -132,6 +132,8 @@ The release process should verify:
 - Recipient scope.
 
 The model may help explain or classify a request, but it must not independently broaden the disclosure.
+
+An ROI clerk works from a bounded document list containing metadata such as document type, date, and encounter. The role does not gain `records.read` and must not retrieve clinical-note bodies through the policy corpus. The authorized fulfilment path—not the model—selects the underlying records for release.
 
 ## 8. Delivery
 

@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Document ID | SOP-AI-REVIEW-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Clinical Governance |
 | Review Date | August 1, 2027 |
 | Applies To | Clinicians Reviewing AI-Generated Patient Summaries |
@@ -130,6 +130,8 @@ Validation failure
 ```
 
 If no approved version exists, the portal should state that no approved summary is available.
+
+The pending draft is clinician-only. Only an authenticated clinician or nursing/medical-assistant user holding `summary_review.decide` and an active patient grant may review or decide it. Approval applies to the exact stored version; rejected, pending, or superseded drafts remain withheld.
 
 ## 9. Refusal and Validation Failures
 

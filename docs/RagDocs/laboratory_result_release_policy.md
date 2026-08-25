@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Policy ID | LAB-REL-001 |
-| Version | 1.0 |
+| Version | 1.2 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Clinical Governance |
 | Review Date | August 1, 2027 |
 | Applies To | Patient Portal and Clinical Staff |
@@ -61,6 +61,10 @@ Logs and traces must not contain raw patient data, prompts, retrieved document t
 If a result cannot be released under this policy, the system must withhold it and route the case to the appropriate staff workflow.
 
 Staff should not bypass release controls by copying unreleased content into another patient-facing channel.
+
+Detailed early-release procedures are clinician-only and are governed by the
+Clinician Early-Release Appendix. This patient-readable policy does not expose
+that procedure or authorize a patient request for early release.
 
 ## 8. Training Limitation
 
