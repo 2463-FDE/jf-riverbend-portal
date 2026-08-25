@@ -33,7 +33,8 @@
     "POL-A1C-MONITOR-STALE@2023-01-15": {
       "status": "mapped",
       "source_id": "POL-A1C-MONITOR-STALE",
-      "source_version": "2023-01-15"
+      "source_version": "2023-01-15",
+      "reason": "identity_maps_but_source_is_retrieval_disabled_and_superseded_see_ADOPTION-NOTES"
     },
     "POL-SCHEDULER-SLOTS@2026-08-22": {
       "status": "mapped",
@@ -50,5 +51,10 @@
       "reason": "unapproved_prompt_injection_fixture"
     }
   },
-  "case_overrides": {}
+  "case_overrides": {
+    "E03": {
+      "classification": "spec_conflict",
+      "reason": "merged_source_missing_required_evidence:EDU-A1C-001@1.1_lacks_the_march_2026_and_august_2026_date_labels_the_pass_criteria_requires_for_the_7.5_and_6.2_percent_values"
+    }
+  }
 }
