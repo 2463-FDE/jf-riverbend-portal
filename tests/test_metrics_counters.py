@@ -36,9 +36,25 @@ def test_record_counter_redacts_a_sensitive_label():
 def test_record_counter_never_raises_even_if_the_logger_is_broken(monkeypatch):
     import libs.metrics.counters as counters_mod
 
-    def _broken_info(*args, **kwargs):
+    def _broken(*args, **kwargs):
         raise RuntimeError("logging backend unavailable")
 
-    monkeypatch.setattr(counters_mod.log, "info", _broken_info)
+    monkeypatch.setattr(counters_mod.log, "info", _broken)
+
+    record_counter("some_metric", termination_reason="answered")  # must not raise
+
+
+def test_record_counter_never_raises_even_if_the_fallback_log_call_also_fails(monkeypatch):
+    # METRIC-RAISES-ON-FALLBACK (review finding): the except block's own
+    # log.warning call was unprotected, so a broken logger could still raise
+    # out of record_counter — exactly defeating the "never raises" contract
+    # instrumentation must hold for the request it's measuring.
+    import libs.metrics.counters as counters_mod
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("logging backend unavailable")
+
+    monkeypatch.setattr(counters_mod.log, "info", _broken)
+    monkeypatch.setattr(counters_mod.log, "warning", _broken)
 
     record_counter("some_metric", termination_reason="answered")  # must not raise

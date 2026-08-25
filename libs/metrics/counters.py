@@ -36,4 +36,7 @@ def record_counter(name: str, value: int = 1, **labels) -> None:
         rendered = " ".join(f"{key}={safe_labels[key]}" for key in sorted(safe_labels))
         log.info("metric emitted: metric=%s value=%s %s", name, value, rendered)
     except Exception as exc:  # instrumentation must never fail the caller
-        log.warning("metric emission failed (error_type=%s)", type(exc).__name__)
+        try:
+            log.warning("metric emission failed (error_type=%s)", type(exc).__name__)
+        except Exception:  # the fallback log call itself must be best-effort too
+            pass
