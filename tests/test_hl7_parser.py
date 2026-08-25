@@ -35,6 +35,18 @@ def test_unknown_segments_do_not_crash():
     assert rec["name"] == "Gonzalez^Maria"
 
 
+def test_allergy_and_medication_segments_are_present_but_still_dropped_today():
+    # Characterization, not the desired-behavior xfail below: SAMPLE genuinely
+    # carries a recognized AL1 (penicillin) and RXA (amoxicillin) segment, not
+    # garbage — this locks in that a well-formed but unmapped segment is
+    # silently dropped exactly like a malformed one, per Week 6's comprehension
+    # report (docs/planning/hl7-segment-comprehension-week6-08-25-2026.md).
+    assert "AL1|" in SAMPLE and "RXA|" in SAMPLE
+    rec = hl7.parse(SAMPLE)
+    assert rec["allergies"] == []
+    assert rec["medications"] == []
+
+
 @pytest.mark.xfail(
     reason="AL1 (allergies) and RXA (medications) are silently dropped by the "
     "parser — SEGMENT_MAP only maps PID/PV1. Known clinical-safety gap, not yet "
