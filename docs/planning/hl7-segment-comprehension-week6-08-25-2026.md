@@ -11,8 +11,8 @@ mapping boundary.
 |---|---|---|---|---|
 | `PID` | Patient demographics | Yes | `mrn`, `name`, `dob` | `hl7_parser.py:12`, `tests/test_hl7_parser.py::test_parses_patient_name_and_dob` |
 | `PV1` | Visit | Yes | `provider`, `location` | `hl7_parser.py:13`, `tests/test_hl7_parser.py::test_parses_visit_provider_and_location` |
-| `AL1` | Allergy | **No — silently dropped** | `allergies` (schema field exists, always empty) | `hl7_parser.py:11` (`SEGMENT_MAP` has no `AL1` key); `tests/test_hl7_parser.py::test_allergies_and_medications_are_captured` (strict `xfail`) |
-| `RXA` | Medication administration | **No — silently dropped** | `medications` (schema field exists, always empty) | same as above |
+| `AL1` | Allergy | **No — silently dropped** | `allergies` (schema field exists, always empty) | absent from `SEGMENT_MAP` (`hl7_parser.py:11-14`); present at `samples/adt_sample.hl7:4`; `tests/test_hl7_parser.py::test_allergies_and_medications_are_captured` (strict `xfail`) |
+| `RXA` | Medication administration | **No — silently dropped** | `medications` (schema field exists, always empty) | absent from `SEGMENT_MAP` (`hl7_parser.py:11-14`); present at `samples/adt_sample.hl7:5`; `tests/test_hl7_parser.py::test_allergies_and_medications_are_captured` (strict `xfail`) |
 | any other/malformed segment | — | No — skipped without error | none | `tests/test_hl7_parser.py::test_unknown_segments_do_not_crash` |
 
 ## How the drop happens
