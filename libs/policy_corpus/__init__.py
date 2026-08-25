@@ -20,6 +20,7 @@ from .persistence import (
     upsert_embedding,
 )
 from .retrieval import PolicyRetriever, RetrievalLedger, RetrievalScope, RetrievedChunk
+from .freshness import CorpusFreshnessReport, check_corpus_freshness
 
 __all__ = [
     "chunk_markdown", "ChunkingConfig", "IngestionConfig", "PolicyChunk", "PolicyDocumentMeta", "PolicyManifest",
@@ -27,4 +28,5 @@ __all__ = [
     "DimensionMismatchError", "EmbeddingCountMismatchError", "IngestionReport", "deactivate_stale_documents",
     "existing_embedding_hashes", "ingest_corpus", "upsert_chunks", "upsert_document", "upsert_embedding",
     "PolicyRetriever", "RetrievalLedger", "RetrievalScope", "RetrievedChunk",
+    "CorpusFreshnessReport", "check_corpus_freshness",
 ]

@@ -49,18 +49,17 @@ The current training implementation stores deterministic heading-section chunks 
 
 New or changed documents require an explicit re-ingestion before they can appear in retrieval. The manifest and content hashes remain authoritative even after vectors are written.
 
-The reproducible administrative sequence at this stage is:
+The reproducible administrative sequence is:
 
 1. run the focused manifest/corpus tests;
-2. run `db/policy_corpus_ingest.py` with the configured policy embedding model.
+2. run `db/policy_corpus_ingest.py` with the configured policy embedding model;
+3. run `db/policy_corpus_evaluate.py --verify-only` and require manifest/database parity;
+4. run `db/policy_corpus_evaluate.py --top-k 5` for the sanitized client-case retrieval report.
 
-A stacked follow-up PR adds `db/policy_corpus_evaluate.py`, which extends this
-sequence with `--verify-only` (require manifest/database parity) and `--top-k 5`
-(the sanitized client-case retrieval report). That evaluator reports evaluation
-IDs and citation metadata, never questions, retrieved text, prompts, responses,
-credentials, or raw provider errors; its `agent_refusal_accuracy` remains unset
-because retrieval correctness alone cannot prove that generated prose refused or
-escalated correctly.
+The evaluator reports evaluation IDs and citation metadata, never questions,
+retrieved text, prompts, responses, credentials, or raw provider errors. Its
+`agent_refusal_accuracy` remains unset because retrieval correctness alone
+cannot prove that generated prose refused or escalated correctly.
 
 The manifest also declares document relationships suitable for a future graph projection. A graph store may represent documents and declared edges, but must not infer new authorization, clinical authority, or workflow permissions from graph connectivity.
 
