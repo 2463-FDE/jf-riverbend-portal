@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Document ID | GUIDE-REC-ACCESS-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Health Information Management / Security |
 | Review Date | August 1, 2027 |
 | Applies To | Patients, Front Desk, Clinical Staff, Administrative Staff |
@@ -74,6 +74,17 @@ May access patient clinical information required for care and assigned workflow 
 May manage accounts or system configuration according to assigned permissions.
 
 Administrative access does not automatically grant clinical chart access.
+
+### Explicit Role Boundaries
+
+- Front desk may register, capture insurance and consent, and schedule, but must not retrieve clinical notes or laboratory interpretation.
+- Laboratory staff may post results under their write permission but do not gain prior-chart read access.
+- Billing staff may work with coverage and payment data but must not retrieve clinical notes or clinical-education categories.
+- ROI clerks use a bounded document list for disclosure fulfilment and do not read note bodies through the education corpus.
+- IT administrators manage accounts and audit configuration but have no patient-scoped retrieval.
+- Management uses oversight and reporting access, not chart convenience. Individual chart access requires an appropriately assigned clinical role.
+
+These boundaries describe permitted policy retrieval; they never replace endpoint permission checks or patient-level grants.
 
 ## 5. Patient-Level Authorization
 

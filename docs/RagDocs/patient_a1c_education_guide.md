@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Document ID | EDU-A1C-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Patient Education / Clinical Governance |
 | Review Date | August 1, 2027 |
 | Audience | Adult Patients |
@@ -82,7 +82,19 @@ An A1c result does not, by itself:
 - Replace a clinician's assessment.
 - Describe short-term changes that may not be reflected in the average.
 
-## 6. When to Ask Your Care Team
+## 6. General Test Ranges and Limitations
+
+For this synthetic training guide, approved federal patient education describes the following general diagnostic ranges for the test:
+
+- Below 5.7%: no diabetes on this test.
+- 5.7% to 6.4%: prediabetes range.
+- 6.5% or above: diabetes range.
+
+These ranges explain the test; they are not an individualized target and must not be used by the portal to diagnose the signed-in patient. When a person has no symptoms, federal education says that a result in a diagnostic range should be confirmed with a repeat test on another day before a diagnosis is treated as established.
+
+Point-of-care A1c samples analyzed in an office should not be used for diagnosis. Conditions affecting red blood cells—including some hemoglobin variants, anemia, and kidney failure—can make A1c results misleading. A clinician may need a different glucose test or additional context.
+
+## 7. When to Ask Your Care Team
 
 Patients may want to ask their care team:
 
@@ -94,7 +106,7 @@ Patients may want to ask their care team:
 
 The portal should direct clinical questions to the care team rather than inventing an answer.
 
-## 7. AI-Generated Explanations
+## 8. AI-Generated Explanations
 
 If an AI-generated explanation is used in the training portal:
 
@@ -106,7 +118,7 @@ If an AI-generated explanation is used in the training portal:
 - Pending, rejected, or superseded drafts must not be shown to the patient.
 - The approved version displayed to the patient must be the same version the clinician reviewed.
 
-## 8. Source and Provenance Expectations
+## 9. Source and Provenance Expectations
 
 A displayed A1c explanation should be traceable to its source data.
 
@@ -122,6 +134,6 @@ At minimum, the system should retain:
 
 Logs and traces should not contain raw patient data, prompts, retrieved text, credentials, or raw provider errors.
 
-## 9. Training Limitation
+## 10. Training Limitation
 
 **This is a fictional patient-education guide created for a synthetic software demonstration. It is not medical advice, is not an official hospital policy, and must not be used to diagnose, treat, or make decisions about a real patient.**

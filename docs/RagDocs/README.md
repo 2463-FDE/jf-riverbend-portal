@@ -32,25 +32,38 @@ Recommended defaults are recorded in the manifest:
 
 Do not place every document into the patient-summary search scope.
 
-- `patient_summary`: laboratory release, A1c education, and threshold governance.
+- `patient_summary`: laboratory release, A1c education, threshold governance, medication-list safety, and urgent-warning education.
 - `summary_review`: clinician review, source priority, and threshold governance.
 - `scheduling`: appointment scheduling only.
 - `records_access`: records-access policy only.
 - `intake_consent`: intake and consent only.
 - `roi`: ROI policy and records-access constraints; it cannot authorize release.
-- `secure_messaging`: messaging and records-access constraints; care-team membership comes from active grants, not the document or model.
+- `secure_messaging`: messaging, records-access, medication-safety, and urgent-warning constraints; care-team membership comes from active grants, not the document or model.
 - `coverage_eligibility`: eligibility guidance only; it cannot determine benefits or payment.
 
 Structured patient data must remain behind separately authorized application tools. Never add patient records, message bodies, intake forms, eligibility responses, or ROI payloads to this policy corpus.
 
 ## Vector and graph stores
 
-Neither is needed for eleven documents. Deterministic workflow filtering plus heading-section retrieval is cheaper, easier to validate, and sufficient for the current demo.
+The current training implementation stores deterministic heading-section chunks and Bedrock embeddings in PostgreSQL/pgvector. Authorization, approval, audience, and workflow filters are applied independently of similarity; vector similarity never replaces those checks.
 
-If evaluation later demonstrates a retrieval-quality gap, a vector index may store section chunks only after the manifest filters are applied. Vector similarity must never replace approval, audience, workflow, patient authorization, or source-version checks.
+New or changed documents require an explicit re-ingestion before they can appear in retrieval. The manifest and content hashes remain authoritative even after vectors are written.
+
+The reproducible administrative sequence at this stage is:
+
+1. run the focused manifest/corpus tests;
+2. run `db/policy_corpus_ingest.py` with the configured policy embedding model.
+
+A stacked follow-up PR adds `db/policy_corpus_evaluate.py`, which extends this
+sequence with `--verify-only` (require manifest/database parity) and `--top-k 5`
+(the sanitized client-case retrieval report). That evaluator reports evaluation
+IDs and citation metadata, never questions, retrieved text, prompts, responses,
+credentials, or raw provider errors; its `agent_refusal_accuracy` remains unset
+because retrieval correctness alone cannot prove that generated prose refused or
+escalated correctly.
 
 The manifest also declares document relationships suitable for a future graph projection. A graph store may represent documents and declared edges, but must not infer new authorization, clinical authority, or workflow permissions from graph connectivity.
 
 ## Canonical files
 
-The corpus contains one canonical file per `source_id@source_version`. Earlier duplicate Secure Messaging candidates and the overlapping Coverage and Benefits draft are intentionally excluded. The coverage guide distinguishes durable statuses (`active`, `inactive`, `unknown`, `pending`, `stale`) from transient runtime/UI categories (`simulated`, `unavailable`).
+The corpus contains one canonical file per `source_id@source_version`. Superseded fixtures may be declared in the manifest only with retrieval disabled. Earlier duplicate Secure Messaging candidates and the overlapping Coverage and Benefits draft are intentionally excluded. The coverage guide distinguishes durable statuses (`active`, `inactive`, `unknown`, `pending`, `stale`) from transient runtime/UI categories (`simulated`, `unavailable`).

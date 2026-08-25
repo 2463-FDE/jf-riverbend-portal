@@ -5,9 +5,9 @@
 | Field | Value |
 |---|---|
 | Policy ID | SCHED-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Status | Approved for Training Demo |
-| Effective Date | August 1, 2026 |
+| Effective Date | August 24, 2026 |
 | Owner | Patient Access / Scheduling Operations |
 | Review Date | August 1, 2027 |
 | Applies To | Patient Portal, Front Desk, Scheduling Staff |
@@ -115,6 +115,8 @@ Staff scheduling actions must follow assigned role permissions.
 The system must not rely on a user-supplied patient identifier alone to authorize an appointment action.
 
 Authorization should be derived or verified by trusted application logic.
+
+The scheduler and front-desk roles may retrieve scheduling workflow material needed to find and book slots. Scheduling access does not grant `records.read` and must not expose clinical notes, laboratory interpretation, or other clinical-education categories. A legacy or unrecognized role must not expand retrieval scope by asking the model to select a different audience.
 
 ## 9. Confirmation and Display
 

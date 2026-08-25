@@ -274,7 +274,11 @@ def test_the_real_ragdocs_manifest_and_corpus_pass_structural_validation():
     result = load_ingestable_documents(REAL_MANIFEST_PATH)
 
     manifest = load_manifest(REAL_MANIFEST_PATH)
-    assert len(result) == len(manifest.documents)  # every real document is currently ingestable
+    excluded = [doc for doc in manifest.documents if not doc.is_ingestable]
+    assert [(doc.source_id, doc.approval_status, doc.retrieval_enabled) for doc in excluded] == [
+        ("POL-A1C-MONITOR-STALE", "superseded", False)
+    ]
+    assert len(result) == len(manifest.documents) - len(excluded)
     for doc, text in result:
         assert doc.is_ingestable
         assert text  # real Markdown body was actually read

@@ -10,12 +10,21 @@ Uses a deterministic local vector generator, not the real Bedrock adapter
 against mocked boto3) — this test is about the SQL/schema, not the network
 call, and must stay runnable with no live AWS credential.
 
+Runs entirely inside a uniquely named temporary Postgres schema (created and
+dropped by the module-scoped `_isolated_schema` fixture below) so it never
+touches the real policy_documents/policy_chunks/policy_chunk_embeddings rows
+in `public` — this module previously deleted those tables unconditionally and
+destroyed a real Bedrock-ingested corpus that happened to share the same
+live database. `_require_isolated_schema` fails closed rather than deleting
+anything if a connection's active schema is ever not the isolated one.
+
 Run with:  pytest -m integration tests/integration/test_policy_corpus_pipeline.py
 Skipped by default in CI (`pytest -m "not integration"`).
 """
 import hashlib
 import json
 import os
+import uuid
 
 import pytest
 
@@ -26,13 +35,20 @@ from pgvector.psycopg2 import register_vector  # noqa: E402
 
 from libs.policy_corpus.persistence import ingest_corpus  # noqa: E402
 from libs.policy_corpus.retrieval import PolicyRetriever, RetrievalScope  # noqa: E402
+from libs.policy_corpus.manifest import load_ingestable_documents  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
 _PROVIDER = "fake-titan"
 _MODEL = "deterministic-test-v1"
 _DIMENSION = 1024
-_MANIFEST_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "docs", "RagDocs", "manifest.json")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_MANIFEST_PATH = os.path.join(_REPO_ROOT, "docs", "RagDocs", "manifest.json")
+_MIGRATION_PATHS = (
+    os.path.join(_REPO_ROOT, "db", "migrations", "024_policy_corpus.sql"),
+    os.path.join(_REPO_ROOT, "db", "migrations", "025_policy_chunk_embeddings.sql"),
+)
+_TEST_SCHEMA = f"policy_corpus_test_{uuid.uuid4().hex[:12]}"
 
 
 def _fake_vector(text: str):
@@ -59,21 +75,65 @@ class _DeterministicEmbeddingClient:
         return [_fake_vector(t) for t in texts]
 
 
-def _connection():
-    conn = psycopg2.connect(
+def _bare_connection():
+    return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
         dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_USER", "riverbend_app"),
         password=os.getenv("DB_PASSWORD", "changeme"),
     )
+
+
+def _connection():
+    """Every connection this module hands out is pinned to the isolated
+    test schema first, `public` second — so an unqualified `policy_documents`
+    etc. always resolves to the throwaway copy, never the real one."""
+    conn = _bare_connection()
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {_TEST_SCHEMA}, public")
+    conn.commit()
     register_vector(conn)
     return conn
+
+
+def _require_isolated_schema(cur):
+    """Fail closed instead of deleting anything if the active schema for
+    unqualified names isn't the isolated one — in particular, never `public`,
+    which is where the real corpus lives."""
+    cur.execute("SELECT current_schema()")
+    active = cur.fetchone()[0]
+    assert active == _TEST_SCHEMA, (
+        f"refusing destructive cleanup: active schema is {active!r}, "
+        f"not the isolated test schema {_TEST_SCHEMA!r}"
+    )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolated_schema():
+    setup_conn = _bare_connection()
+    setup_conn.autocommit = True
+    with setup_conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
+        cur.execute(f"SET search_path TO {_TEST_SCHEMA}, public")
+        for path in _MIGRATION_PATHS:
+            with open(path, encoding="utf-8") as f:
+                cur.execute(f.read())
+    setup_conn.close()
+
+    yield
+
+    teardown_conn = _bare_connection()
+    teardown_conn.autocommit = True
+    with teardown_conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
+    teardown_conn.close()
 
 
 @pytest.fixture(autouse=True)
 def _clean_policy_tables():
     conn = _connection()
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM policy_chunk_embeddings WHERE provider = %s", (_PROVIDER,))
+        _require_isolated_schema(cur)
+        cur.execute("DELETE FROM policy_chunk_embeddings")
         cur.execute("DELETE FROM policy_chunks")
         cur.execute("DELETE FROM policy_documents")
     conn.commit()
@@ -103,7 +163,7 @@ def test_migration_024_and_025_tables_are_present():
 
 def test_first_ingest_writes_every_chunk_and_embedding_then_second_is_a_no_op():
     first = _ingest()
-    assert first.documents_upserted == 11
+    assert first.documents_upserted == len(load_ingestable_documents(_MANIFEST_PATH))
     assert first.chunks_written > 0
     assert first.embeddings_written == first.chunks_written
 
@@ -123,7 +183,11 @@ def test_a_document_dropped_from_the_manifest_becomes_unretrievable_after_reinge
     real_content_root = os.path.dirname(_MANIFEST_PATH)
     manifest = json.loads(open(_MANIFEST_PATH, encoding="utf-8").read())
     manifest["ingestion"]["content_root"] = real_content_root
-    dropped = manifest["documents"].pop()  # GUIDE-COVERAGE-ELIG-001, per manifest order
+    dropped_index = next(
+        index for index, document in enumerate(manifest["documents"])
+        if document["source_id"] == "GUIDE-COVERAGE-ELIG-001"
+    )
+    dropped = manifest["documents"].pop(dropped_index)
     kept_source_id = manifest["documents"][0]["source_id"]
     reduced_manifest_path = tmp_path / "manifest.json"
     reduced_manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
