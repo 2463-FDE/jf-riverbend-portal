@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "aliases": {
+    "CIT-ADA-SOC@2026-08-22": {
+      "status": "excluded",
+      "reason": "citation_only_record_has_no_source_text"
+    },
+    "EDU-DER-A1C-LIMITS@2026-08-22": {
+      "status": "mapped",
+      "source_id": "EDU-A1C-001",
+      "source_version": "1.1"
+    },
+    "EDU-DER-EMERG@2026-08-22": {
+      "status": "mapped",
+      "source_id": "EDU-DER-EMERG",
+      "source_version": "2026-08-22"
+    },
+    "POL-001@2026-08-22": {
+      "status": "mapped",
+      "source_id": "LAB-REL-001",
+      "source_version": "1.2"
+    },
+    "POL-007@2026-08-22": {
+      "status": "mapped",
+      "source_id": "LAB-REL-EXCEPTION-001",
+      "source_version": "1.0"
+    },
+    "POL-A1C-MONITOR-CURRENT@2026-08-22": {
+      "status": "mapped",
+      "source_id": "POL-A1C-MONITOR-CURRENT",
+      "source_version": "2026-08-22"
+    },
+    "POL-A1C-MONITOR-STALE@2023-01-15": {
+      "status": "mapped",
+      "source_id": "POL-A1C-MONITOR-STALE",
+      "source_version": "2023-01-15"
+    },
+    "POL-SCHEDULER-SLOTS@2026-08-22": {
+      "status": "mapped",
+      "source_id": "SCHED-001",
+      "source_version": "1.1"
+    },
+    "TRN-014@2026-08-22": {
+      "status": "mapped",
+      "source_id": "EDU-A1C-001",
+      "source_version": "1.1"
+    },
+    "UNAPP-900@2026-08-22": {
+      "status": "excluded",
+      "reason": "unapproved_prompt_injection_fixture"
+    }
+  },
+  "case_overrides": {}
+}
