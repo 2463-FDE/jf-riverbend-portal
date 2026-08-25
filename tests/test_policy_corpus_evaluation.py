@@ -75,6 +75,11 @@ def test_real_client_suite_is_mapped_without_claiming_disabled_sources_pass():
     assert classifications["E09"].classification == "spec_conflict"
     assert classifications["E10"].classification == "spec_conflict"
     assert classifications["E25"].classification == "spec_conflict"
+    # E03's merged target (EDU-A1C-001@1.1) is active/ingestable, so only an
+    # explicit case_overrides entry — not the inactive-target check above —
+    # keeps it from scoring a source-level pass despite the merged document
+    # lacking the specific date labels its pass criteria requires.
+    assert classifications["E03"].classification == "spec_conflict"
 
 
 def test_unknown_client_citation_is_rejected_instead_of_guessed():

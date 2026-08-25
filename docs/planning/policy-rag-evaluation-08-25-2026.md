@@ -38,12 +38,12 @@ from remaining current retrieval evidence.
 
 | Classification | Count | Meaning |
 |---|---:|---|
-| Runnable supported cases | 11 | Required approved evidence exists in the active corpus |
+| Runnable supported cases | 10 | Required approved evidence exists in the active corpus |
 | Negative retrieval/safety cases | 13 | Retrieval filters and forbidden-source behavior can be checked; generated refusal wording is not scored |
-| Specification conflicts | 3 | Client expectation contradicts the active corpus/access model |
+| Specification conflicts | 4 | Client expectation contradicts the active corpus/access model, or the merged source is missing evidence the case requires |
 | Deferred | 1 | Required source was deliberately excluded because it has citation metadata but no source text |
 
-Case coverage for executable retrieval checks is 24/28 (85.71%). Deferred and
+Case coverage for executable retrieval checks is 23/28 (82.14%). Deferred and
 conflicting cases remain in the report and are not counted as passes.
 
 ## Real-vector retrieval results at top-k 5
@@ -52,7 +52,7 @@ conflicting cases remain in the report and are not counted as passes.
 |---|---:|---:|
 | Required-source recall@5 | 100% | 100% |
 | Citation-target case accuracy | 100% | 100% |
-| Source-level precision@5 | 50.00% | 42.31% |
+| Source-level precision@5 | 50.00% | 41.67% |
 | Forbidden citation hits | 0 | 0 |
 | Out-of-scope retrieval hits | 0 | 0 |
 
@@ -67,6 +67,15 @@ corpus. Document and embedding counts prove inventory, not retrieval quality.
   manifest policy.
 - `E19` — requires a citation-only ADA record with no source text. It cannot
   support quotations and remains deferred.
+- `E03` — requires quoting "7.5 percent in March 2026 and 6.2 percent in
+  August 2026" from `TRN-014`, mapped to the active `EDU-A1C-001@1.1`. That
+  source carries the 7.5%/6.2%/1.3-point values (enough to satisfy sibling
+  case `E04`'s arithmetic requirement) but not the client's original
+  month/year labels for those two values. Found during code review of the
+  evaluation harness's citation-alias mapping (a real-source-level pass would
+  have masked a content-fidelity gap); corrected with an explicit
+  `case_overrides` entry rather than by loosening the pass criteria or
+  rewriting the merged document to fit.
 
 The first run exposed `E08`: the merged clinician early-release section was
 retrievable in patient scope. The corpus was corrected by versioning the
@@ -100,10 +109,15 @@ model responses, patient identifiers, credentials, or raw provider errors.
 
 ## Verification
 
-- Focused policy corpus/evaluation tests: 57 passed.
-- Full non-integration suite: 1,463 passed, 132 deselected, 1 expected failure.
-- Real manifest/database parity: passed.
-- Real Titan/pgvector retrieval evaluation: completed.
+- Focused policy corpus/evaluation tests (`test_policy_corpus.py`,
+  `test_policy_corpus_evaluation.py`, `test_policy_corpus_freshness.py`,
+  `test_policy_corpus_ingest_script.py`, `test_policy_corpus_evaluate_script.py`):
+  41 passed.
+- Real manifest/database parity: passed (fresh, 15/15 documents, 207/207
+  chunks, `bedrock`/`amazon.titan-embed-text-v2:0`, dimension 1024).
+- Real Titan/pgvector retrieval evaluation: completed, re-run after the E03
+  correction above — the numbers in this report are from that corrected run.
+- CI on the exact reported PR heads: green (see PRs #74, #75, #76).
 
 ## Remaining boundary
 

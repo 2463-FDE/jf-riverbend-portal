@@ -47,10 +47,6 @@ def main(argv=None) -> int:
     if not model_id or model_id == "changeme":
         raise SystemExit("POLICY_EMBEDDING_MODEL_ID is not configured — see .env.example")
 
-    embedding_client = EmbeddingClient(
-        config=EmbeddingConfig(provider=_PROVIDER),
-        provider=BedrockPolicyEmbeddingProvider(model_id=model_id),
-    )
     conn = psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
         dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_USER", "riverbend_app"),
@@ -64,6 +60,12 @@ def main(argv=None) -> int:
             print(json.dumps(output, indent=2, sort_keys=True))
             return 0 if freshness.is_fresh else 2
 
+        # Constructed here, not above the verify-only return: a DB-only parity
+        # check must not require AWS_REGION (EVAL-VERIFY-BEDROCK-REGION).
+        embedding_client = EmbeddingClient(
+            config=EmbeddingConfig(provider=_PROVIDER),
+            provider=BedrockPolicyEmbeddingProvider(model_id=model_id),
+        )
         cases = load_evaluation_cases(_EVALUATIONS)
         aliases = load_aliases(_ALIASES)
         case_overrides = load_case_overrides(_ALIASES)
