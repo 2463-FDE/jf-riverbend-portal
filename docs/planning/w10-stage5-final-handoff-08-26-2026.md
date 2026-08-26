@@ -1,10 +1,13 @@
 # W10 Stage 5 — final exact-main handoff (2026-08-26)
 
-**Status:** working-tree evidence at authoring time; committed as part of the
-PR that adds this file. **Exact reported `main` commit:** `6c7fc49`
-(`6c7fc49c9c15f0b16b6d9e1dfa7549198b16a5b5`).
+**Status:** working-tree evidence at authoring time; open for review as PR
+#81. **`6c7fc49` is the evidence baseline this report was produced
+against — every command, freshness check, and rehearsal below ran on that
+exact commit.** That does not make W10 complete by itself: **W10 closes
+only when PR #81 merges**, at which point this report is amended once more
+(§11) with the actual merge commit.
 
-This report is reproducible from that exact commit using the commands and
+This report is reproducible from `6c7fc49` using the commands and
 credentials recorded below. It does not implement any new feature — Stage 5
 is verification and documentation only, per `w-10-planner`'s own operating
 rules.
@@ -59,9 +62,13 @@ make demo-reset
    turn bound without converging to a final answer. Caught by the generic
    exception handler in `run_policy_navigator`; returned the safe, truthful,
    generic reply ("I couldn't reach the policy navigator just now...") with
-   no citations and no raw error exposed. **This is the exercised
-   provider-failure/fallback path for this handoff** — observed live,
-   not artificially injected (see §4).
+   no citations and no raw error exposed. **Classified as intermittent
+   bounded-loop exhaustion** — an occasional, real failure mode of a bounded
+   agent loop under load, not a configuration problem; it did not recur in
+   rehearsal 2 against the same corpus. Recorded here as an incidental,
+   genuine observation of the same fallback contract — the planned,
+   reproducible provider-failure exercise is the separate controlled test in
+   §4.
 7. `POST /policy/ask` (patient-1738): "What is the minimum-necessary rule
    for ROI disclosure record selection?" → **200**, `label=real`,
    `termination_reason=answered`, citing `GUIDE-REC-ACCESS-001` and
@@ -91,33 +98,68 @@ again `answered` from in-scope role-boundary guidance, never
 UnitedHealthcare`. Step 10: eligibility chat `answered`, correctly reporting
 it could not confirm live status and showing the stored/masked data instead.
 
-## 4. Provider-failure/fallback path — what was actually exercised, and why
+## 4. Provider-failure/fallback path — the planned, controlled exercise
 
 The original plan was to use the eligibility chat's documented fail-closed
 behavior for an unset `ELIGIBILITY_AGENT_RUNTIME`. That assumption was
-**wrong** and is corrected here: `libs/eligibility_agent/runtime.py:50`
-defaults an unset `ELIGIBILITY_AGENT_RUNTIME` to `"raw_bedrock"` (the
-working default), not a fail-closed refusal — `docs/runbook.md`'s framing
-of this ("expect every chat turn to return `termination_reason=
-provider_error`... until a real model id/region/credential is configured")
-describes the state before this environment's `.env` was configured with
-real Bedrock credentials, and is now stale for this specific environment
-(see §5). Both rehearsals' eligibility chat calls genuinely answered.
+**wrong**, corrected here rather than silently dropped:
+`libs/eligibility_agent/runtime.py:50` defaults an unset
+`ELIGIBILITY_AGENT_RUNTIME` to `"raw_bedrock"` (the working default), not a
+fail-closed refusal — `docs/runbook.md`'s framing of this ("expect every
+chat turn to return `termination_reason=provider_error`... until a real
+model id/region/credential is configured") describes the state before this
+environment's `.env` was configured with real Bedrock credentials, and is
+now stale for this specific environment. Both rehearsals' eligibility chat
+calls genuinely answered — that path could not serve as the fallback
+exercise.
 
-Instead, rehearsal 1 organically produced a real `provider_error`/`fallback`
-result (§3, step 6) — a `GraphRecursionError` from the live LangChain agent
-loop exceeding its turn bound on a real Bedrock call. This is used as the
-one required provider-failure/fallback exercise for this handoff: it is
-real, live, reproducible in spirit (any sufficiently hard question can
-exhaust the turn bound), and it proves the exact safety contract Stage 5
-asks for — a truthful, generic, non-leaking reply, correctly labelled
-`fallback`, with the real failure mode never exposed to the caller.
+**The planned fallback exercise is a controlled, one-off provider-not-
+configured test against the real policy-navigator runtime**, run without
+editing `.env`:
 
-## 5. Runbook/Makefile corrections required — reported, not staged
+```bash
+docker compose run --rm -e BEDROCK_MODEL_ID=changeme records-service \
+  python /tmp/check.py   # calls policy_navigator_path.ask_policy_navigator directly
+```
 
-Per instruction, `Makefile` and `docs/runbook.md` are untouched by this
-change. Two corrections were found and are reported here for someone to
-apply with explicit approval:
+`services/records-service/policy_navigator_path.py::ask_policy_navigator`
+was called directly (real code, real Postgres, real embedding
+provider/retrieval — only the chat model's `BEDROCK_MODEL_ID` was
+overridden to `changeme` for this one container invocation) with a real
+clinician question. Observed and asserted:
+
+```
+label: fallback
+termination_reason: provider_error
+model_id: None
+citations: ()
+```
+
+Records-service log showed `error_type=ProviderNotConfigured` — the exact,
+intentional guard in `run_policy_navigator::_default_model()` that raises
+before any network call when `BEDROCK_MODEL_ID` is unset or `"changeme"`.
+Embedding/retrieval succeeded first (unaffected by the override), then
+chat-model construction failed exactly as designed, and the safe fallback
+was returned with no citations and no model id — never a raw error.
+
+This, not the organic `GraphRecursionError` in §3 step 6, is the reported
+planned provider-failure/fallback exercise for this handoff: deliberate,
+reproducible on demand, isolated to one container invocation, and it never
+touched `.env`. The `GraphRecursionError` remains recorded in §3 as a real,
+separately-classified, intermittent observation of the same underlying
+safety contract — evidence that the fallback also holds under an
+unplanned failure mode, not the designated exercise itself.
+
+## 5. Runbook/Makefile corrections — found here, drafted in PR #82
+
+Per instruction, `Makefile` and `docs/runbook.md` were left untouched by
+this report's own PR (#81). Two corrections were found; both have since
+been applied on a separate draft PR, built in a clean temporary worktree
+from exact `main` so this session's other preserved, unrelated
+working-tree edits to these same two files stayed untouched:
+[PR #82](https://github.com/2463-FDE/jf-riverbend-portal/pull/82),
+commit `e1f253e`. Still draft, still requires its own explicit
+merge approval — recorded here, not assumed:
 
 1. **`docs/runbook.md`'s "Demo accounts" section never documents the
    patient-portal password.** It states "All seeded users share password
@@ -136,8 +178,7 @@ apply with explicit approval:
    `make demo-reset` printed one reset row for all four. **Suggested fix:**
    update the comment to say "all four canonical demo patients."
 
-Neither was fixed here. Both are corrected only if explicitly approved,
-per instruction.
+Both are fixed on PR #82, not on this PR, and not yet merged.
 
 ## 6. Meaningful before/after retrieval result
 
@@ -170,7 +211,8 @@ the reported before/after — not a larger document or embedding count.
 | Week 7 — golden-signal metric | **CLOSED** | PR #78 |
 | Week 8 — AI data-flow/vendor memo | **CLOSED** | PR #79 |
 | Week 9 — responsibility-matrix reconciliation | **CLOSED** | PR #80, `main`@`6c7fc49` |
-| Week 10 / Stage 5 — final exact-main handoff | **CLOSED by this report** | This document |
+| Week 10 / Stage 5 — final exact-main handoff | **Evidence complete on `6c7fc49`; closes when PR #81 merges** | This document |
+| Runbook/Makefile corrections | **Drafted, not merged** | PR #82 |
 | AL1/RXA HL7 mapping implementation | **Deferred** (documented, not authorized) | `adr/0011` |
 | `libs/deid` scrub wiring | **Deferred** (documented, not authorized) | Week 8 memo, `adr/0009` |
 | Payer simulation mode | **Open** | `docs/handover/responsibility-matrix.md` B-2 |
@@ -186,8 +228,8 @@ the reported before/after — not a larger document or embedding count.
 |---|---|---|---|
 | 1 | Payer simulation mode (`payer_client.py`) | `OWNER UNASSIGNED` — unassigned training maintainer | 1–2 hours (carried from B-2) |
 | 2 | B-4 runtime-verification re-check (front-desk denial under current roles.yaml; A1c-explanation metric; fresh integration-suite run) | `OWNER UNASSIGNED` — unassigned training maintainer | 2–3 hours (carried from B-4) |
-| 3 | Document patient-portal password (`portalportal123`) in `docs/runbook.md`'s Demo accounts section | `OWNER UNASSIGNED` — unassigned training maintainer, pending explicit approval to edit the runbook | 5 minutes |
-| 4 | Correct `Makefile:22`'s stale `demo-reset` comment (singular patient → all four) | `OWNER UNASSIGNED` — unassigned training maintainer, pending explicit approval to edit the Makefile | 5 minutes |
+| 3 | Merge PR #82 (documents `portalportal123` in `docs/runbook.md`'s Demo accounts section) | `OWNER UNASSIGNED` — unassigned training maintainer; drafted, needs explicit merge approval | Done, pending merge |
+| 4 | Merge PR #82 (corrects `Makefile:22`'s stale `demo-reset` comment) | `OWNER UNASSIGNED` — unassigned training maintainer; drafted, needs explicit merge approval | Done, pending merge |
 | 5 | AL1/RXA HL7 mapping implementation (per `adr/0011`'s proposed schema) | `OWNER UNASSIGNED` — unassigned training maintainer; requires separate client authorization per `CLAUDE.md` | Not estimated — implementation, not documentation |
 | 6 | Wire `libs/deid.scrub()` into the two named Bedrock call sites (Week 8 memo) | `OWNER UNASSIGNED` — unassigned training maintainer | Half a day (per `adr/0009` gate item 1) |
 | 7 | Roster/role migration off deprecated `staff` role | `OWNER UNASSIGNED` — unassigned training maintainer; roster-gated, needs real job-function data per `CLAUDE.md` | Not estimated — blocked on client data |
@@ -204,3 +246,11 @@ the reported before/after — not a larger document or embedding count.
   to every environment — it depends on this environment's configured
   `BEDROCK_MODEL_ID`/`AWS_REGION`, which are local `.env` values, not
   something this repository ships or guarantees.
+- Not a claim that W10 is complete while this section still says otherwise
+  — see §11.
+
+## 11. Final merge commit
+
+**Pending.** `6c7fc49` remains the evidence baseline until this PR (#81)
+merges. This section is amended with the actual merge commit once that
+happens; until then, W10 is NOT COMPLETE.
