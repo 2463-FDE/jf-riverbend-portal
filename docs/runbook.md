@@ -133,6 +133,42 @@ docker compose exec -T postgres psql -U "$DB_ADMIN_USER" -d "$DB_NAME" \
         WHERE table_name = 'audit_logs' AND grantee = '$DB_USER' ORDER BY 1"
 ```
 
+### Verifying audit_logs's hash chain (w8-planner-2 P3, migration 027)
+
+```bash
+DATABASE_URL="postgresql://$DB_ADMIN_USER:$DB_ADMIN_PASSWORD@localhost:5432/$DB_NAME" \
+    python3 db/migrations/scripts/verify_audit_chain.py
+```
+
+Prints `OK — N row(s) verified, chain intact.` and exits `0` on success.
+On a broken chain it prints `CHAIN BROKEN at chain_position=N: <reason>` to
+stderr and exits `2` (`3` for a connection/environment failure, e.g. missing
+`DATABASE_URL` or `psycopg2`) — script-friendly for a scheduled check.
+The reason string is always pure metadata (a chain position and a fixed
+phrase); it never contains `actor` or `message` content, even for a corrupt
+row.
+
+**What this proves, and what it does not.** The threat this control targets
+is a compromised or buggy *runtime/application* role (`riverbend_app` — the
+credential every service actually connects with): that role cannot mutate,
+delete, disable the append-only triggers, or rewrite the chain, and any row
+it managed to affect through some other bug would be caught here — including
+a row deleted and the remainder relinked/rehashed around the gap, not just a
+naive delete. It does **not** protect against a malicious **database owner
+or superuser** bypassing the triggers directly, and it does **not** detect
+truncation of the newest rows (deleting the tail and stopping there leaves
+the remainder internally consistent — there is nothing after the cut to
+reveal a break). Detecting that requires an externally stored or signed
+chain-head checkpoint (`{chain_position, chain_hash}` recorded somewhere
+outside this database on a schedule) — **not implemented in this PR stack**;
+tracked as follow-up work, either an external checkpoint service or an
+HMAC-protected checkpoint under a separately scoped key. Do not describe
+this control as protection against a malicious DBA, or as detecting every
+possible deletion.
+
+No scheduled/automated run of this script exists yet — running it is a
+manual operator action today.
+
 ## Start / stop
 
 ```bash
