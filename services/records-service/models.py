@@ -117,13 +117,20 @@ class PatientAccessGrant(Base):
 
 class AuditLog(Base):
     """Append-only at the database boundary since migration 026 (P3,
-    w8-planner-2, see that migration for the trigger and why not a REVOKE) —
-    still NOT a tamper-evident chain (no hash linking, no verifier; that
-    remains separate, later work, PR #86). Stage 3's `/patients/{id}/view`
-    route is the first writer of this table in the codebase (see
-    docs/handover/auditor-questionnaire.md and roi-service/app.py's comment
-    on the same gap); a real append-only per-patient disclosure-accounting
-    store remains unbuilt, documented future work.
+    w8-planner-2, see that migration for the trigger and why not a REVOKE),
+    and tamper-evident since migration 027 (PR #86): `chain_position`/
+    `prev_chain_hash`/`chain_hash` form a hash chain, linked and verified by
+    `chain_position` (not `id`) and computed by a `BEFORE INSERT` trigger —
+    see that migration for the full design and db/migrations/scripts/
+    verify_audit_chain.py for the verifier. Detects a row whose own content
+    changed or one spliced/removed from the middle of the chain; does NOT
+    detect truncation at the tail without an externally stored checkpoint
+    this repo does not implement (027's own comment states this precisely).
+    Stage 3's `/patients/{id}/view` route is the first writer of this table
+    in the codebase (see docs/handover/auditor-questionnaire.md and
+    roi-service/app.py's comment on the same gap); a real append-only
+    per-patient disclosure-accounting store remains unbuilt, documented
+    future work.
 
     No `deleted_at`: migration 026 dropped it — nothing in this codebase
     ever set or filtered on it, and the append-only trigger rejects any
