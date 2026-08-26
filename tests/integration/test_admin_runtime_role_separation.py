@@ -60,6 +60,19 @@ def _bare_connection(user=None, password=None):
     )
 
 
+def _admin_connection():
+    """Round-2 review (AUD-M01): a fresh/post-028 environment creates
+    DB_USER as NOSUPERUSER NOCREATEROLE from birth (db/docker-init/00-
+    create-app-role.sh) — it is no longer the cluster-superuser-equivalent
+    bootstrap credential this fixture's CREATE ROLE/DROP ROLE calls need,
+    on any environment built from this PR's own docker-compose.yml."""
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
+        dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_ADMIN_USER", "riverbend_admin"),
+        password=os.environ["DB_ADMIN_PASSWORD"],
+    )
+
+
 @contextlib.contextmanager
 def _disposable_roles_and_schema():
     """Creates two disposable roles (an admin-equivalent superuser and a
@@ -69,9 +82,9 @@ def _disposable_roles_and_schema():
     disposable app role exactly the way 028 grants the real one — INSERT +
     SELECT only, no UPDATE/DELETE, no ownership.
 
-    Yields (admin_conn, app_conn). Bootstrapped and torn down using the
-    current DB_USER credential, which is still cluster-superuser-equivalent
-    on today's real, not-yet-migrated database — never touching the real
+    Yields (admin_conn, app_conn). Bootstrapped and torn down using
+    DB_ADMIN_USER, the credential with CREATEROLE on any environment built
+    from this PR's own docker-compose.yml — never touching the real
     riverbend_app/riverbend_admin roles or the real public.audit_logs."""
     admin_role = f"test_admin_{uuid.uuid4().hex[:10]}"
     app_role = f"test_app_{uuid.uuid4().hex[:10]}"
@@ -79,7 +92,7 @@ def _disposable_roles_and_schema():
     app_password = uuid.uuid4().hex
     schema = f"role_sep_test_{uuid.uuid4().hex[:10]}"
 
-    boot = _bare_connection()
+    boot = _admin_connection()
     boot.autocommit = True
     admin_conn = None
     app_conn = None
@@ -268,7 +281,7 @@ def test_app_credentials_cannot_authenticate_as_the_admin_role():
     app_password = uuid.uuid4().hex
     assert admin_password != app_password  # the fixture's own guarantee, made explicit
 
-    boot = _bare_connection()
+    boot = _admin_connection()
     boot.autocommit = True
     try:
         with boot.cursor() as cur:
