@@ -11,11 +11,17 @@ which paths, and which do not need it.
 
 ## Every real Bedrock call site in this repository
 
-| Component | What reaches the model as the human/user message | Free caller text? | Patient/client data risk |
+Not only chat/model human-message paths — every path that constructs a real
+Bedrock request, including embeddings, is enumerated below so a reader
+auditing this boundary doesn't find one this memo said didn't exist.
+
+| Component | What reaches Bedrock | Free caller text? | Patient/client data risk |
 |---|---|---|---|
-| `libs/policy_navigator/runtime.py::run_policy_navigator` | `question` — a caller-typed policy question (records-service's `/policy/ask` path) | **Yes** | A caller could type patient-identifying text into a policy question by mistake (e.g. "does my policy cover [named condition] for [patient name]?"). The retrieved tool evidence itself is the static synthetic policy corpus only — zero patient data on that side. |
-| `libs/eligibility_agent/runtimes/{raw_bedrock,langchain_runtime}.py::handle_message` | `user_message` — a caller-typed chat message on a visit (eligibility-service's visit-chat path) | **Yes** | Same shape of risk: free chat text a patient or staff member types could contain a name, DOB, member ID, etc. |
+| `libs/policy_navigator/runtime.py::run_policy_navigator` | `question` — a caller-typed policy question (records-service's `/policy/ask` path) — as a Converse `HumanMessage` | **Yes** | A caller could type patient-identifying text into a policy question by mistake (e.g. "does my policy cover [named condition] for [patient name]?"). The retrieved tool evidence itself is the static synthetic policy corpus only — zero patient data on that side. |
+| `services/records-service/policy_navigator_path.py` → `libs/policy_corpus/retrieval.py::PolicyRetriever.retrieve` → `libs/policy_corpus/bedrock_embedding_provider.py` | The **same** `question` text, embedded via Titan (`invoke_model`) for the vector search **before** the Converse call above runs | **Yes** | Same risk as the row above — this is a second, separate Bedrock call carrying the identical caller text. A scrub applied only before the Converse call and not before this embedding call would leave one of the two calls still receiving raw caller text. |
+| `libs/eligibility_agent/runtimes/{raw_bedrock,langchain_runtime}.py::handle_message`, entered via `services/eligibility-service/app.py::post_visit_message` → `agent_wiring.handle_visit_message` | `req.message` — a caller-typed chat message on a visit (eligibility-service's visit-chat path) | **Yes** | Same shape of risk: free chat text a patient or staff member types could contain a name, DOB, member ID, etc. |
 | `libs/summary_agent/runtime.py::run_summary_agent` | A **hardcoded** instruction string, `"Summarise the approved guidance for this reader."` — never caller-supplied text | **No** | Structurally cannot carry patient data through the human message, by construction — there is no free-text field here for a caller (or this code) to put patient facts into. The `audience` parameter is a role-scope value (e.g. `"patient"`), not a patient identifier, and is never sent to the model. Tool-retrieved evidence is the same fixed, approved, synthetic guidance corpus (`libs/summary_agent/manifest.json`) `policy_navigator` uses — not per-patient labs, notes, or results. |
+| `services/intake-service/app.py`'s intake-instructions endpoint → `libs/intake_instructions/composer.py::compose_intake_instructions` → `libs/llm_client` (`LLM_PROVIDER=bedrock` selectable, `libs/llm_client/client.py`) | `req.step` — one of a closed, validated set of wizard-step names (`schemas.IntakeInstructionsRequest`, `VALID_STEPS`) | **No** | The request carries no patient data at all by construction — not a caller-free-text field, a closed enum the schema validates before this handler runs (`app.py`'s own comment confirms this explicitly). No scrub target here. |
 
 No component in this repository sends real per-patient clinical facts (lab
 values, visit notes, diagnoses) to a model today. The patient-summary agent's
@@ -24,13 +30,29 @@ quotes and does arithmetic on numbers *printed in the approved synthetic
 guidance document itself* (see its system prompt's worked example), scoped by
 audience, not by patient.
 
+## Analytics/export paths
+
+ADR 0009's Precondition 1 names "the LLM **or analytics** paths" as the
+unmet-wiring condition. Searched this repository (`grep` across `services/`
+and `libs/` for `analytics`/`export`) for any active outbound analytics or
+export pipeline this system runs: **none exists.** The only code-level
+"export" reference is `libs/rag_corpus/corpus.py`'s docstring, which
+describes reading checked-in teaching fixtures "never the client's raw
+patients/encounters export" — a one-time **historical input** used to build
+this training environment's seed data, not an outbound analytics pipeline
+this application operates today. This matches ADR 0009's own finding that
+the client's "we have a de-identified export for analytics" premise was
+never supported by the repository. With no active analytics path found, this
+memo resolves ADR 0009's "LLM or analytics paths" scrub-wiring condition in
+full — model-provider paths per the table above, and analytics by absence.
+
 ## The boundary decision
 
-**Apply a future scrub only to caller-supplied free text before it becomes a
-`HumanMessage`** — specifically:
+**Apply a future scrub only to caller-supplied free text, before its first
+use** — specifically:
 
-1. `policy_navigator`'s `question` parameter, at the point `services/records-service/policy_navigator_path.py` (or the gateway) receives it from the caller, before it reaches `run_policy_navigator`.
-2. `eligibility_agent`'s `user_message` parameter, at the equivalent point in `services/eligibility-service`.
+1. `policy_navigator`'s `question` parameter, at the point `services/records-service/policy_navigator_path.py` (or the gateway) receives it from the caller, before it reaches EITHER of its two Bedrock uses: the Titan embedding call inside `PolicyRetriever.retrieve` and the Converse call inside `run_policy_navigator`. Scrubbing before only one of the two would leave the other carrying raw caller text.
+2. `eligibility_agent`'s chat message, at `services/eligibility-service/app.py::post_visit_message` (the concrete entry point `req.message` reaches before `agent_wiring.handle_visit_message` calls into the runtime).
 
 **Do not apply it to:**
 
@@ -40,6 +62,8 @@ audience, not by patient.
   text that was never identifying would be security theater, not a control;
 - `libs/summary_agent/runtime.py`'s fixed instruction string — there is
   nothing there for a scrub to remove;
+- `services/intake-service`'s intake-instructions `req.step` — a closed,
+  schema-validated enum, not caller-supplied prose;
 - any `audience`/`workflow`/role-scope value — these are fixed enum-like
   strings, not caller-supplied prose.
 
