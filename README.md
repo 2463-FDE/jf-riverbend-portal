@@ -102,7 +102,11 @@ What is not:
 - **no encryption at rest** — see `adr/0008` for the recorded risk decision
 - no TLS on any hop
 - no MFA outside a pilot-clinic scope
-- no tamper-evident audit trail (audit rows are recorded, not protected)
+- **no tamper-evident audit trail yet** — `audit_logs` is now append-only at
+  the database boundary (migration 026's trigger, plus 028's admin/runtime
+  role split closing the table-owner bypass), but nothing yet proves no row
+  was altered by a privileged (admin-level) bypass — a hash chain + verifier
+  is separate, later work (PR #86)
 - no signed-authorization check before a release of information
 - one shared database credential; no deployment pipeline; no backup or
   recovery process; no security scanning in CI
