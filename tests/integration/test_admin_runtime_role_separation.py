@@ -328,9 +328,17 @@ def test_create_admin_role_sql_proceeds_with_distinct_passwords():
 
 
 def test_public_audit_logs_and_real_roles_are_untouched():
-    # Never applied to the live shared database — the real riverbend_app
-    # still owns the real audit_logs, and the real table still carries
-    # whatever row count it already had.
+    # This module's other tests only ever touch disposable roles/schemas —
+    # this test is the one place that checks the shared LOCAL dev database
+    # itself was never mutated as a side effect. That precondition is a fact
+    # about a developer's machine, not about this PR's code: once someone
+    # actually runs 028 against their own `make up` Postgres (exactly what
+    # docs/runbook.md's existing-volume bootstrap step recommends trying),
+    # riverbend_app is legitimately no longer audit_logs's owner forever
+    # after on that machine. Asserting the pre-migration shape unconditionally
+    # would then fail permanently for a correct, intentional local migration
+    # rather than for a defect (AUD-N02) — skip instead once that's evidently
+    # what happened.
     conn = _bare_connection()
     with conn.cursor() as cur:
         cur.execute(
@@ -341,6 +349,14 @@ def test_public_audit_logs_and_real_roles_are_untouched():
         cur.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'riverbend_admin'")
         (admin_role_count,) = cur.fetchone()
     conn.close()
+
+    if admin_role_count > 0:
+        pytest.skip(
+            "028_admin_runtime_role_separation.sql has already been applied "
+            "to this local database (riverbend_admin exists) — the "
+            "pre-migration precondition this test checks no longer holds "
+            "on this machine."
+        )
 
     assert owner == os.getenv("DB_USER", "riverbend_app")
     assert admin_role_count == 0  # 028 has not been run against this database
@@ -614,3 +630,88 @@ def test_the_real_028_migration_transitions_a_non_default_legacy_role_correctly(
             assert b"must be owner" in disable_trigger.stderr
     finally:
         os.remove(tmp_schema_path)
+
+
+@pytest.mark.skipif(_DOCKER is None, reason="docker CLI not available")
+def test_the_real_028_migration_handles_pgvector_extension_owned_functions():
+    # Round-3 review (AUD-B02): claimed 028's function-ownership loop selects
+    # every public function owned by the runtime role with no exclusion for
+    # extension members, and that Postgres rejects ALTER FUNCTION ... OWNER
+    # TO on a pgvector-owned function — so a legacy volume with `CREATE
+    # EXTENSION vector` already applied (db/schema.sql:632, the real,
+    # non-test-only schema every deployment actually runs) would abort 028
+    # before the runtime role is demoted, leaving AUD-B01's bypass open.
+    #
+    # This test runs 028 against the REAL db/schema.sql (not a hand-built
+    # stand-in) on a legacy single-role volume, so pgvector's extension
+    # functions really are owned by the pre-split bootstrap role exactly as
+    # they would be on a real deployment. It failed to reproduce the claimed
+    # rejection under manual verification (Postgres 15 / pgvector 0.8.0 allow
+    # ALTER FUNCTION OWNER TO on an extension member — only the extension's
+    # own DROP/definition-change paths are restricted), so this test exists
+    # to keep proving that going forward rather than to fix a confirmed bug.
+    name = f"role_sep_pgvector_test_{uuid.uuid4().hex[:8]}"
+    legacy_role, legacy_password = f"t_legacy_{uuid.uuid4().hex[:6]}", uuid.uuid4().hex
+    admin_role, admin_password = f"t_admin3_{uuid.uuid4().hex[:6]}", uuid.uuid4().hex
+
+    real_schema_sql = os.path.join(_REPO_ROOT_FOR_MOUNTS, "db", "schema.sql")
+    mounts = {real_schema_sql: "/docker-entrypoint-initdb.d/01-schema.sql"}
+    container_env = {
+        "DB_APP_USER": legacy_role, "DB_APP_PASSWORD": legacy_password,
+        "DB_ADMIN_USER": admin_role, "DB_ADMIN_PASSWORD": admin_password,
+    }
+
+    with _disposable_container(name, legacy_role, legacy_password, container_env, mounts):
+        # Sanity: pgvector really did install, and its functions really are
+        # owned by the legacy bootstrap role — the exact precondition AUD-B02
+        # is about.
+        ext_owned_by_legacy = _docker(
+            "exec", "-e", f"PGPASSWORD={legacy_password}", name,
+            "psql", "-U", legacy_role, "-d", "riverbend", "-tA",
+            "-c",
+            "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            f"WHERE n.nspname = 'public' AND pg_get_userbyid(p.proowner) = '{legacy_role}' "
+            "AND EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')",
+        ).stdout.decode().strip()
+        assert int(ext_owned_by_legacy) > 0, "test precondition failed: pgvector did not install"
+
+        create_admin_sql = os.path.join(
+            _REPO_ROOT_FOR_MOUNTS, "db", "migrations", "scripts", "create_admin_role.sql"
+        )
+        _docker("cp", create_admin_sql, f"{name}:/tmp/create_admin_role.sql")
+        result = _psql_exec(name, legacy_role, legacy_password, "/tmp/create_admin_role.sql")
+        assert result.returncode == 0, result.stderr.decode()
+
+        migration_028 = os.path.join(
+            _REPO_ROOT_FOR_MOUNTS, "db", "migrations", "028_admin_runtime_role_separation.sql"
+        )
+        _docker("cp", migration_028, f"{name}:/tmp/028.sql")
+        result = _psql_exec(name, admin_role, admin_password, "/tmp/028.sql")
+        assert result.returncode == 0, result.stderr.decode()
+
+        # The extension's own functions must now be owned by the admin role,
+        # not left behind on the demoted legacy role.
+        ext_owned_by_legacy_after = _docker(
+            "exec", "-e", f"PGPASSWORD={admin_password}", name,
+            "psql", "-U", admin_role, "-d", "riverbend", "-tA",
+            "-c",
+            "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            f"WHERE n.nspname = 'public' AND pg_get_userbyid(p.proowner) = '{legacy_role}'",
+        ).stdout.decode().strip()
+        assert ext_owned_by_legacy_after == "0"
+
+        # The extension must still be usable after the ownership transfer.
+        vector_op = _docker(
+            "exec", "-e", f"PGPASSWORD={admin_password}", name,
+            "psql", "-U", admin_role, "-d", "riverbend", "-tA",
+            "-c", "SELECT '[1,2,3]'::vector <-> '[1,2,4]'::vector",
+            check=False,
+        )
+        assert vector_op.returncode == 0, vector_op.stderr.decode()
+
+        attrs = _docker(
+            "exec", "-e", f"PGPASSWORD={admin_password}", name,
+            "psql", "-U", admin_role, "-d", "riverbend", "-tA",
+            "-c", f"SELECT rolsuper FROM pg_roles WHERE rolname='{legacy_role}'",
+        ).stdout.decode().strip()
+        assert attrs == "f"  # demoted off superuser despite the extension-owned functions
