@@ -144,6 +144,74 @@ def test_a_relinked_and_rehashed_gap_is_still_detected():
     assert "missing from the chain" in reason
 
 
+def test_a_chain_not_starting_at_position_one_is_rejected():
+    # The density invariant applies from the very first row, not just
+    # between consecutive rows -- a chain missing its genesis entirely
+    # (e.g. position 1 deleted, leaving 2, 3, ...) must fail too.
+    rows = _chain([
+        ("drkim", "event one", "2026-08-26T00:00:00.000000Z"),
+        ("frontdesk", "event two", "2026-08-26T00:00:01.000000Z"),
+    ])
+    del rows[0]  # position 1 vanishes; position 2 remains, prev_hash None unchanged
+
+    ok, break_position, reason = verify.verify_chain(rows)
+
+    assert ok is False
+    assert break_position == 2
+    assert "missing from the chain" in reason
+
+
+def test_a_duplicate_chain_position_is_rejected():
+    # 027's UNIQUE constraint on chain_position should make this
+    # unconstructible against the real table, but the verifier's own
+    # logic must not silently accept it if that constraint were ever
+    # bypassed (e.g. a direct, trigger-disabled write) -- density means
+    # strictly increasing by exactly 1, not merely non-decreasing.
+    # `rows` must arrive pre-sorted by chain_position (the real caller's
+    # `ORDER BY chain_position` does this) -- two rows tied at position 1
+    # sort adjacent, ahead of position 2, regardless of which was forged.
+    genesis = _chain([("drkim", "event one", "2026-08-26T00:00:00.000000Z")])[0]
+    forged_duplicate = (1, "attacker", "forged event", "2026-08-26T00:00:02.000000Z", None, "0" * 64)
+    real_position_two = _chain([
+        ("drkim", "event one", "2026-08-26T00:00:00.000000Z"),
+        ("frontdesk", "event two", "2026-08-26T00:00:01.000000Z"),
+    ])[1]
+    rows = [genesis, forged_duplicate, real_position_two]  # positions: 1, 1, 2
+
+    ok, break_position, reason = verify.verify_chain(rows)
+
+    assert ok is False
+    assert break_position == 1  # the forged duplicate: expected_position was already 2 by then
+    assert "missing from the chain" in reason
+
+
+def test_verify_chain_failure_reasons_never_contain_row_content():
+    # The reason string is the only thing main() ever prints for a broken
+    # chain (besides the bare chain_position integer) -- it must stay pure
+    # metadata, never actor/message content, regardless of which check
+    # trips. Exercises one failure from each of the three return points in
+    # verify_chain.
+    secret = "PHI-LOOKING-CONTENT-MUST-NEVER-APPEAR-IN-A-REASON-STRING"
+
+    gap_rows = _chain([("drkim", secret, "2026-08-26T00:00:00.000000Z")])
+    gap_rows[0] = (2, "drkim", secret, "2026-08-26T00:00:00.000000Z", None, gap_rows[0][5])
+    _, _, gap_reason = verify.verify_chain(gap_rows)
+
+    splice_rows = _chain([
+        ("drkim", secret, "2026-08-26T00:00:00.000000Z"),
+        ("frontdesk", secret, "2026-08-26T00:00:01.000000Z"),
+    ])
+    splice_rows[1] = (2, "frontdesk", secret, "2026-08-26T00:00:01.000000Z", "0" * 64, splice_rows[1][5])
+    _, _, splice_reason = verify.verify_chain(splice_rows)
+
+    tamper_rows = _chain([("drkim", secret, "2026-08-26T00:00:00.000000Z")])
+    tamper_rows[0] = (1, "drkim", "different content now", "2026-08-26T00:00:00.000000Z", None, tamper_rows[0][5])
+    _, _, tamper_reason = verify.verify_chain(tamper_rows)
+
+    for reason in (gap_reason, splice_reason, tamper_reason):
+        assert secret not in reason
+
+
 def test_a_tail_truncation_is_not_detectable():
     # Documents the chain's known, stated limitation (see migration 027 and
     # verify_audit_chain.py's module docstring): removing the LAST rows and
