@@ -178,6 +178,25 @@ def normalise_name(raw: str) -> str:
     return " ".join(s.lower().split())
 
 
+class RolesConfigUnreadable(RuntimeError):
+    """The roles grid itself could not be read or parsed — missing file,
+    missing PyYAML, malformed YAML. This is a fatal setup problem, not "the
+    grid defines zero roles": defined_roles() must never collapse the two,
+    because an empty-but-successfully-read set and a failed read produce the
+    identical membership test (`role in known_roles` is False either way).
+    P1 review (w8-planner-2): the previous behavior — return set() on any
+    exception — meant a missing PyYAML dependency made every function read
+    as unmapped, and roster_migrate.py's UNMAPPED_FUNCTION outcome is
+    auto-deactivated by design (it IS supposed to be unambiguous). A missing
+    dependency in a minimal checkout therefore silently turned "migrate ten
+    staff to their real roles" into "deactivate ten staff who cannot
+    authenticate" — the exact opposite of what --apply's caller approved,
+    with the same command, same flags, same exit code shape. Callers must
+    let this propagate and abort before planning or applying anything; see
+    roster_migrate.py's main().
+    """
+
+
 def defined_roles(roles_yaml_path=None):
     """Role names the live config actually defines.
 
@@ -189,6 +208,9 @@ def defined_roles(roles_yaml_path=None):
     mechanically migratable. Access loss, presented as the safe column.
 
     So the mapping is validated against the grid rather than trusted.
+
+    Raises RolesConfigUnreadable if the grid cannot be read at all — see that
+    class's docstring for why this must never fall back to an empty set.
     """
     if roles_yaml_path is None:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -198,10 +220,12 @@ def defined_roles(roles_yaml_path=None):
 
         with open(roles_yaml_path) as f:
             return set((yaml.safe_load(f) or {}).get("roles", {}))
-    except Exception:
-        # Cannot read the grid -> cannot validate -> propose nothing. Fail
-        # closed: an unvalidated proposal is worse than no proposal.
-        return set()
+    except Exception as exc:
+        raise RolesConfigUnreadable(
+            f"could not read the roles grid at {roles_yaml_path!r} "
+            f"({type(exc).__name__}) — refusing to propose or apply anything "
+            f"against an unvalidated role set."
+        ) from exc
 
 
 def role_for_function(function: str, known_roles=None) -> Optional[str]:
@@ -599,7 +623,12 @@ def main(argv):
     if not accounts:
         print("no accounts found — nothing to map.", file=sys.stderr)
         return 2
-    print(format_report(cross_check_client_roles(build_report(roster, accounts), roster)))
+    try:
+        report = format_report(cross_check_client_roles(build_report(roster, accounts), roster))
+    except RolesConfigUnreadable as exc:
+        print(f"REFUSING TO REPORT — {exc}", file=sys.stderr)
+        return 2
+    print(report)
     print(f"\nRoster: {os.path.relpath(roster_path)}   Accounts: {source}")
     print(
         "Training-simulation dataset — the people are fictional by design. "

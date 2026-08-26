@@ -205,7 +205,15 @@ roles:
       - messages.read
       - messages.write
 
-default_role: staff
+# P1 identity foundation (w8-planner-2): a `default_role: staff` line lived
+# here declaring an implicit fallback role. Nothing in this repo ever read
+# it — services/gateway/roles_config.py's permissions_for and login's role
+# check both operate only on the account's own `users.role` value, and an
+# unrecognized role fails closed rather than falling back to anything.
+# Removed rather than left in place: an unused declaration reads as a live
+# safety net until someone wires it up without checking whether "silently
+# grant flat staff access to an unrecognized role" was ever the intended
+# behavior — it is not, per this same track's deny-unmapped-by-default goal.
 
 # MFA is deliberately absent from this file.
 #

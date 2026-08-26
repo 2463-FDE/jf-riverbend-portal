@@ -7,6 +7,8 @@ exists to prevent. That invariant is asserted directly, not implied.
 """
 import os
 
+import pytest
+
 from conftest import load_module
 
 dry_run = load_module("db/migrations/scripts/roster_dry_run.py", "roster_dry_run")
@@ -410,9 +412,23 @@ def test_a_function_mapping_to_an_undefined_role_is_not_proposed():
     assert dry_run.role_for_function("Physician", known_roles={"front_desk"}) is None
 
 
-def test_an_unreadable_grid_proposes_nothing():
-    # Fail closed: an unvalidated proposal is worse than no proposal.
-    assert dry_run.defined_roles("/nonexistent/roles.yaml") == set()
+def test_an_unreadable_grid_raises_rather_than_reads_as_zero_roles():
+    # P1 review (w8-planner-2): an unreadable grid (missing file, missing
+    # PyYAML) must raise, not return set() — a caller cannot distinguish
+    # "the grid genuinely defines nothing" from "the grid could not be read
+    # at all," and roster_migrate.py auto-deactivates UNMAPPED_FUNCTION,
+    # which is exactly what every function would become under an empty
+    # known_roles set. A silently empty set previously turned a missing
+    # dependency into a mass, unintended deactivation.
+    with pytest.raises(dry_run.RolesConfigUnreadable):
+        dry_run.defined_roles("/nonexistent/roles.yaml")
+
+
+def test_role_for_function_with_an_explicit_empty_set_still_proposes_nothing():
+    # Distinct from the case above: a CALLER-SUPPLIED empty set (e.g. a test
+    # fixture, or a grid that genuinely defines no roles yet) is a normal,
+    # valid "propose nothing" input — only defined_roles()'s own internal
+    # failure-to-read path must raise.
     assert dry_run.role_for_function("Physician", known_roles=set()) is None
 
 
