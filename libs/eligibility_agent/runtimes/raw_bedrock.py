@@ -17,8 +17,9 @@ VERIFIED verify_current_eligibility outcome may update eligibility_status",
 so the two loops cannot drift into disagreeing about it.
 """
 from datetime import datetime, timezone
-from typing import Iterator, Optional
+from typing import Iterable, Iterator, Optional
 
+from libs.deid.safe_harbor import scrub
 from libs.llm_client.errors import LLMClientError
 from libs.safe_logging import get_safe_logger
 
@@ -54,6 +55,10 @@ _SAFE_PROVIDER_ERROR_REPLY = (
 _SAFE_MAX_TURNS_REPLY = (
     "I wasn't able to finish checking this in the time I'm allowed. Please try "
     "again, or check eligibility manually."
+)
+_SAFE_SCRUB_ERROR_REPLY = (
+    "I couldn't process that message safely. Please try again, or check "
+    "eligibility manually."
 )
 
 
@@ -126,9 +131,35 @@ class RawBedrockAgentRuntime:
             self._memory.put(context)
         return payload, True, context
 
-    def handle_message(self, visit_id: str, user_message: str) -> VisitTurnResult:
+    def handle_message(
+        self, visit_id: str, user_message: str, *, known_identifiers: Iterable[str] = ()
+    ) -> VisitTurnResult:
         context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
         tools_by_name = self._tools_for(context)
+
+        # P6 (w8-planner-2): the caller's raw free-text chat message used to
+        # reach the provider prompt below with no scrubbing at all — see
+        # libs/deid/safe_harbor.py. `known_identifiers` lets a future caller
+        # pass the visit's patient's own name parts; none does today, so
+        # pattern-based categories (SSN, phone, email, dates, etc.) are what
+        # actually fires. Fail closed: a scrub failure must not fall back to
+        # sending the unscrubbed original.
+        try:
+            user_message, deid_report = scrub(user_message, known_identifiers)
+        except Exception as exc:
+            log.warning("agent message scrub failed, refusing provider call (error_type=%s)", type(exc).__name__)
+            return VisitTurnResult(
+                visit_id=visit_id,
+                reply=_SAFE_SCRUB_ERROR_REPLY,
+                tool_called=False,
+                eligibility_status=context.eligibility_status,
+                termination_reason=TerminationReason.PROVIDER_ERROR,
+                turns_used=0,
+            )
+        if deid_report:
+            # Categories/counts only, per DeidReport's own contract — never
+            # the removed values, never the message itself.
+            log.info("agent message scrubbed before provider call (%s)", deid_report.summary())
 
         messages: list = [{"role": "user", "content": [{"text": user_message}]}]
         tool_called = False
@@ -183,7 +214,9 @@ class RawBedrockAgentRuntime:
             turns_used=self._max_turns,
         )
 
-    def handle_message_stream(self, visit_id: str, user_message: str) -> Iterator[VisitStreamEvent]:
+    def handle_message_stream(
+        self, visit_id: str, user_message: str, *, known_identifiers: Iterable[str] = ()
+    ) -> Iterator[VisitStreamEvent]:
         """w-9-2-planner P1b: same bounded loop and dispatch rule as
         handle_message, but forwards each text_delta from the model AS IT
         ARRIVES instead of buffering a complete reply. Tool calls are never
@@ -200,9 +233,29 @@ class RawBedrockAgentRuntime:
         is closed by Python at its current `yield` — the `finally` in
         BedrockConverseToolModel.converse_stream already closes the
         underlying provider stream, and no further tool/model calls happen
-        for this visit."""
+        for this visit.
+
+        P6 (w8-planner-2): scrubs `user_message` the same way and for the
+        same reason handle_message does — see its comment. A scrub failure
+        yields one "error" event and never reaches the provider."""
         context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
         tools_by_name = self._tools_for(context)
+
+        try:
+            user_message, deid_report = scrub(user_message, known_identifiers)
+        except Exception as exc:
+            log.warning("agent message scrub failed, refusing provider call (error_type=%s)", type(exc).__name__)
+            yield VisitStreamEvent(
+                kind="error",
+                text=_SAFE_SCRUB_ERROR_REPLY,
+                tool_called=False,
+                eligibility_status=context.eligibility_status,
+                termination_reason=TerminationReason.PROVIDER_ERROR,
+                turns_used=0,
+            )
+            return
+        if deid_report:
+            log.info("agent message scrubbed before provider call (%s)", deid_report.summary())
 
         messages: list = [{"role": "user", "content": [{"text": user_message}]}]
         tool_called = False
