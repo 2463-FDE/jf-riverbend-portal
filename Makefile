@@ -19,10 +19,10 @@ seed:          ## load schema + demo data into an EMPTY db (fresh volumes self-s
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/schema.sql
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/seed/seed.sql
 
-demo-reset:    ## return the demo patient (1737) to a clean pre-demo state
+demo-reset:    ## return all four canonical demo patients (1042, 1737, 1738, 1739) to a clean pre-demo state
 	@# Review decisions are durable by design, so every rehearsal and every
 	@# integration run consumes demo state. Run this before each rehearsal.
-	@# Does not re-seed: the chart, the A1c trend and drkim come from seed.sql.
+	@# Does not re-seed: the charts, trends, and staff/clinician grants come from seed.sql.
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} -q < db/seed/demo_reset.sql
 
 seed-gen:      ## regenerate db/seed/seed.sql from the generator (deterministic)
