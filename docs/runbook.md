@@ -252,10 +252,10 @@ re-checks `is_active` per request and `SqlPatientAccessGate` joins it).
 
 ## Demo accounts
 
-All seeded **staff** accounts share password `portal123`. Twelve carry the
-deprecated flat `staff` role — `frontdesk`, `rdelgado`, `drnguyen`,
-`roiclerk`, `mokonkwo` and so on — because migrating real accounts onto the
-nine-role grid is separate, roster-gated work.
+All seeded **staff** accounts share password `portal123`. Eleven carry the
+deprecated flat `staff` role — `frontdesk`, `rdelgado`, `roiclerk`,
+`mokonkwo` and so on — because migrating real accounts onto the nine-role
+grid is separate, roster-gated work.
 
 **Activated patient portal accounts use a different password:**
 `portalportal123` (`db/seed/generate_seed.py`'s `PATIENT_DEMO_PASSWORD`) —
@@ -264,10 +264,12 @@ not `portal123`. This applies to the pre-activated demo accounts
 the invitation flow for 1042/1737. Logging in as a patient with the staff
 password returns a 401.
 
-**One exception: `drkim` carries role `clinician`.** It is the only account
-that holds `summary_review.decide`, so it is the only account that can reach
-the review queue. Without it the clinician half of the demo is unreachable by
-anyone. (Full list: `db/seed/generate_seed.py`.)
+**Two exceptions carry role `clinician`: `drkim` and `drnguyen`.** They are
+the only accounts that hold `summary_review.decide`, so they are the only
+accounts that can reach the review queue — `drkim` reviews 1042/1737/1738,
+`drnguyen` reviews 1738/1739 (see `db/seed/generate_seed.py`'s grant matrix).
+Without both, the clinician half of the demo is unreachable for whichever
+patient the missing one covers. (Full list: `db/seed/generate_seed.py`.)
 
 ## Running the patient-portal demo
 
@@ -299,21 +301,26 @@ and re-asserts every staff/clinician grant the four charts need. It prints one
 row per patient:
 
 ```
- patient_id |      name      | portal_account | coverage | encounters | records | trend_results | appointments | pending_reviews |           active_grants
-------------+----------------+----------------+----------+------------+---------+---------------+--------------+-----------------+-----------------------------------
-       1042 | Maria Gonzalez | none           | active   |          4 |       4 |             2 |            5 |               0 | frontdesk, rdelgado
-       1737 | Priya Khan     | none           | active   |          3 |       5 |             2 |            2 |               0 | drkim, frontdesk
-       1738 | Thomas Johnson | patient-1738   | active   |          3 |       3 |             2 |            2 |               0 | drpatel, frontdesk, patient-1738
-       1739 | Aisha Taylor   | patient-1739   | active   |          3 |       4 |             2 |            2 |               0 | drnguyen, frontdesk, patient-1739
+ patient_id |      name      | portal_account | coverage | encounters | records | trend_results | appointments | pending_reviews | active_reviewers |       other_active_grants
+------------+----------------+----------------+----------+------------+---------+---------------+--------------+-----------------+------------------+----------------------------------
+       1042 | Maria Gonzalez | none           | active   |          4 |       4 |             2 |            3 |               0 | drkim            | frontdesk, rdelgado
+       1737 | Priya Khan     | none           | active   |          3 |       5 |             2 |            2 |               0 | drkim            | frontdesk
+       1738 | Thomas Johnson | patient-1738   | stale    |          3 |       3 |             2 |            2 |               0 | drkim, drnguyen  | drpatel, frontdesk, patient-1738
+       1739 | Aisha Taylor   | patient-1739   | unknown  |          3 |       4 |             2 |            2 |               0 | drnguyen         | frontdesk, patient-1739
 ```
 
-`active_grants` is the column to read for each row. It lists a grant only when
-it satisfies the *gate's own* predicate — the account active, the grant
-unrevoked and unexpired — never merely that a row exists, because a revoked or
-expired grant leaves the relevant queue/chart empty while the account looks
-perfectly fine. A missing expected name there, `portal_account` reading `none`
-for 1738/1739, or `trend_results` under 2 for any row, means the database
-predates the current seed: re-seed with `docker compose down -v && make up`. A
+`active_reviewers` and `other_active_grants` are the columns to read for each
+row — split so the clinician(s) who can act on the review queue for that
+patient are visible separately from every other staff grant. Both list a
+grant only when it satisfies the *gate's own* predicate — the account
+active, the grant unrevoked and unexpired — never merely that a row exists,
+because a revoked or expired grant leaves the relevant queue/chart empty
+while the account looks perfectly fine. A missing expected name in either
+column, `portal_account` reading `none` for 1738/1739, or `trend_results`
+under 2 for any row, means the database predates the current seed: re-seed
+with `docker compose down -v && make up`. `coverage` reflects whatever the
+last real eligibility check set it to and is not reset by `make demo-reset`
+— the values above are one observed snapshot, not a fixed guarantee. A
 real Bedrock call against 1737 also writes an immutable `agent_draft_provenance`
 row that this reset never deletes (by design) — a genuinely virgin agent-draft
 demonstration needs that fresh-volume re-seed, not merely a reset.
