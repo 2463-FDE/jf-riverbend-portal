@@ -48,6 +48,7 @@ from roster_dry_run import (  # noqa: E402
     MIGRATE,
     NEEDS_ACCOUNT,
     ROLE_DISAGREEMENT,
+    RolesConfigUnreadable,
     UNKNOWN_STATUS,
     UNMAPPED_FUNCTION,
     build_report,
@@ -218,7 +219,15 @@ def main(argv):
         print("no accounts found — nothing to migrate.", file=sys.stderr)
         return 2
 
-    findings = cross_check_client_roles(build_report(roster, accounts), roster)
+    try:
+        findings = cross_check_client_roles(build_report(roster, accounts), roster)
+    except RolesConfigUnreadable as exc:
+        # P1 review (w8-planner-2): must abort before building any plan, not
+        # only before applying one — a plan built against an empty role set
+        # would misreport every function as unmapped even in dry-run output,
+        # and printing that plan (even unapplied) is itself a wrong answer.
+        print(f"REFUSING TO RUN — {exc}", file=sys.stderr)
+        return 2
 
     disagreements = [f for f in findings if f.outcome == ROLE_DISAGREEMENT]
     if disagreements:

@@ -106,6 +106,35 @@ def test_an_unrecognised_outcome_is_left_alone_not_defaulted():
     assert [f.subject for f in u] == ["mystery"]
 
 
+def test_an_unreadable_roles_config_aborts_before_any_plan_or_write(monkeypatch):
+    # P1 review (w8-planner-2): defined_roles() previously swallowed a missing
+    # PyYAML (or any unreadable roles.yaml) into an empty role set, which made
+    # every mapped function read as UNMAPPED_FUNCTION -- and that outcome IS
+    # auto-deactivated by design, so a missing dependency silently turned
+    # "migrate ten staff" into "deactivate ten staff who cannot authenticate,"
+    # with the same command and flags. Simulates that failure at the point
+    # main() calls into it and proves the run aborts before building a plan,
+    # let alone writing one.
+    def _unreadable(roster, accounts, known_roles=None):
+        # migrate.RolesConfigUnreadable, not dry_run.RolesConfigUnreadable:
+        # this test file loads roster_dry_run.py under a different module
+        # name than roster_migrate.py's own internal import of it, so the
+        # two are distinct class objects despite being the same source —
+        # main()'s except clause only matches its own import's class.
+        raise migrate.RolesConfigUnreadable("simulated: PyYAML unavailable")
+
+    monkeypatch.setattr(migrate, "build_report", _unreadable)
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("apply_plan must never run when the roles config could not be read")
+
+    monkeypatch.setattr(migrate, "apply_plan", _must_not_be_called)
+
+    rc = migrate.main(["roster_migrate.py", "--apply", "--approved-by", "Jorge"])
+
+    assert rc == 2
+
+
 def test_apply_requires_an_approver():
     rc = migrate.main(["roster_migrate.py", "--apply"])
 
