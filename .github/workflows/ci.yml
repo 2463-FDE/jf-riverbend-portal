@@ -69,8 +69,37 @@ jobs:
         # paths is thin — tracked in RIV-201.
         run: pytest -m "not integration" -q
 
-  # NOTE: no dependency vulnerability scan, no container image scan, and no
-  # secret-scanning step. Images are built and pushed straight from main.
+  # P5 (w8-planner-2): dependency vulnerability, secret, and container-image
+  # scanning. Severity/failure policy, applied consistently across all three
+  # via Trivy: CRITICAL/HIGH vulnerabilities fail the build (MEDIUM/LOW are
+  # reported but non-blocking, via trivy-action's own summary output); any
+  # secret finding fails the build outright — a leaked credential has no
+  # "low severity" tier. `ignore-unfixed: true` on the vuln scans so CI
+  # doesn't block on an advisory with no available fix yet.
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependency vulnerability scan (fails on CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Secret scan (any finding fails)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: secret
+          exit-code: "1"
+
   docker-build:
     runs-on: ubuntu-latest
     needs: [frontend, services, tests]
@@ -127,3 +156,18 @@ jobs:
           INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_ADMIN_PASSWORD: ${{ secrets.DB_ADMIN_PASSWORD }}
+      - name: Container image scan (fails on CRITICAL/HIGH)
+        # Same policy as dependency-scan/secret-scan above. Scans every
+        # image this compose file resolves — both freshly built (gateway,
+        # intake-service, ...) and third-party base images (postgres,
+        # redis) — via `docker compose config --images`, so the list can't
+        # drift out of sync with a service being added/removed.
+        run: |
+          for image in $(docker compose config --images); do
+            echo "Scanning $image ..."
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v trivy-cache:/root/.cache/ \
+              aquasecurity/trivy:latest image \
+              --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "$image"
+          done
