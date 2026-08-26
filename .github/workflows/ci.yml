@@ -81,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependency vulnerability scan (fails on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scanners: vuln
@@ -94,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Secret scan (any finding fails)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scanners: secret
