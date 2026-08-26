@@ -1,6 +1,6 @@
 # AI data-flow and vendor memo — Week 8 (2026-08-25)
 
-**Status:** working-tree evidence; not yet reviewed or merged
+**Status:** Merged to `main` via PR #79 (2026-08-26).
 **Purpose:** decide, precisely, where a future `libs.deid.safe_harbor` scrub
 boundary belongs, before any wiring happens. This is a decision memo, not an
 implementation — no call site is changed by this document. It supplements,

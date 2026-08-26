@@ -1,6 +1,6 @@
 # Policy RAG evaluation — 2026-08-25
 
-**Status:** working-tree evidence; not yet reviewed or merged  
+**Status:** Merged to `main` via PR #76 (2026-08-25).  
 **Repository base:** `465f744bd1dd670e6b2902cb93fded3aa1630118`  
 **Data:** synthetic training policies only
 
