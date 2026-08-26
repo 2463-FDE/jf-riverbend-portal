@@ -42,9 +42,8 @@ def test_migrate_outcomes_become_role_assignments():
     assert not d and not u
 
 
-def test_every_deny_outcome_deactivates_with_a_reason():
+def test_every_unambiguous_deny_outcome_deactivates_with_a_reason():
     findings = [
-        _f(dry_run.DECIDE_NO_OWNER, "frontdesk"),
         _f(dry_run.UNMAPPED_FUNCTION, "someone"),
         _f(dry_run.UNKNOWN_STATUS, "typo_status"),
         _f(dry_run.DISABLE_DEPARTED, "departed"),
@@ -54,10 +53,28 @@ def test_every_deny_outcome_deactivates_with_a_reason():
 
     assert not m and not u
     reasons = {f.subject: reason for f, reason in d}
-    assert reasons["frontdesk"] == "role_migration_no_owner"
     # The client's copy is shown for any role_migration_* reason, so every one
     # of these prefixes must match what services/gateway/app.py checks.
     assert all(r.startswith("role_migration_") for r in reasons.values())
+
+
+def test_no_owner_is_left_alone_not_auto_deactivated():
+    # frontdesk/labtech are shared logins actively used by real staff; itadmin
+    # is a departed contractor's orphaned account. Both look identical in the
+    # data ("a name that isn't a person's"), so this outcome must never be
+    # auto-deactivated — deactivating a shared login the moment --apply runs
+    # would lock out real, working staff with no way to tell them apart from
+    # the genuinely-departed case. A human resolves each individually.
+    findings = [
+        _f(dry_run.DECIDE_NO_OWNER, "frontdesk"),
+        _f(dry_run.DECIDE_NO_OWNER, "labtech"),
+        _f(dry_run.DECIDE_NO_OWNER, "itadmin"),
+    ]
+
+    m, d, u = migrate.plan(findings)
+
+    assert not m and not d
+    assert {f.subject for f in u} == {"frontdesk", "labtech", "itadmin"}
 
 
 def test_people_with_no_account_are_not_account_actions():
@@ -125,11 +142,13 @@ def test_the_dry_run_reports_the_real_roster_plan(capsys):
     out = capsys.readouterr().out
 
     assert "MIGRATE — role assigned  [10]" in out
-    assert "DEACTIVATE — cannot authenticate  [3]" in out
-    # The three that are not people.
+    assert "DEACTIVATE — cannot authenticate  [0]" in out
+    assert "LEFT ALONE — needs a human decision  [3]" in out
+    # The three that are not people — left alone, not auto-deactivated.
     for username in ("frontdesk", "labtech", "itadmin"):
         assert username in out
-    # And the client's copy is quoted so an operator sees what the user will.
+    # And the client's copy is quoted so an operator sees what the user will
+    # see for whichever accounts a human later decides to deactivate.
     assert "access is being updated, contact your supervisor" in out
 
 

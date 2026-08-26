@@ -54,6 +54,12 @@ def env(monkeypatch):
                            disabled_reason="role_migration_no_owner"))
         s.add(app_mod.User(id=4, username="ordinary_disabled", password_hash="h",
                            role="staff", is_active=False, disabled_reason=None))
+        # P1 identity foundation: an ACTIVE account whose role config/roles.yaml
+        # does not define — role drift, a direct DB edit, a role renamed out of
+        # the grid. Real roles.yaml is read (not mocked), so this is denied by
+        # the actual current grid, not a fixture standing in for it.
+        s.add(app_mod.User(id=5, username="drifted_role_user", password_hash="h",
+                           role="obsolete_role_nobody_defines", is_active=True))
         s.commit()
 
     yield TestClient(app_mod.app)
@@ -114,6 +120,46 @@ def test_an_active_account_still_logs_in(env):
 
     assert r.status_code == 200
     assert r.json()["token"] == "tok"
+
+
+# --- P1 identity foundation: an active account with an unrecognized role ----
+
+
+def test_an_active_account_with_an_undefined_role_gets_no_session(env):
+    r = _login(env, "drifted_role_user")
+
+    assert r.status_code == 401
+    assert r.json()["detail"] == "invalid username or password"
+
+
+def test_the_undefined_role_denial_is_never_shown_without_the_correct_password(env):
+    # Same oracle concern as the role_migration_* case: without the password
+    # check first, this would tell an anonymous prober that a role-config
+    # problem exists for this specific username.
+    r = _login(env, "drifted_role_user", password="wrong")
+
+    assert r.status_code == 401
+    assert r.json()["detail"] == "invalid username or password"
+
+
+def test_an_undefined_role_denial_is_indistinguishable_from_any_other_401(env):
+    drifted = _login(env, "drifted_role_user")
+    unknown = _login(env, "no_such_user")
+    wrong_password = _login(env, "active_user", password="wrong")
+
+    assert drifted.status_code == unknown.status_code == wrong_password.status_code == 401
+    assert drifted.json()["detail"] == unknown.json()["detail"] == wrong_password.json()["detail"]
+
+
+def test_an_undefined_role_denial_is_logged(env, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        _login(env, "drifted_role_user")
+
+    assert any(
+        "not defined in roles.yaml" in m and "drifted_role_user" in m
+        for m in caplog.messages
+    )
 
 
 def test_every_occurrence_is_logged_so_the_list_can_go_to_the_client(env, caplog):

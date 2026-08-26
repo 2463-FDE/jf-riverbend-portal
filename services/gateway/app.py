@@ -252,6 +252,23 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         # indistinguishable response.
         raise HTTPException(status_code=401, detail="invalid username or password")
 
+    # P1 identity foundation (w8-planner-2): an ACTIVE account whose role is
+    # not one config/roles.yaml actually defines must not receive a session
+    # at all. The roster migration disables the specific accounts it knows
+    # about via disabled_reason above, but that only covers accounts the
+    # migration has already touched — this is the general invariant for any
+    # account whose role has drifted, was mistyped directly in the database,
+    # or predates a role being renamed/removed from the grid. permissions_for
+    # already fails closed for an unmapped role on every protected route
+    # (roles_config.py), so this makes the same fail-closed posture apply to
+    # session issuance itself rather than only to what the session can later
+    # do. Same generic, indistinguishable response as any other login
+    # failure — a distinct message here would let a caller who already knows
+    # a valid password learn that a role config problem exists.
+    if not roles_config.roles().get(user.role):
+        log.warning("login denied: role '%s' is not defined in roles.yaml user=%s", user.role, user.username)
+        raise HTTPException(status_code=401, detail="invalid username or password")
+
     user.last_login_at = func.now()
     db.commit()
     token = create_session(user.id, user.username, user.role)
