@@ -35,6 +35,104 @@ in `docker compose logs` (rather than starting and sitting "unhealthy" until
 the healthcheck's retry budget runs out) — that log line is the signal to
 come back here.
 
+## Required one-time setup: DB_PASSWORD and DB_ADMIN_PASSWORD
+
+P3 admin/runtime role separation (w8-planner-2, closes AUD-B01): the
+Postgres cluster now has two credentials, not one.
+
+- **`DB_PASSWORD`** — the runtime role (`DB_USER`, `riverbend_app` by
+  default) every application service connects with. Owns nothing, is never
+  a superuser.
+- **`DB_ADMIN_PASSWORD`** — the admin role (`DB_ADMIN_USER`,
+  `riverbend_admin` by default) that owns every schema object and runs
+  schema/migrations. A superuser.
+
+Both are **required** — `docker-compose.yml` uses `${VAR:?...}` for each, so
+a missing value stops `docker compose up`/`config`/`build` before any
+container starts, naming exactly which variable is missing — and **must be
+distinct from each other**. A shared secret would let anyone who knows the
+runtime credential authenticate as the admin role too, defeating the whole
+point of the split; `db/docker-init/00-create-app-role.sh` and
+`db/migrations/scripts/create_admin_role.sql` both independently refuse to
+proceed if the two values are ever equal, on both the fresh-volume and
+existing-volume paths below.
+
+```bash
+# two independent values — do not reuse one for both
+openssl rand -hex 32   # -> DB_PASSWORD
+openssl rand -hex 32   # -> DB_ADMIN_PASSWORD
+```
+
+Put each in `.env` (`DB_PASSWORD=` and `DB_ADMIN_PASSWORD=` — see
+`.env.example`). Never read, print, or commit `.env` itself; this file only
+tells you which variables it needs and why.
+
+### Fresh volume — nothing further to do
+
+`docker compose up` on an empty `pgdata` volume creates both roles
+automatically: the container boots as the admin role (`POSTGRES_USER`/
+`POSTGRES_PASSWORD` are wired to `DB_ADMIN_USER`/`DB_ADMIN_PASSWORD`),
+`00-create-app-role.sh` creates the runtime role before `schema.sql` runs,
+and `schema.sql`'s own tail section grants it exactly the privileges it
+needs once every table exists. See "First-boot data" below.
+
+### Existing volume — order matters
+
+A volume that predates this split only has the (former, single) runtime
+role, and — because it was the original bootstrap role — that role is
+still a full Postgres superuser on it today. Bringing that volume onto the
+split scheme is a **one-time, three-step transition**, in this order:
+
+1. **Recreate the `postgres` container with the current environment.**
+   `DB_ADMIN_USER`/`DB_ADMIN_PASSWORD`/`DB_APP_USER`/`DB_APP_PASSWORD` are
+   baked into the container's own environment at container-creation time
+   (`docker-compose.yml`'s `environment:` block) — a container that has
+   been running since before this change does not have them yet, and every
+   script below reads them via `\getenv` from that environment, never as a
+   command-line argument. Recreating the container does **not** touch
+   `pgdata` (a named volume, independent of the container) — no data is
+   lost, only the container process restarts:
+   ```bash
+   docker compose up -d postgres   # recreates it if the config changed; force it explicitly if unsure:
+   docker compose up -d --force-recreate postgres
+   ```
+2. **Run the admin bootstrap once:**
+   ```bash
+   db/migrations/scripts/bootstrap_admin_role.sh
+   ```
+   This creates the admin role (connected as the current `DB_USER` —
+   still superuser on this volume — via `db/migrations/scripts/
+   create_admin_role.sql`), then runs migration `028` **connected as that
+   new admin role**, which transfers ownership of every table/sequence/
+   function the runtime role owns, grants the runtime role its
+   (narrower) permanent privileges, and demotes it off
+   superuser/createdb/createrole. Safe to re-run — both steps are no-ops
+   once the admin role exists and owns `audit_logs`.
+3. **Run `apply.sh` for every future migration, as normal:**
+   ```bash
+   db/migrations/apply.sh
+   ```
+   From this point `apply.sh` connects as `DB_ADMIN_USER` for every
+   migration file (it needs ownership-level privilege to `CREATE`/`ALTER`
+   schema objects); it preflight-checks that connection and, if it fails,
+   points back at step 2 above.
+
+### Verifying the split actually took
+
+```bash
+# audit_logs must be owned by the admin role, not the runtime role
+docker compose exec -T postgres psql -U "$DB_ADMIN_USER" -d "$DB_NAME" \
+    -c "SELECT tableowner FROM pg_tables WHERE tablename = 'audit_logs'"
+
+# the runtime role must show no elevated attributes at all
+docker compose exec -T postgres psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -c '\du'
+
+# the runtime role must have INSERT+SELECT on audit_logs, never UPDATE/DELETE
+docker compose exec -T postgres psql -U "$DB_ADMIN_USER" -d "$DB_NAME" \
+    -c "SELECT privilege_type FROM information_schema.role_table_grants \
+        WHERE table_name = 'audit_logs' AND grantee = '$DB_USER' ORDER BY 1"
+```
+
 ## Start / stop
 
 ```bash
@@ -51,9 +149,14 @@ Endpoints once up:
 
 ## First-boot data
 
-On a fresh volume Postgres runs `db/schema.sql` then `db/seed/seed.sql`
-automatically (mounted into `/docker-entrypoint-initdb.d`), so a first boot
-needs no seed command at all.
+On a fresh volume Postgres runs three steps automatically (mounted into
+`/docker-entrypoint-initdb.d`), in order: `db/docker-init/00-create-app-role.sh`
+(creates the runtime role), `db/docker-init/01-run-schema.sh` (runs
+`db/schema.sql`, which grants that role its privileges once every table
+exists — see "Required one-time setup: DB_PASSWORD and DB_ADMIN_PASSWORD"
+above for why `schema.sql` needs a wrapper rather than being mounted
+directly), then `db/seed/seed.sql` — so a first boot needs no seed command
+at all.
 
 **`make seed` only works against an EMPTY database.** The seed file carries
 explicit ids and no `ON CONFLICT` clauses, so running it against a database
@@ -85,12 +188,18 @@ db/migrations/apply.sh
 ```
 
 This runs every file in `db/migrations/` in order against the running
-`postgres` compose service. It is safe to run on **any** existing database —
-whether freshly seeded, stopped at an old migration, or already fully
-migrated — because every migration in this directory uses `IF NOT EXISTS` /
-guarded DDL: re-applying an already-applied migration is a no-op (you'll see
-`NOTICE: ... already exists, skipping`), not an error. Run it after every
-deploy, even if you're not sure whether the target migration already ran.
+`postgres` compose service, connected as `DB_ADMIN_USER` (migrations
+`CREATE`/`ALTER` schema objects, which needs ownership-level privilege — see
+"Required one-time setup: DB_PASSWORD and DB_ADMIN_PASSWORD" above). On a
+volume that predates admin/runtime role separation, run
+`db/migrations/scripts/bootstrap_admin_role.sh` once first; `apply.sh`
+preflight-checks the admin connection and points back here if it fails. It
+is safe to run on **any** existing database — whether freshly seeded,
+stopped at an old migration, or already fully migrated — because every
+migration in this directory uses `IF NOT EXISTS` / guarded DDL: re-applying
+an already-applied migration is a no-op (you'll see `NOTICE: ... already
+exists, skipping`), not an error. Run it after every deploy, even if you're
+not sure whether the target migration already ran.
 
 Skipping this step before restarting a service whose code expects a new
 column (e.g. `patients.first_name`/`last_name`/`city`/`state`/`zip_code`,

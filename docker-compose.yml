@@ -41,7 +41,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/docker-init/00-create-app-role.sh:/docker-entrypoint-initdb.d/00-create-app-role.sh:ro
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/docker-init/01-run-schema.sh:/docker-entrypoint-initdb.d/01-run-schema.sh:ro
+      # schema.sql now needs \getenv DB_APP_USER (round-3 review — no
+      # hard-coded role name), which docker-entrypoint-initdb.d's own
+      # built-in .sql handling can't supply — mounted OUTSIDE that
+      # directory (not a NN-name.sql path) so it is never auto-executed a
+      # second time; 01-run-schema.sh above is the wrapper that actually
+      # invokes psql -f against it.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d-src/schema.sql:ro
       - ./db/seed/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-riverbend_app} -d ${DB_NAME:-riverbend}"]
