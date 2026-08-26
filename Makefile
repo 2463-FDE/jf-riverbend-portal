@@ -16,7 +16,10 @@ build:         ## build all images
 	docker compose build
 
 seed:          ## load schema + demo data into an EMPTY db (fresh volumes self-seed)
-	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/schema.sql
+	@# schema.sql runs as the admin role (P3 role separation, w8-planner-2):
+	@# CREATE OR REPLACE FUNCTION / ALTER TABLE etc. need ownership, which
+	@# riverbend_app no longer has once role separation has been applied.
+	docker compose exec -T postgres psql -U $${DB_ADMIN_USER:-riverbend_admin} -d $${DB_NAME:-riverbend} < db/schema.sql
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/seed/seed.sql
 
 demo-reset:    ## return all four canonical demo patients (1042, 1737, 1738, 1739) to a clean pre-demo state

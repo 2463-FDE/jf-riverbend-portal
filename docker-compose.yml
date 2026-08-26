@@ -6,18 +6,49 @@ services:
     image: pgvector/pgvector:0.8.0-pg15
     environment:
       POSTGRES_DB: ${DB_NAME:-riverbend}
-      POSTGRES_USER: ${DB_USER:-riverbend_app}
-      # No `:-changeme` default. A guessable fallback for the database
-      # password is worse than a failed start: it boots a working stack that
-      # anyone can predict the credentials for, and nothing reports it. Same
-      # `${VAR:?}` shape as INTERNAL_SERVICE_TOKEN below — a missing value
-      # stops compose before any container starts.
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — copy .env.example and set a real value; see docs/runbook.md}
+      # Admin/runtime role separation (P3 AUD-B01, w8-planner-2): the
+      # cluster's bootstrap role — which the official Postgres image always
+      # makes a superuser, and which therefore owns everything schema.sql
+      # creates — is now the ADMIN account, not the app's own runtime
+      # credential. Fixes riverbend_app being able to `ALTER TABLE
+      # audit_logs DISABLE TRIGGER ...` on a table it owned, bypassing 026's
+      # append-only guard outright. See
+      # db/migrations/028_admin_runtime_role_separation.sql for the
+      # existing-volume transition and db/docker-init/00-create-app-role.sh
+      # for how riverbend_app itself gets created on a fresh one.
+      POSTGRES_USER: ${DB_ADMIN_USER:-riverbend_admin}
+      # No `:-changeme` default, same reasoning as DB_PASSWORD below — and
+      # (round 2 review) NO fallback to DB_PASSWORD either: sharing a
+      # secret between the admin and runtime roles would let anyone who
+      # already knows the runtime credential authenticate AS the admin
+      # role too, defeating the privilege split this whole PR exists for.
+      # Must be set to its own distinct value; docker-init/00-create-app-
+      # role.sh and db/migrations/scripts/create_admin_role.sql both also
+      # refuse to run if this equals DB_PASSWORD.
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD must be set in .env to a value DISTINCT from DB_PASSWORD — generate one with `openssl rand -hex 32`; see docs/runbook.md}
+      # Read by \getenv in db/docker-init/00-create-app-role.sh and
+      # db/migrations/028_admin_runtime_role_separation.sql — never passed
+      # as a psql -v variable or command-line argument, so neither value is
+      # ever visible in `ps`, shell history, or process logs. Same DB_USER/
+      # DB_ADMIN_USER every service/script already resolves — not secret,
+      # kept alongside the passwords only for a uniform \getenv pattern.
+      DB_ADMIN_USER: ${DB_ADMIN_USER:-riverbend_admin}
+      DB_ADMIN_PASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD must be set in .env to a value DISTINCT from DB_PASSWORD — generate one with `openssl rand -hex 32`; see docs/runbook.md}
+      DB_APP_USER: ${DB_USER:-riverbend_app}
+      DB_APP_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — copy .env.example and set a real value; see docs/runbook.md}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/docker-init/00-create-app-role.sh:/docker-entrypoint-initdb.d/00-create-app-role.sh:ro
+      - ./db/docker-init/01-run-schema.sh:/docker-entrypoint-initdb.d/01-run-schema.sh:ro
+      # schema.sql now needs \getenv DB_APP_USER (round-3 review — no
+      # hard-coded role name), which docker-entrypoint-initdb.d's own
+      # built-in .sql handling can't supply — mounted OUTSIDE that
+      # directory (not a NN-name.sql path) so it is never auto-executed a
+      # second time; 01-run-schema.sh above is the wrapper that actually
+      # invokes psql -f against it.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d-src/schema.sql:ro
       - ./db/seed/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-riverbend_app} -d ${DB_NAME:-riverbend}"]
