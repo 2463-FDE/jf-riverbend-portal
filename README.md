@@ -102,11 +102,17 @@ What is not:
 - **no encryption at rest** — see `adr/0008` for the recorded risk decision
 - no TLS on any hop
 - no MFA outside a pilot-clinic scope
-- **no tamper-evident audit trail yet** — `audit_logs` is now append-only at
-  the database boundary (migration 026's trigger, plus 028's admin/runtime
-  role split closing the table-owner bypass), but nothing yet proves no row
-  was altered by a privileged (admin-level) bypass — a hash chain + verifier
-  is separate, later work (PR #86)
+- **`audit_logs` is append-only and tamper-evident against a compromised
+  runtime/application role** — a trigger rejects `UPDATE`/`DELETE` regardless
+  of caller (026), the runtime role cannot disable that trigger or rewrite the
+  chain (028's admin/runtime split), and every row is linked into a hash
+  chain a verifier can check for modification, deletion, insertion,
+  reordering, and broken links (027 + `db/migrations/scripts/verify_audit_chain.py`).
+  **It does not protect against a malicious database owner/superuser**, who
+  can still bypass the trigger directly, and it does **not** detect truncation
+  of the newest rows (the chain simply stops there) — an externally stored or
+  signed checkpoint would be needed for that and does not exist yet (tracked
+  as follow-up work, not implemented in this PR stack)
 - no signed-authorization check before a release of information
 - one shared database credential; no deployment pipeline; no backup or
   recovery process; no security scanning in CI

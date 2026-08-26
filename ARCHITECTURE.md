@@ -99,15 +99,26 @@ here; sequencing lives in the current delivery plan, not in this file.
 
 - **Compliance posture is self-asserted.** PHI columns are plaintext (`adr/0002`,
   unchanged). ~~"audit" is still mutable request logging, not a tamper-evident
-  access trail.~~ **Partially resolved** (w8-planner-2 P3, closes AUD-B01):
-  `audit_logs` is now append-only at the database boundary — a
+  access trail.~~ **Resolved against the threat model this control targets**
+  (w8-planner-2 P3, closes AUD-B01). **Threat model:** a compromised or buggy
+  runtime/application role (`riverbend_app`) — the credential every service
+  actually connects with. That role cannot `UPDATE`, `DELETE`, `TRUNCATE`,
+  disable the append-only triggers, or rewrite the chain: a
   `BEFORE UPDATE`/`DELETE` trigger rejects mutation regardless of caller
-  (`db/migrations/026_audit_logs_append_only.sql`), and the table owner can no
-  longer bypass it via `ALTER TABLE ... DISABLE TRIGGER`, since the runtime
-  role is no longer the owner (`db/migrations/028_admin_runtime_role_separation.sql`).
-  Still **not tamper-evident**: nothing yet proves no row was altered by an
-  admin-level bypass of that trigger. Tamper-evidence (a hash chain + verifier)
-  is separate, later work — see PR #86.
+  (`db/migrations/026_audit_logs_append_only.sql`), it is no longer
+  `audit_logs`'s owner and so cannot `ALTER TABLE ... DISABLE TRIGGER`
+  (`db/migrations/028_admin_runtime_role_separation.sql`), and every row is
+  linked into a hash chain (`db/migrations/027_audit_logs_hash_chain.sql`)
+  that `db/migrations/scripts/verify_audit_chain.py` proves detects content
+  modification, mid-chain deletion (even if the surviving rows are relinked
+  and rehashed), insertion, reordering, and broken links.
+  **Explicitly out of scope, not claimed:** a malicious database owner or
+  superuser bypassing 026's trigger directly, or truncating the newest rows
+  and stopping there — the chain has no way to know rows should still exist
+  past that point, and there is no externally stored checkpoint to compare
+  against (tracked as follow-up work: an external or HMAC-signed chain-head
+  checkpoint; not implemented in this PR stack). This is a tamper-*evident*
+  control, not a tamper-*proof* or complete-deletion-detection one.
 - ~~**PHI in application logs** — intake logs full request bodies at INFO.~~
   **Resolved.** `services/intake-service/app.py`'s `_intake_log_summary` now
   logs an allowlist only (`correlation_id`, `created_via`), not the request

@@ -263,22 +263,43 @@ CREATE TABLE IF NOT EXISTS consents (
 -- db/migrations/028_admin_runtime_role_separation.sql (PR #85) for why the
 -- runtime role also had to stop OWNING this table: an owner can disable
 -- its own triggers regardless of any REVOKE, which the trigger alone
--- cannot stop. Not yet tamper-evident — no hash chain, no verifier; that
--- is separate, later work (see PR #86) and this table must not be
--- described as tamper-evident until it lands. `message` is metadata only
--- in every CURRENT writer (records-service/app.py's _write_audit call
--- sites) — never a raw request body or PHI; keep it that way when adding
--- a new one. This is a property of current code, not a DB-enforced
--- constraint — `message` is a plain TEXT column. A database that
--- predates AUD-M01 (code review, 2026-08-26) could carry a raw-PHI
+-- cannot stop.
+-- Tamper-EVIDENT (not tamper-proof) since migration 027 (PR #86):
+-- chain_position/prev_chain_hash/chain_hash form a hash chain, linked and
+-- verified by chain_position (a dense, gap-free sequence assigned under a
+-- transaction-scoped advisory lock — NOT id, which is allocation order,
+-- not commit order) over each row's own metadata plus the prior row's
+-- hash, computed by a BEFORE INSERT trigger so every writer gets the same
+-- protection without having to know about it. A verifier
+-- (db/migrations/scripts/verify_audit_chain.py) detects a row whose own
+-- content changed, or one spliced/removed from the middle of the chain —
+-- it does NOT detect truncation at the tail (deleting the most recent rows
+-- and stopping there leaves the remainder internally consistent); that
+-- would require an externally stored checkpoint this repo does not keep.
+-- Neither this table nor that script claims to make tampering impossible,
+-- only detectable. `message` is metadata only in every CURRENT writer
+-- (records-service/app.py's _write_audit call sites) — never a raw request
+-- body or PHI; keep it that way when adding a new one, and never hash raw
+-- PHI into the chain either. This is a property of current code, not a
+-- DB-enforced constraint — `message` is a plain TEXT column. A database
+-- that predates AUD-M01 (code review, 2026-08-20) could carry a raw-PHI
 -- historical row; migration 026 performs a one-time scrub of that exact
--- known row.
+-- known row before 027 ever runs, so no chain hash ever covers it. See
+-- migration 027 for the full design rationale, including the length-
+-- prefixed/NULL-explicit canonical encoding shared with
+-- verify_audit_chain.py and the advisory-lock serialization that keeps
+-- concurrent inserts in one chain.
 -- ---------------------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id                SERIAL PRIMARY KEY,
     actor             TEXT,
     message           TEXT,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    chain_position    INTEGER NOT NULL UNIQUE,
+    prev_chain_hash   TEXT,                 -- NULL only for the genesis row
+    chain_hash        TEXT NOT NULL
 );
 
 CREATE OR REPLACE FUNCTION audit_logs_reject_mutation() RETURNS TRIGGER AS $$
@@ -296,6 +317,51 @@ DROP TRIGGER IF EXISTS audit_logs_no_delete ON audit_logs;
 CREATE TRIGGER audit_logs_no_delete
     BEFORE DELETE ON audit_logs
     FOR EACH ROW EXECUTE FUNCTION audit_logs_reject_mutation();
+
+CREATE OR REPLACE FUNCTION audit_logs_encode_field(value TEXT) RETURNS TEXT AS $$
+BEGIN
+    IF value IS NULL THEN
+        RETURN 'N';
+    END IF;
+    RETURN octet_length(value)::text || ':' || value;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION audit_logs_compute_chain_hash() RETURNS TRIGGER AS $$
+DECLARE
+    prev_position INTEGER;
+    prev_hash TEXT;
+    next_position INTEGER;
+    canonical_created_at TEXT;
+    payload TEXT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('audit_logs_chain_lock')::bigint);
+
+    SELECT chain_position, chain_hash INTO prev_position, prev_hash
+        FROM audit_logs ORDER BY chain_position DESC LIMIT 1;
+
+    next_position := coalesce(prev_position, 0) + 1;
+    NEW.chain_position := next_position;
+    NEW.prev_chain_hash := prev_hash;
+
+    canonical_created_at := to_char(NEW.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
+
+    payload :=
+        audit_logs_encode_field(prev_hash) ||
+        audit_logs_encode_field(next_position::text) ||
+        audit_logs_encode_field(NEW.actor) ||
+        audit_logs_encode_field(NEW.message) ||
+        audit_logs_encode_field(canonical_created_at);
+
+    NEW.chain_hash := encode(digest(payload, 'sha256'), 'hex');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS audit_logs_chain_before_insert ON audit_logs;
+CREATE TRIGGER audit_logs_chain_before_insert
+    BEFORE INSERT ON audit_logs
+    FOR EACH ROW EXECUTE FUNCTION audit_logs_compute_chain_hash();
 
 -- ---------------------------------------------------------------------------
 -- Role migration accounting (019, branch 9 part 2)

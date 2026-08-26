@@ -227,15 +227,24 @@ open here as open until the code says otherwise.
   answer a real auditor's request for a disclosure accounting / per-patient
   access log, and nothing in this cycle gives ROI a disclosure ledger.
 - ~~`audit_logs` is mutable request-dump logging, not a tamper-evident access
-  trail~~ **Partially resolved** (w8-planner-2 P3, closes AUD-B01):
-  `audit_logs` is now append-only at the database boundary — a trigger
-  rejects `UPDATE`/`DELETE` regardless of caller
-  (`db/migrations/026_audit_logs_append_only.sql`), and the table owner can no
-  longer bypass it via `ALTER TABLE ... DISABLE TRIGGER`, since the runtime
-  role is no longer the owner (`db/migrations/028_admin_runtime_role_separation.sql`).
-  Still **not tamper-evident**: nothing yet proves no row was altered via an
-  admin-level bypass of that trigger — a hash chain + verifier is separate,
-  later work (PR #86).
+  trail~~ **Resolved against the threat model this control targets**
+  (w8-planner-2 P3, closes AUD-B01). **Threat model: a compromised or buggy
+  runtime/application role** (`riverbend_app`, the credential every service
+  actually connects with) — that role cannot `UPDATE`, `DELETE`, `TRUNCATE`,
+  disable the append-only triggers, or rewrite the chain
+  (`db/migrations/026_audit_logs_append_only.sql`'s trigger +
+  `db/migrations/028_admin_runtime_role_separation.sql`'s ownership split).
+  Every row is linked into a hash chain
+  (`db/migrations/027_audit_logs_hash_chain.sql`) that
+  `db/migrations/scripts/verify_audit_chain.py` proves detects content
+  modification, mid-chain deletion (even relinked/rehashed), insertion,
+  reordering, and broken links — exits non-zero on any of these; never
+  prints row content, only chain positions and hashes.
+  **Not protected, and not claimed:** a malicious database owner/superuser
+  bypassing the trigger directly, or truncating the newest rows and stopping
+  there — undetectable without an externally stored checkpoint, which does
+  not exist yet (follow-up: an external or HMAC-signed chain-head checkpoint;
+  not implemented in this PR stack). Tamper-*evident*, not tamper-*proof*.
 - No dependency, container image, or secret scanning in CI; images build straight from `main` with no deploy gate visible in this repo. Still open.
 - Duplicate patients (RIV-160) are **partially** addressed: `/intake` now runs
   a deterministic (dob, ssn) match-key lookup before creating a patient
