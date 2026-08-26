@@ -112,7 +112,36 @@ def test_a_missing_row_leaves_a_detectable_gap():
 
     assert ok is False
     assert break_position == 3
-    assert "preceding row" in reason
+    assert "missing from the chain" in reason
+
+
+def test_a_relinked_and_rehashed_gap_is_still_detected():
+    # Round-1 review (AUD-B01): a plain deletion is already caught above
+    # because the surviving row's OWN stored prev_chain_hash/chain_hash
+    # are left untouched and so stop matching. A more sophisticated tamper
+    # also rewrites the surviving row's prev_chain_hash and chain_hash to
+    # relink directly onto the new actual predecessor, using that row's
+    # own unchanged chain_position (3, not renumbered to 2) — every
+    # hash-linkage check then passes, because the attacker used the same
+    # formula the trigger does. Only an explicit chain_position density
+    # check (1, 2, 3, ... no gaps) catches this.
+    rows = _chain([
+        ("drkim", "event one", "2026-08-26T00:00:00.000000Z"),
+        ("frontdesk", "event two", "2026-08-26T00:00:01.000000Z"),
+        ("drnguyen", "event three", "2026-08-26T00:00:02.000000Z"),
+    ])
+    del rows[1]  # position 2 vanishes, leaving positions 1 and 3
+
+    position, actor, message, created_at, _stale_prev, _stale_hash = rows[1]
+    real_prev_hash = rows[0][5]  # position 1's actual chain_hash
+    relinked_hash = verify._row_hash(real_prev_hash, position, actor, message, created_at)
+    rows[1] = (position, actor, message, created_at, real_prev_hash, relinked_hash)
+
+    ok, break_position, reason = verify.verify_chain(rows)
+
+    assert ok is False
+    assert break_position == 3
+    assert "missing from the chain" in reason
 
 
 def test_a_tail_truncation_is_not_detectable():

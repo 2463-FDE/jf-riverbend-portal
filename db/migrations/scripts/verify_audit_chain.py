@@ -63,15 +63,32 @@ def _row_hash(prev_hash, chain_position, actor, message, created_at_canonical):
 def verify_chain(rows):
     """rows: iterable of (chain_position, actor, message, created_at_canonical,
     prev_chain_hash, chain_hash), already ordered by chain_position ascending.
-    Returns (ok: bool, break_position: Optional[int], reason: Optional[str])."""
+    Returns (ok: bool, break_position: Optional[int], reason: Optional[str]).
+
+    Round-1 review (AUD-B01): hash-linkage checks alone do not prove nothing
+    is MISSING from the middle of the chain — a row deleted, then the
+    surviving next row relinked/rehashed onto the new actual predecessor
+    using that row's own unchanged chain_position, reproduces a hash chain
+    that is internally consistent by every check below except this one.
+    chain_position must also be dense (1, 2, 3, ... with no gap) for
+    "nothing was removed from the middle" to actually hold — 027's trigger
+    always assigns prev_position + 1, so any real, untampered chain has
+    this property by construction."""
     actual_prev_hash = None
+    expected_position = 1
     for chain_position, actor, message, created_at_canonical, prev_chain_hash, chain_hash in rows:
+        if chain_position != expected_position:
+            return False, chain_position, (
+                f"chain_position {chain_position} is not the expected {expected_position} "
+                "— a row is missing from the chain"
+            )
         if prev_chain_hash != actual_prev_hash:
             return False, chain_position, "prev_chain_hash does not match the actual preceding row's chain_hash"
         expected = _row_hash(actual_prev_hash, chain_position, actor, message, created_at_canonical)
         if chain_hash != expected:
             return False, chain_position, "chain_hash does not match this row's own content"
         actual_prev_hash = chain_hash
+        expected_position += 1
     return True, None, None
 
 

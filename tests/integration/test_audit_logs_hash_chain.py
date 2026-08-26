@@ -439,8 +439,8 @@ def test_an_internal_deletion_is_detected_by_the_verifier():
 
     ok, break_position, reason = verify.verify_chain(after)
     assert ok is False
-    assert break_position == 3  # the row after the gap: its prev_chain_hash points at the deleted row
-    assert "preceding row" in reason
+    assert break_position == 3  # the row after the gap: its chain_position no longer follows 1
+    assert "missing from the chain" in reason
 
 
 def test_a_tail_deletion_is_not_detected_by_the_verifier():
