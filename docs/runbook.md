@@ -252,10 +252,17 @@ re-checks `is_active` per request and `SqlPatientAccessGate` joins it).
 
 ## Demo accounts
 
-All seeded users share password `portal123`. Twelve carry the deprecated flat
-`staff` role — `frontdesk`, `rdelgado`, `drnguyen`, `roiclerk`, `mokonkwo` and
-so on — because migrating real accounts onto the nine-role grid is separate,
-roster-gated work.
+All seeded **staff** accounts share password `portal123`. Twelve carry the
+deprecated flat `staff` role — `frontdesk`, `rdelgado`, `drnguyen`,
+`roiclerk`, `mokonkwo` and so on — because migrating real accounts onto the
+nine-role grid is separate, roster-gated work.
+
+**Activated patient portal accounts use a different password:**
+`portalportal123` (`db/seed/generate_seed.py`'s `PATIENT_DEMO_PASSWORD`) —
+not `portal123`. This applies to the pre-activated demo accounts
+`patient-1738` and `patient-1739`, and to any account created by completing
+the invitation flow for 1042/1737. Logging in as a patient with the staff
+password returns a 401.
 
 **One exception: `drkim` carries role `clinician`.** It is the only account
 that holds `summary_review.decide`, so it is the only account that can reach
