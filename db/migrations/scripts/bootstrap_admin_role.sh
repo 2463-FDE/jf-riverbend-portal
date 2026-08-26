@@ -23,7 +23,7 @@
 #      its own transaction (see that migration's own ORDERING note).
 #
 # Neither step ever passes a password as a psql -v variable or command-line
-# argument — both SQL files read DB_ADMIN_USER/DB_ADMIN_PASSWORD/DB_PASSWORD
+# argument — both SQL files read DB_ADMIN_USER/DB_ADMIN_PASSWORD/DB_APP_PASSWORD
 # via \getenv from the container's own environment (docker-compose.yml),
 # never exec-time. This script's own equal-password check below is a plain
 # bash string comparison of its OWN process variables — nothing is ever
