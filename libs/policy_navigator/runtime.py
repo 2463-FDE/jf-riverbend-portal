@@ -19,6 +19,7 @@ import re
 from typing import Optional
 
 from libs.agent_provenance import ProvenanceLabel
+from libs.metrics import record_counter
 from libs.policy_corpus import PolicyRetriever, RetrievalLedger, RetrievalScope
 from libs.safe_logging import get_safe_logger
 
@@ -125,7 +126,31 @@ def run_policy_navigator(
     `model=None` builds the real ChatBedrockConverse and the run is labelled
     `real`. An injected model is labelled `fixture` unless the caller says
     otherwise, so a scripted test model can never be recorded as real.
+
+    Emits the `policy_navigator_termination_total` golden-signal counter
+    exactly once per call, labelled by the outcome this function is about to
+    return — see docs/planning/policy-navigator-golden-signals-week7-08-25-2026.md.
     """
+    result = _run_policy_navigator(
+        question, scope=scope, retriever=retriever, model=model, label=label, max_turns=max_turns,
+    )
+    record_counter(
+        "policy_navigator_termination_total",
+        termination_reason=result.termination_reason,
+        provenance_label=result.label,
+    )
+    return result
+
+
+def _run_policy_navigator(
+    question: str,
+    *,
+    scope: RetrievalScope,
+    retriever: PolicyRetriever,
+    model=None,
+    label: Optional[ProvenanceLabel] = None,
+    max_turns: int = DEFAULT_MAX_TURNS,
+) -> PolicyNavigatorResult:
     from langchain.agents import create_agent
     from langchain_core.messages import AIMessage, HumanMessage
 

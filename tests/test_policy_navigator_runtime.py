@@ -152,6 +152,25 @@ def test_a_model_that_never_calls_retrieval_is_never_trusted():
 # --- citation validation: the safety net, not the prompt --------------------
 
 
+def test_a_hallucinated_citation_increments_the_golden_signal_counter(monkeypatch):
+    # Week 7: the counter this navigator's dashboard/alert (docs/planning/
+    # policy-navigator-golden-signals-week7-08-25-2026.md) is written against
+    # must actually fire, labelled by the real outcome, not a hardcoded value.
+    calls = []
+    monkeypatch.setattr(
+        "libs.policy_navigator.runtime.record_counter",
+        lambda name, **labels: calls.append((name, labels)),
+    )
+    real_chunk = _chunk("SRC-001@1.0#overview", "Real retrieved text.")
+    retriever = _FakeRetriever([[real_chunk]])
+    model = ScriptedChatModel([_tool_call(), _final("According to [SRC-999@9.9#fabricated], this is true.")])
+
+    run_policy_navigator("A question", scope=_SCOPE, retriever=retriever, model=model)
+
+    assert calls == [("policy_navigator_termination_total",
+                       {"termination_reason": "citation_invalid", "provenance_label": "fallback"})]
+
+
 def test_a_hallucinated_citation_never_reaches_the_caller():
     real_chunk = _chunk("SRC-001@1.0#overview", "Real retrieved text.")
     retriever = _FakeRetriever([[real_chunk]])
