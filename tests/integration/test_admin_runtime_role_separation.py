@@ -303,7 +303,7 @@ def _run_equal_password_guard(cur, admin_password, app_password):
     (passwords_equal,) = cur.fetchone()
     cur.execute(
         "DO $do_check$ BEGIN IF %s THEN "
-        "RAISE EXCEPTION 'DB_ADMIN_PASSWORD must be distinct from DB_PASSWORD'; "
+        "RAISE EXCEPTION 'DB_ADMIN_PASSWORD must be distinct from DB_APP_PASSWORD'; "
         "END IF; END $do_check$;",
         (passwords_equal,),
     )
@@ -525,8 +525,21 @@ def test_the_real_028_migration_transitions_a_non_default_legacy_role_correctly(
         f.write(minimal_legacy_schema)
 
     mounts = {tmp_schema_path: "/docker-entrypoint-initdb.d/01-schema.sql"}
+    # Round-3 review (BOOTSTRAP-ENV-01): the container itself gets every var
+    # docker-compose.yml would actually place there once recreated with the
+    # current environment (docs/runbook.md's "existing volume" step 1) —
+    # DB_APP_USER/DB_APP_PASSWORD alongside the new DB_ADMIN_USER/
+    # DB_ADMIN_PASSWORD, baked in at container-creation time, never injected
+    # per `docker exec -e` below. That earlier per-exec injection is exactly
+    # what let create_admin_role.sql's DB_PASSWORD/DB_APP_PASSWORD name
+    # mismatch pass silently: the test supplied a variable name real
+    # bootstrap_admin_role.sh never provides.
+    container_env = {
+        "DB_APP_USER": legacy_role, "DB_APP_PASSWORD": legacy_password,
+        "DB_ADMIN_USER": admin_role, "DB_ADMIN_PASSWORD": admin_password,
+    }
     try:
-        with _disposable_container(name, legacy_role, legacy_password, {}, mounts):
+        with _disposable_container(name, legacy_role, legacy_password, container_env, mounts):
             # Sanity: legacy_role really is the bootstrap superuser here,
             # matching this repo's real not-yet-migrated state.
             attrs = _docker(
@@ -556,23 +569,17 @@ def test_the_real_028_migration_transitions_a_non_default_legacy_role_correctly(
                 _REPO_ROOT_FOR_MOUNTS, "db", "migrations", "scripts", "create_admin_role.sql"
             )
             _docker("cp", create_admin_sql, f"{name}:/tmp/create_admin_role.sql")
-            result = _psql_exec(
-                name, legacy_role, legacy_password, "/tmp/create_admin_role.sql",
-                extra_env={
-                    "DB_ADMIN_USER": admin_role, "DB_ADMIN_PASSWORD": admin_password,
-                    "DB_PASSWORD": legacy_password,
-                },
-            )
+            # No extra_env: the container's own environment (set above, at
+            # creation) is the only source \getenv reads from here — exactly
+            # what bootstrap_admin_role.sh's real invocation relies on.
+            result = _psql_exec(name, legacy_role, legacy_password, "/tmp/create_admin_role.sql")
             assert result.returncode == 0, result.stderr.decode()
 
             migration_028 = os.path.join(
                 _REPO_ROOT_FOR_MOUNTS, "db", "migrations", "028_admin_runtime_role_separation.sql"
             )
             _docker("cp", migration_028, f"{name}:/tmp/028.sql")
-            result = _psql_exec(
-                name, admin_role, admin_password, "/tmp/028.sql",
-                extra_env={"DB_ADMIN_USER": admin_role, "DB_APP_USER": legacy_role},
-            )
+            result = _psql_exec(name, admin_role, admin_password, "/tmp/028.sql")
             assert result.returncode == 0, result.stderr.decode()
 
             owner = _docker(
