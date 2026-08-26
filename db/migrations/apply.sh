@@ -19,16 +19,20 @@
 # this now connects as DB_ADMIN_USER, not the app's own runtime credential
 # (DB_USER/riverbend_app — demoted to non-owner by 028). On a volume that
 # predates 028, DB_ADMIN_USER does not exist yet; run
-# db/migrations/scripts/bootstrap_admin_role.sh once first (it creates it,
-# using the current DB_USER/DB_PASSWORD credential, which is still the
-# original bootstrap superuser on such a volume).
+# db/migrations/scripts/bootstrap_admin_role.sh once first.
+#
+# Round 2 review: no password is ever passed here, as a psql -v variable or
+# otherwise. The connection itself needs none (docker compose exec runs
+# psql over the container's own local socket, which this image trusts
+# unconditionally regardless of role — see pg_hba.conf); 028 (the only
+# migration that references the admin role by name) reads DB_ADMIN_USER via
+# \getenv from the container's own environment instead of a -v argument.
 #
 # Usage: db/migrations/apply.sh   (run from anywhere; the stack must be up)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DB_ADMIN_USER="${DB_ADMIN_USER:-riverbend_admin}"
-DB_ADMIN_PASSWORD="${DB_ADMIN_PASSWORD:-${DB_PASSWORD:-}}"
 DB_NAME="${DB_NAME:-riverbend}"
 
 cd "$REPO_ROOT"
@@ -42,9 +46,7 @@ fi
 
 for f in db/migrations/*.sql; do
     echo "Applying $(basename "$f") ..."
-    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
-        -v admin_user="$DB_ADMIN_USER" -v admin_password="$DB_ADMIN_PASSWORD" \
-        -U "$DB_ADMIN_USER" -d "$DB_NAME" < "$f"
+    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_ADMIN_USER" -d "$DB_NAME" < "$f"
 done
 
 echo "All migrations applied (already-applied ones were no-ops)."

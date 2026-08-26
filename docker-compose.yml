@@ -17,15 +17,23 @@ services:
       # existing-volume transition and db/docker-init/00-create-app-role.sh
       # for how riverbend_app itself gets created on a fresh one.
       POSTGRES_USER: ${DB_ADMIN_USER:-riverbend_admin}
-      # No `:-changeme` default, same reasoning as DB_PASSWORD below. Falls
-      # back to DB_PASSWORD (not a new insecure default) when DB_ADMIN_PASSWORD
-      # is unset, which is the common case — admin and app end up as
-      # different ROLES either way, which is what privilege separation
-      # actually requires; they don't need distinct secrets to get it.
-      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:-$DB_PASSWORD}
-      # Read by db/docker-init/00-create-app-role.sh (fresh-volume path
-      # only) to create the riverbend_app runtime role. Same DB_USER/
-      # DB_PASSWORD every service already connects with — unchanged.
+      # No `:-changeme` default, same reasoning as DB_PASSWORD below — and
+      # (round 2 review) NO fallback to DB_PASSWORD either: sharing a
+      # secret between the admin and runtime roles would let anyone who
+      # already knows the runtime credential authenticate AS the admin
+      # role too, defeating the privilege split this whole PR exists for.
+      # Must be set to its own distinct value; docker-init/00-create-app-
+      # role.sh and db/migrations/scripts/create_admin_role.sql both also
+      # refuse to run if this equals DB_PASSWORD.
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD must be set in .env to a value DISTINCT from DB_PASSWORD — generate one with `openssl rand -hex 32`; see docs/runbook.md}
+      # Read by \getenv in db/docker-init/00-create-app-role.sh and
+      # db/migrations/028_admin_runtime_role_separation.sql — never passed
+      # as a psql -v variable or command-line argument, so neither value is
+      # ever visible in `ps`, shell history, or process logs. Same DB_USER/
+      # DB_ADMIN_USER every service/script already resolves — not secret,
+      # kept alongside the passwords only for a uniform \getenv pattern.
+      DB_ADMIN_USER: ${DB_ADMIN_USER:-riverbend_admin}
+      DB_ADMIN_PASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD must be set in .env to a value DISTINCT from DB_PASSWORD — generate one with `openssl rand -hex 32`; see docs/runbook.md}
       DB_APP_USER: ${DB_USER:-riverbend_app}
       DB_APP_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — copy .env.example and set a real value; see docs/runbook.md}
     ports:

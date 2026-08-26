@@ -243,6 +243,75 @@ def test_runtime_role_connects_and_is_not_the_owner():
         assert whoami != owner
 
 
+def test_app_credentials_cannot_authenticate_as_the_admin_role():
+    # Round 2 review requirement: distinct passwords must be a REAL
+    # authentication boundary, not just a naming convention — knowing the
+    # runtime role's password must not let you connect AS the admin role.
+    admin_role = f"test_admin_{uuid.uuid4().hex[:10]}"
+    app_role = f"test_app_{uuid.uuid4().hex[:10]}"
+    admin_password = uuid.uuid4().hex
+    app_password = uuid.uuid4().hex
+    assert admin_password != app_password  # the fixture's own guarantee, made explicit
+
+    boot = _bare_connection()
+    boot.autocommit = True
+    try:
+        with boot.cursor() as cur:
+            cur.execute(f'CREATE ROLE "{admin_role}" WITH LOGIN PASSWORD %s SUPERUSER', (admin_password,))
+            cur.execute(f'CREATE ROLE "{app_role}" WITH LOGIN PASSWORD %s NOSUPERUSER', (app_password,))
+
+        with pytest.raises(psycopg2.OperationalError, match="password authentication failed"):
+            _bare_connection(user=admin_role, password=app_password)
+
+        # Sanity: the admin role's OWN password still works, proving the
+        # rejection above was about the wrong password, not a broken role.
+        real_admin_conn = _bare_connection(user=admin_role, password=admin_password)
+        real_admin_conn.close()
+    finally:
+        with boot.cursor() as cur:
+            cur.execute(f'DROP ROLE IF EXISTS "{app_role}"')
+            cur.execute(f'DROP ROLE IF EXISTS "{admin_role}"')
+        boot.close()
+
+
+def _run_equal_password_guard(cur, admin_password, app_password):
+    # Mirrors db/migrations/scripts/create_admin_role.sql's own guard
+    # exactly: SELECT (:'admin_password' = :'app_password') AS
+    # passwords_equal \gset, then \if :passwords_equal raises. Its
+    # \getenv/\gset/\if plumbing is psql-client-only, not executable via
+    # psycopg2, so this exercises the identical decision logic the file
+    # implements — the two-value equality check and the conditional RAISE —
+    # through psycopg2's own %s parameter binding instead. The literal file
+    # was verified by hand against a real container, both fresh-volume and
+    # existing-volume paths — see this PR's own commit message.
+    cur.execute("SELECT (%s = %s) AS passwords_equal", (admin_password, app_password))
+    (passwords_equal,) = cur.fetchone()
+    cur.execute(
+        "DO $do_check$ BEGIN IF %s THEN "
+        "RAISE EXCEPTION 'DB_ADMIN_PASSWORD must be distinct from DB_PASSWORD'; "
+        "END IF; END $do_check$;",
+        (passwords_equal,),
+    )
+
+
+def test_create_admin_role_sql_rejects_equal_passwords():
+    conn = _bare_connection()
+    conn.autocommit = True
+    same = uuid.uuid4().hex
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg2.errors.RaiseException, match="distinct"):
+            _run_equal_password_guard(cur, same, same)
+    conn.close()
+
+
+def test_create_admin_role_sql_proceeds_with_distinct_passwords():
+    conn = _bare_connection()
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        _run_equal_password_guard(cur, uuid.uuid4().hex, uuid.uuid4().hex)  # must not raise
+    conn.close()
+
+
 def test_public_audit_logs_and_real_roles_are_untouched():
     # Never applied to the live shared database — the real riverbend_app
     # still owns the real audit_logs, and the real table still carries

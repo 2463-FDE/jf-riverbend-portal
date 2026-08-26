@@ -13,14 +13,26 @@
 -- shares this one riverbend_app runtime credential). Only WHO can own or
 -- ALTER schema objects changes; no service's connection code changes.
 --
--- WHAT THIS DOES. Creates :'admin_user' (distinct from riverbend_app) if it
--- does not already exist, transfers ownership of every table, sequence, and
+-- ASSUMES THE ADMIN ROLE ALREADY EXISTS (round 2 review). This migration
+-- never creates a role and never touches a password — it only transfers
+-- ownership, grants, and demotes. On a fresh volume, docker-compose.yml's
+-- postgres service boots with POSTGRES_USER=DB_ADMIN_USER, so the role
+-- exists from the container's own bootstrap. On an existing volume, run
+-- db/migrations/scripts/bootstrap_admin_role.sh once first — it creates
+-- the admin role (db/migrations/scripts/create_admin_role.sql) and is the
+-- only file in this whole chain that ever sets a password. This migration
+-- reads only the admin role's NAME (:'admin_user', via \getenv — never a
+-- password, and never a psql -v argument either), so db/migrations/apply.sh
+-- can run it exactly like every other migration file.
+--
+-- WHAT THIS DOES. Transfers ownership of every table, sequence, and
 -- function riverbend_app currently owns in the public schema (plus the
--- database itself) to it, strips riverbend_app's superuser/createdb/
--- createrole bits, then grants riverbend_app exactly the runtime privileges
--- it needs — full CRUD on ordinary tables, but only INSERT + SELECT on
--- audit_logs. From this point riverbend_app cannot ALTER TABLE audit_logs
--- at all (that requires ownership), which is what actually closes AUD-B01.
+-- database itself) to the admin role, grants riverbend_app exactly the
+-- runtime privileges it needs — full CRUD on ordinary tables, but only
+-- INSERT + SELECT on audit_logs — then strips riverbend_app's superuser/
+-- createdb/createrole bits. From this point riverbend_app cannot ALTER
+-- TABLE audit_logs at all (that requires ownership), which is what
+-- actually closes AUD-B01.
 --
 -- WHY NOT REASSIGN OWNED BY (tried first, does not work here). On THIS
 -- cluster's real starting state, riverbend_app is not just the application's
@@ -42,55 +54,30 @@
 -- actually requires.
 --
 -- TWO STARTING STATES, ONE IDEMPOTENT FILE.
---   Fresh volume: docker-compose.yml's postgres service boots with
---   POSTGRES_USER=:'admin_user' (db/docker-init/00-create-app-role.sh
---   creates riverbend_app separately, owning nothing) — schema.sql already
---   ran the equivalent GRANT/REVOKE block at the end of bootstrap, so every
---   step below is a guarded no-op (the reassignment loops simply find
---   nothing owned by riverbend_app to move).
+--   Fresh volume: the reassignment loops below simply find nothing owned
+--   by riverbend_app to move (schema.sql's own tail grant block already
+--   applied the same GRANT/REVOKE at bootstrap), so this is a no-op.
 --   Existing volume (this repo's shared local demo Postgres included):
 --   riverbend_app is still the original bootstrap role and genuinely owns
---   audit_logs today — this migration performs the real transfer. It must
---   be run once via db/migrations/scripts/bootstrap_admin_role.sh using the
---   CURRENT DB_USER/DB_PASSWORD credential, because :'admin_user' does not
---   exist yet on that volume for db/migrations/apply.sh's normal
---   DB_ADMIN_USER-based connection to use. After that one-time run (either
---   path), apply.sh's ordinary connection works for every migration,
---   including re-running this one, which is then a no-op throughout.
+--   audit_logs today — this migration performs the real transfer, run via
+--   bootstrap_admin_role.sh connected AS THE ADMIN ROLE (not riverbend_app
+--   — see that script), so there is no risk of the connecting session
+--   losing privilege partway through its own transaction.
 --
--- ORDERING (do not silently demote before the transfer succeeds). Ownership
--- transfer and the runtime GRANTs happen BEFORE riverbend_app is stripped
--- of its elevated bits, and the whole file is one transaction — a failure
--- at any step rolls back everything, so riverbend_app is never left both
--- non-owner AND under-privileged, nor left superuser after a half-applied
--- grant set. Postgres role/ownership DDL (including CREATE ROLE and
--- per-object OWNER TO) is transactional, unlike some other databases, and
--- this was verified directly: a CREATE ROLE + ALTER ROLE inside
--- BEGIN/ROLLBACK leaves no trace.
---
--- :'admin_user' is granted SUPERUSER, matching what riverbend_app already
--- effectively has today as the original bootstrap role (this is a
--- relocation of existing privilege, not a new escalation) and avoiding
--- separately reasoning about the exact privilege set future schema changes
--- (CREATE EXTENSION, etc.) will need — see the migration header note above:
--- this is deliberately the minimum admin/runtime split, not a rebuild of
--- adr/0001's per-service least privilege.
+-- ORDERING. Ownership transfer and the runtime GRANTs happen before
+-- riverbend_app is stripped of its elevated bits, and the whole file is
+-- one transaction — a failure at any step rolls back everything, so
+-- riverbend_app is never left both non-owner AND under-privileged.
+-- (An earlier revision of this migration ran AS riverbend_app itself and
+-- demoted before granting, which failed outright — "ERROR: permission
+-- denied for table ..." — the moment the now-demoted, now-non-owner
+-- session tried to GRANT something it no longer had authority over.
+-- Running this as the admin role instead removes that hazard entirely,
+-- but the ordering is kept as good practice regardless.)
 
 BEGIN;
 
--- A server-side DO block with :'var' substitution used INSIDE it turned out
--- to be unreliable across multiple statements/lines in psql 15 (reproduced:
--- the FIRST :'var' reference in a dollar-quoted block substitutes fine, a
--- SECOND one does not, even on the same line) — so :'var'/:"var" are used
--- only in single, top-level statements below. Where a value needs to reach
--- PL/pgSQL, it is passed through a session GUC via SET + current_setting(),
--- which is ordinary SQL with no psql-side substitution involved.
-SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'admin_user') AS admin_role_exists \gset
-\if :admin_role_exists
-\echo 'admin role already exists, skipping creation'
-\else
-CREATE ROLE :"admin_user" WITH LOGIN PASSWORD :'admin_password' SUPERUSER;
-\endif
+\getenv admin_user DB_ADMIN_USER
 
 SET riverbend_migration.admin_user = :'admin_user';
 
@@ -124,14 +111,6 @@ BEGIN
     EXECUTE format('ALTER DATABASE %I OWNER TO %I', current_database(), admin_role);
 END $$;
 
--- GRANT/REVOKE while riverbend_app is STILL superuser (on the
--- existing-volume path, the CONNECTED session is riverbend_app itself —
--- once it is demoted below, it no longer owns anything and is no longer a
--- superuser, so it could no longer grant privileges on tables it doesn't
--- own; superuser status is what makes self-granting possible here).
--- Demoting FIRST and granting after was tried and fails outright: "ERROR:
--- permission denied for table ..." on the very first ALL TABLES grant,
--- reproduced directly — which is exactly the ordering point 8 warns about.
 GRANT USAGE ON SCHEMA public TO riverbend_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO riverbend_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO riverbend_app;
@@ -144,13 +123,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE :"admin_user" IN SCHEMA public
 -- runtime role, regardless of the broad grant above.
 REVOKE UPDATE, DELETE ON audit_logs FROM riverbend_app;
 
--- Demote LAST, once ownership has moved and every runtime grant is in
--- place — from this point riverbend_app can no longer ALTER TABLE
--- audit_logs at all (it owns nothing), which is what actually closes
--- AUD-B01. NOREPLICATION/NOBYPASSRLS strip two more attributes the
--- original bootstrap role carried (confirmed present on this cluster's
--- real riverbend_app) that a runtime DML role has no legitimate use for,
--- even though SUPERUSER alone is what point 6 names explicitly.
+-- NOREPLICATION/NOBYPASSRLS strip two more attributes the original
+-- bootstrap role carried (confirmed present on this cluster's real
+-- riverbend_app) that a runtime DML role has no legitimate use for, even
+-- though SUPERUSER alone is what point 6 names explicitly.
 ALTER ROLE riverbend_app WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
 COMMIT;

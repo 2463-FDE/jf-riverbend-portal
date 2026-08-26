@@ -102,8 +102,19 @@ jobs:
         # committed secret. Same throwaway-value treatment, same reasoning: this
         # step builds images and never starts a container, so it needs *a*
         # value, not the real one.
+        #
+        # P3 role separation (w8-planner-2, AUD-B01): DB_ADMIN_PASSWORD joined
+        # the same category when docker-compose.yml made it a required
+        # ${VAR:?} with no fallback (test_secrets_hygiene.py::
+        # test_ci_supplies_every_variable_compose_requires enforces this stays
+        # in sync). Each var in this loop gets its OWN independent
+        # `openssl rand -hex 32` value when no repository secret is
+        # configured, so DB_ADMIN_PASSWORD and DB_PASSWORD end up distinct —
+        # satisfying db/docker-init/00-create-app-role.sh's equal-password
+        # guard, though that guard cannot even run here: this step only
+        # builds images, it never starts a container.
         run: |
-          for var in INTERNAL_SERVICE_TOKEN DB_PASSWORD; do
+          for var in INTERNAL_SERVICE_TOKEN DB_PASSWORD DB_ADMIN_PASSWORD; do
             if [ -n "$(eval "echo \"\${$var:-}\"")" ]; then
               echo "Using $var from repository secret."
             else
@@ -115,3 +126,4 @@ jobs:
         env:
           INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_ADMIN_PASSWORD: ${{ secrets.DB_ADMIN_PASSWORD }}
