@@ -57,6 +57,20 @@ def _bare_connection():
     )
 
 
+def _admin_connection():
+    """PR #85 (stacked underneath this branch) demotes DB_USER off CREATE
+    privilege on the database as part of 028 — which a real deployment,
+    and this repo's own docker-compose.yml, always applies before or
+    alongside 026. Schema/table setup for this module is therefore DDL
+    that only the admin role can still do; only the actual mutation-
+    rejection assertions below need to run AS the demoted runtime role."""
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
+        dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_ADMIN_USER", "riverbend_admin"),
+        password=os.environ["DB_ADMIN_PASSWORD"],
+    )
+
+
 def _connection():
     """Every connection this module hands out is pinned to the isolated test
     schema first, `public` second — so an unqualified `audit_logs` always
@@ -70,7 +84,8 @@ def _connection():
 
 @pytest.fixture(scope="module", autouse=True)
 def _isolated_schema():
-    setup_conn = _bare_connection()
+    app_role = os.getenv("DB_USER", "riverbend_app")
+    setup_conn = _admin_connection()
     setup_conn.autocommit = True
     with setup_conn.cursor() as cur:
         cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
@@ -78,11 +93,19 @@ def _isolated_schema():
         cur.execute(_BASE_TABLE_SQL)
         with open(_MIGRATION_026, encoding="utf-8") as f:
             cur.execute(f.read())
+        # Mirrors the real pre-028 shape this migration actually runs
+        # against: the runtime role OWNED audit_logs and so had full DML
+        # rights on it — 026's trigger is what stops mutation despite that,
+        # not a grant-level restriction. Grant the same full DML here so
+        # the tests below prove the trigger, not just an ACL check.
+        cur.execute(f'GRANT USAGE ON SCHEMA {_TEST_SCHEMA} TO "{app_role}"')
+        cur.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON audit_logs TO "{app_role}"')
+        cur.execute(f'GRANT USAGE, SELECT ON audit_logs_id_seq TO "{app_role}"')
     setup_conn.close()
 
     yield
 
-    teardown_conn = _bare_connection()
+    teardown_conn = _admin_connection()
     teardown_conn.autocommit = True
     with teardown_conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
@@ -105,7 +128,7 @@ def _scratch_schema():
     cursor already pointed at it via search_path, with the pre-026 base
     table already created; the caller applies 026 itself."""
     schema = f"audit_logs_scratch_{uuid.uuid4().hex[:10]}"
-    conn = _bare_connection()
+    conn = _admin_connection()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -191,7 +214,7 @@ def test_the_migration_is_safe_to_reapply():
     # time, safe to run against a database at any prior migration point —
     # including one that already has rows, which is the realistic case by
     # this point in the module (earlier tests have already inserted).
-    conn = _bare_connection()
+    conn = _admin_connection()
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute(f"SET search_path TO {_TEST_SCHEMA}, public")
