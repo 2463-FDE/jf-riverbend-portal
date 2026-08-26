@@ -116,12 +116,18 @@ class PatientAccessGrant(Base):
 
 
 class AuditLog(Base):
-    """Mutable, soft-delete request-dump logging (db/schema.sql) — NOT a
-    tamper-evident access trail. Stage 3's `/patients/{id}/view` route is the
-    first writer of this table in the codebase (see docs/handover/
-    auditor-questionnaire.md and roi-service/app.py's comment on the same
-    gap); a real append-only per-patient disclosure-accounting store remains
-    unbuilt, documented future work."""
+    """Append-only at the database boundary since migration 026 (P3,
+    w8-planner-2, see that migration for the trigger and why not a REVOKE) —
+    still NOT a tamper-evident chain (no hash linking, no verifier; that
+    remains separate, later work, PR #86). Stage 3's `/patients/{id}/view`
+    route is the first writer of this table in the codebase (see
+    docs/handover/auditor-questionnaire.md and roi-service/app.py's comment
+    on the same gap); a real append-only per-patient disclosure-accounting
+    store remains unbuilt, documented future work.
+
+    No `deleted_at`: migration 026 dropped it — nothing in this codebase
+    ever set or filtered on it, and the append-only trigger rejects any
+    UPDATE that would set it now anyway."""
 
     __tablename__ = "audit_logs"
 
@@ -129,7 +135,6 @@ class AuditLog(Base):
     actor = Column(Text)
     message = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    deleted_at = Column(TIMESTAMP(timezone=True))
 
 
 class PatientSummaryReview(Base):

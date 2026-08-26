@@ -3,7 +3,8 @@
 --
 -- Teaching fixtures preserved verbatim: Maria Gonzalez triple (1042/1330/
 -- 1588) with the penicillin allergy only under 1330; the double-booked slot
--- 88231; and the PHI-laden audit_logs rows.
+-- 88231. audit_logs is metadata-only (AUD-M01, 2026-08-26) — no raw name/
+-- DOB/SSN/request body, matching intake-service's real allowlist logging.
 
 INSERT INTO users (id, username, password_hash, full_name, role, created_at) VALUES
  (1, 'mokonkwo', 'pbkdf2_sha256$260000$riverbend01saltval0$d4W6Mr76sOsF1290B0966R7BiSlcC4CD8wUq2Xo9a3E=', 'Maya Okonkwo (COO)', 'staff', now()),
@@ -2557,7 +2558,7 @@ INSERT INTO disclosures (patient_id, roi_request_id, disclosed_to, disclosed_at)
  (1669, NULL, 'Dr. Smith Cardiology', '2026-06-02 00:00:00');
 
 INSERT INTO audit_logs (actor, message) VALUES
- ('intake-service', 'POST /intake body={"name":"Maria Gonzalez","dob":"1971-03-02","ssn":"412-55-9981"}'),
+ ('intake-service', 'POST /intake correlation_id=seed-demo-0001 created_via=self_service'),
  ('records-service', 'GET /patients/1042/records 200'),
  ('records-service', 'GET /patients/1812/records 200'),
  ('records-service', 'GET /patients/1848/records 200'),
