@@ -78,7 +78,7 @@ outstanding request.
 | **De-identification** | `libs/deid/` (merged, PR #52) | N/A (training) | Safe-Harbor scrub, 18 categories, tested. **Still wired to nothing** — confirmed again by the Week 8 data-flow memo (`docs/planning/ai-data-flow-vendor-memo-week8-08-25-2026.md`), which names the exact two future call sites and does not wire either. The control remains theoretical until that separate, later change lands |
 | **Tracing / metrics** | `libs/tracing/`, `libs/metrics/` | N/A (training) | `new_correlation_id`, span wrapper. `record_exception_type` records the type, **not the message** — the privacy-safe pattern to follow. `libs/metrics/record_counter` (Week 7, PR #78) is the same pattern for a golden-signal counter — one metric wired (`policy_navigator_termination_total`), no monitoring platform added |
 | **Role configuration** | `config/roles.yaml` | N/A (training) | The live RBAC grid, pinned by `tests/test_gateway_rbac.py`. `front_desk` deliberately lacks `records.read`; `default_role: staff` is declared and **read by nothing** |
-| **Test suite** | `tests/` | N/A (training) | 1472 unit (`pytest -m "not integration"`) + 132 integration (`pytest -m integration`) collected as of 2026-08-26, up from 1023/95 on 2026-08-21 — collection counts only, not a rerun; see Stage 5 for the next real full-suite result. The evidence every claim in this handover rests on |
+| **Test suite** | `tests/` | N/A (training) | 1472 unit (`pytest -m "not integration"`) + 132 integration (`pytest -m integration`) collected as of 2026-08-26, up from 1023/95 on 2026-08-21 — collection counts only, not a rerun; see Stage 5 for the next real full-suite result. The test surface every claim in this handover should be verified against |
 
 ## Blocker cards
 

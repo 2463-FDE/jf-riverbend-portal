@@ -1,6 +1,6 @@
 # Policy navigator golden signals — Week 7 (2026-08-25)
 
-**Status:** working-tree evidence; not yet reviewed or merged
+**Status:** Merged to `main` via PR #78 (2026-08-26).
 **Scope:** the smallest real metric path for one existing safety-critical
 component (`libs.policy_navigator.runtime.run_policy_navigator`), plus a
 dashboard specification and one alert that reference it. No monitoring
