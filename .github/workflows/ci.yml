@@ -81,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependency vulnerability scan (fails on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: fs
           scanners: vuln
@@ -94,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Secret scan (any finding fails)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: fs
           scanners: secret
@@ -143,6 +143,7 @@ jobs:
         # guard, though that guard cannot even run here: this step only
         # builds images, it never starts a container.
         run: |
+          set -euo pipefail
           for var in INTERNAL_SERVICE_TOKEN DB_PASSWORD DB_ADMIN_PASSWORD; do
             if [ -n "$(eval "echo \"\${$var:-}\"")" ]; then
               echo "Using $var from repository secret."
@@ -150,6 +151,11 @@ jobs:
               echo "No $var secret available (e.g. a fork PR) — generating a throwaway build-only value."
               export "$var=$(openssl rand -hex 32)"
             fi
+            # Persisted to $GITHUB_ENV (not just this step's shell) so the
+            # container-scan step below can run `docker compose config`
+            # too — compose requires all three as ${VAR:?} regardless of
+            # which step asks.
+            echo "$var=$(eval "echo \"\${$var}\"")" >> "$GITHUB_ENV"
           done
           docker compose build
         env:
@@ -162,8 +168,22 @@ jobs:
         # intake-service, ...) and third-party base images (postgres,
         # redis) — via `docker compose config --images`, so the list can't
         # drift out of sync with a service being added/removed.
+        #
+        # set -euo pipefail so a failing `docker compose config` (or any
+        # other command) fails this step instead of silently producing an
+        # empty image list that `for image in $(...)` would then iterate
+        # zero times over — a false green that scanned nothing. The image
+        # list is captured and explicitly checked for emptiness first, for
+        # the same reason: don't let this step succeed having scanned zero
+        # images.
         run: |
-          for image in $(docker compose config --images); do
+          set -euo pipefail
+          images="$(docker compose config --images)"
+          if [ -z "$images" ]; then
+            echo "::error::docker compose config --images returned no images — refusing to report success" >&2
+            exit 1
+          fi
+          echo "$images" | while IFS= read -r image; do
             echo "Scanning $image ..."
             docker run --rm \
               -v /var/run/docker.sock:/var/run/docker.sock \
