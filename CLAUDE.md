@@ -221,7 +221,21 @@ open here as open until the code says otherwise.
   `services/scheduling-service/book.py`'s single-transaction check-and-insert;
   see `tests/integration/test_scheduling_concurrency.py`.
 - HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped. Still open.
-- ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap); `audit_logs` is mutable request-dump logging, not a tamper-evident access trail — `docs/handover/auditor-questionnaire.md` shows staff were unable to answer a real auditor's request for a disclosure accounting / per-patient access log. Still open.
+- **ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap).
+  Still open** — unrelated to and not addressed by the audit-integrity work
+  below; `docs/handover/auditor-questionnaire.md` shows staff were unable to
+  answer a real auditor's request for a disclosure accounting / per-patient
+  access log, and nothing in this cycle gives ROI a disclosure ledger.
+- ~~`audit_logs` is mutable request-dump logging, not a tamper-evident access
+  trail~~ **Partially resolved** (w8-planner-2 P3, closes AUD-B01):
+  `audit_logs` is now append-only at the database boundary — a trigger
+  rejects `UPDATE`/`DELETE` regardless of caller
+  (`db/migrations/026_audit_logs_append_only.sql`), and the table owner can no
+  longer bypass it via `ALTER TABLE ... DISABLE TRIGGER`, since the runtime
+  role is no longer the owner (`db/migrations/028_admin_runtime_role_separation.sql`).
+  Still **not tamper-evident**: nothing yet proves no row was altered via an
+  admin-level bypass of that trigger — a hash chain + verifier is separate,
+  later work (PR #86).
 - No dependency, container image, or secret scanning in CI; images build straight from `main` with no deploy gate visible in this repo. Still open.
 - Duplicate patients (RIV-160) are **partially** addressed: `/intake` now runs
   a deterministic (dob, ssn) match-key lookup before creating a patient

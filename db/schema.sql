@@ -256,17 +256,46 @@ CREATE TABLE IF NOT EXISTS consents (
 );
 
 -- ---------------------------------------------------------------------------
--- "Audit" log. Ordinary mutable table; rows can be UPDATE/DELETEd and
--- soft-deleted. Currently we mostly dump request info here. This is logging,
--- not tamper-evident auditing.
+-- "Audit" log. Append-only at the database boundary since migration 026
+-- (P3, w8-planner-2): a BEFORE UPDATE/DELETE trigger rejects any mutation
+-- or removal of an existing row from an ordinary GRANT/REVOKE-scoped
+-- caller — see that migration for why a trigger, not a REVOKE, and
+-- db/migrations/028_admin_runtime_role_separation.sql (PR #85) for why the
+-- runtime role also had to stop OWNING this table: an owner can disable
+-- its own triggers regardless of any REVOKE, which the trigger alone
+-- cannot stop. Not yet tamper-evident — no hash chain, no verifier; that
+-- is separate, later work (see PR #86) and this table must not be
+-- described as tamper-evident until it lands. `message` is metadata only
+-- in every CURRENT writer (records-service/app.py's _write_audit call
+-- sites) — never a raw request body or PHI; keep it that way when adding
+-- a new one. This is a property of current code, not a DB-enforced
+-- constraint — `message` is a plain TEXT column. A database that
+-- predates AUD-M01 (code review, 2026-08-26) could carry a raw-PHI
+-- historical row; migration 026 performs a one-time scrub of that exact
+-- known row.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS audit_logs (
-    id          SERIAL PRIMARY KEY,
-    actor       TEXT,
-    message     TEXT,                          -- often the full request body
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at  TIMESTAMPTZ                     -- soft delete
+    id                SERIAL PRIMARY KEY,
+    actor             TEXT,
+    message           TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE OR REPLACE FUNCTION audit_logs_reject_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_logs is append-only: % is not permitted', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS audit_logs_no_update ON audit_logs;
+CREATE TRIGGER audit_logs_no_update
+    BEFORE UPDATE ON audit_logs
+    FOR EACH ROW EXECUTE FUNCTION audit_logs_reject_mutation();
+
+DROP TRIGGER IF EXISTS audit_logs_no_delete ON audit_logs;
+CREATE TRIGGER audit_logs_no_delete
+    BEFORE DELETE ON audit_logs
+    FOR EACH ROW EXECUTE FUNCTION audit_logs_reject_mutation();
 
 -- ---------------------------------------------------------------------------
 -- Role migration accounting (019, branch 9 part 2)

@@ -98,8 +98,16 @@ code, not the original handoff snapshot. Each remaining item is marked open
 here; sequencing lives in the current delivery plan, not in this file.
 
 - **Compliance posture is self-asserted.** PHI columns are plaintext (`adr/0002`,
-  unchanged); "audit" is still mutable request logging, not a tamper-evident
-  access trail. Still open.
+  unchanged). ~~"audit" is still mutable request logging, not a tamper-evident
+  access trail.~~ **Partially resolved** (w8-planner-2 P3, closes AUD-B01):
+  `audit_logs` is now append-only at the database boundary — a
+  `BEFORE UPDATE`/`DELETE` trigger rejects mutation regardless of caller
+  (`db/migrations/026_audit_logs_append_only.sql`), and the table owner can no
+  longer bypass it via `ALTER TABLE ... DISABLE TRIGGER`, since the runtime
+  role is no longer the owner (`db/migrations/028_admin_runtime_role_separation.sql`).
+  Still **not tamper-evident**: nothing yet proves no row was altered by an
+  admin-level bypass of that trigger. Tamper-evidence (a hash chain + verifier)
+  is separate, later work — see PR #86.
 - ~~**PHI in application logs** — intake logs full request bodies at INFO.~~
   **Resolved.** `services/intake-service/app.py`'s `_intake_log_summary` now
   logs an allowlist only (`correlation_id`, `created_via`), not the request

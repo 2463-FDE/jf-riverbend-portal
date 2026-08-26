@@ -8,12 +8,24 @@ PRESERVES the hand-authored teaching fixtures verbatim:
     allergy recorded only under 1330 (duplicate-patient / no-MPI debt).
   * James O'Brien (1043) and Aisha Khan (1601).
   * Two confirmed appointments for the SAME slot 88231 ~400ms apart (retry race).
-  * The PHI-laden audit_logs rows (audit-is-logging debt).
   * Week 4 catch-up: deliberately different patient_access_grants per user
     (frontdesk/drpatel/drnguyen) — see that INSERT's own comment below for
     exactly who is granted what and why frontdesk is NOT granted 1043.
 and then layers a few hundred realistic rows on top so the database reads like a
 real, lived-in clinic network.
+
+audit_logs no longer carries a raw-PHI row (code review AUD-M01, P3
+w8-planner-2, 2026-08-26): an earlier revision of this generator preserved a
+"POST /intake body={name,dob,ssn}" row as a deliberate demonstration of the
+pre-DEBT-D1 logging bug. Once migration 027 started hashing audit_logs
+content into a tamper-evident chain, that row would have had a patient's
+name/DOB/SSN baked into a permanent hash — worse than the plaintext PHI
+columns this schema already has, not equivalent to them, and not acceptable
+debt to carry forward. The row below now matches the SAME allowlist-only
+shape services/intake-service/app.py's real _intake_log_summary actually
+logs (correlation_id, created_via — never patient_id, name, DOB, or SSN).
+db/migrations/026_audit_logs_append_only.sql performs the matching one-time
+scrub for a database that already has the old row.
 
 Run:  python3 db/seed/generate_seed.py  > db/seed/seed.sql
 """
@@ -45,7 +57,8 @@ emit("-- hand-edit; change the generator and re-run. Deterministic (seed=2026)."
 emit("--")
 emit("-- Teaching fixtures preserved verbatim: Maria Gonzalez triple (1042/1330/")
 emit("-- 1588) with the penicillin allergy only under 1330; the double-booked slot")
-emit("-- 88231; and the PHI-laden audit_logs rows.")
+emit("-- 88231. audit_logs is metadata-only (AUD-M01, 2026-08-26) — no raw name/")
+emit("-- DOB/SSN/request body, matching intake-service's real allowlist logging.")
 emit()
 
 # ---------------------------------------------------------------------------
@@ -818,11 +831,13 @@ emit(",\n".join(drows) + ";")
 emit()
 
 # ---------------------------------------------------------------------------
-# audit_logs — "audit" rows are really app INFO logs with PHI in them
+# audit_logs — metadata-only (AUD-M01). Matches _INTAKE_LOG_SUMMARY_KEYS in
+# services/intake-service/app.py exactly: correlation_id and created_via
+# only, never a patient identifier, name, DOB, or SSN.
 # ---------------------------------------------------------------------------
 emit("INSERT INTO audit_logs (actor, message) VALUES")
 alrows = [
-    " ('intake-service', 'POST /intake body={\"name\":\"Maria Gonzalez\",\"dob\":\"1971-03-02\",\"ssn\":\"412-55-9981\"}')",
+    " ('intake-service', 'POST /intake correlation_id=seed-demo-0001 created_via=self_service')",
     " ('records-service', 'GET /patients/1042/records 200')",
 ]
 for _ in range(20):
