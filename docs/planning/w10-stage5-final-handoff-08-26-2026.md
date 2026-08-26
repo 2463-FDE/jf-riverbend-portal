@@ -7,6 +7,15 @@ exact commit.** That does not make W10 complete by itself: **W10 closes
 only when PR #81 merges**, at which point this report is amended once more
 (§11) with the actual merge commit.
 
+**PR #82 (the runbook/Makefile documentation corrections, §5) is explicitly
+outside W10's closure condition.** Those two gaps are pre-existing
+documentation debt this Stage 5 pass *discovered* while validating links
+and instructions, not new work this stage created, and neither blocks any
+of Stage 5's own acceptance criteria (CI, freshness, the two rehearsals, the
+controlled fallback test, the before/after result). W10 closing on #81's
+merge does not mean §5's two items are resolved — §8's table marks them
+separately, and §9's roadmap items 3–4 remain open until #82 itself merges.
+
 This report is reproducible from `6c7fc49` using the commands and
 credentials recorded below. It does not implement any new feature — Stage 5
 is verification and documentation only, per `w-10-planner`'s own operating
@@ -33,9 +42,11 @@ mismatches, zero `fake-titan` rows (`policy_chunk_embeddings` totals exactly
 
 ## 3. Integrated synthetic demo — rehearsed twice
 
-Rehearsed via direct calls to the gateway API (`http://localhost:8070`) with
-real session logins — not a browser walkthrough. All demo-account passwords
-below are the repo's own seeded, synthetic, non-production credentials.
+Rehearsed via direct `curl` calls to the gateway API (`http://localhost:8070`)
+with real session logins — not a browser walkthrough. All demo-account
+passwords below are the repo's own seeded, synthetic, non-production
+credentials. `jq` is used only to extract the bearer token from each login
+response; every other step is a single `curl`.
 
 **Setup for each rehearsal:**
 ```bash
@@ -43,60 +54,102 @@ docker compose up -d
 make demo-reset
 ```
 
-**Rehearsal 1 — patient 1738, clinician `drkim`:**
-1. `POST /login` (`drkim` / `portal123`) → session token.
-2. `POST /patients/1738/agent-draft` (drkim) → **201**, draft v1,
-   `provenance_label=real`, `model_id=us.anthropic.claude-sonnet-4-6`,
-   citations `POL-001@2026-08-01`, `TRN-014@2026-07-15`.
-3. `POST /agent-drafts/1/decision` `{"decision":"approved"}` (drkim) → **200**,
-   `status=approved`.
-4. `POST /login` (`patient-1738` / `portalportal123` — see §5, not
-   `portal123`) → session token.
-5. `GET /patient/me/agent-summary` (patient) → **200**, `status=approved`,
-   `provenance_label=real`, same version/citations as step 2 — exact
-   approved-only display; no pending/rejected content leaks through.
-6. `POST /policy/ask` (drkim): "What must a clinician confirm before
-   releasing a critical lab result early?" → **200**, but
-   `label=fallback`, `termination_reason=provider_error`. Records-service
-   log: `error_type=GraphRecursionError` — the LangChain agent loop hit its
-   turn bound without converging to a final answer. Caught by the generic
-   exception handler in `run_policy_navigator`; returned the safe, truthful,
-   generic reply ("I couldn't reach the policy navigator just now...") with
-   no citations and no raw error exposed. **Classified as intermittent
-   bounded-loop exhaustion** — an occasional, real failure mode of a bounded
-   agent loop under load, not a configuration problem; it did not recur in
-   rehearsal 2 against the same corpus. Recorded here as an incidental,
-   genuine observation of the same fallback contract — the planned,
-   reproducible provider-failure exercise is the separate controlled test in
-   §4.
-7. `POST /policy/ask` (patient-1738): "What is the minimum-necessary rule
-   for ROI disclosure record selection?" → **200**, `label=real`,
-   `termination_reason=answered`, citing `GUIDE-REC-ACCESS-001` and
-   `GUIDE-INTAKE-CONSENT-001` (role-boundary/minimum-necessary guidance
-   inside the patient's own authorized scope) — **not** `ROI-DISC-001`
-   (the ROI-clerk-scoped source). The retrieval boundary held: the patient
-   got a real, scoped answer from material actually inside their audience,
-   never the ROI-specific document.
-8. `POST /login` (`frontdesk` / `portal123`) → session token.
-9. `GET /patients/1738/coverages` (frontdesk) → **200**, one item,
-   `status=stale`, `payer_name=Aetna`.
-10. `GET /appointments?patient_id=1738` (frontdesk) → **200**, 2 rows.
-    `POST /visits/{id}/messages` `{"message":"Is this patient's coverage
-    still active?"}` → **200**, `termination_reason=answered`, a real,
-    substantive reply naming the payer, masked member ID, and stored/live
-    verification status.
+**Rehearsal 1 — patient 1738, clinician `drkim` — full replay:**
 
-**Rehearsal 2 — patient 1739, clinician `drnguyen`:** same sequence.
-1–5 identical shape (draft v1 → id 2, approved, patient sees approved-only
-real summary). Step 6 (clinician policy question) this time returned
+```bash
+BASE=http://localhost:8070
+
+# 1. Clinician login
+KIM=$(curl -s -X POST $BASE/login -H 'Content-Type: application/json' \
+  -d '{"username":"drkim","password":"portal123"}' | jq -r .token)
+
+# 2. Generate a real, cited draft
+curl -s -X POST $BASE/patients/1738/agent-draft \
+  -H "Authorization: Bearer $KIM" | tee /tmp/draft.json
+# -> 201, {"id":1,"version":1,"status":"validated","provenance_label":"real",
+#    "model_id":"us.anthropic.claude-sonnet-4-6",
+#    "citations":[{"citation_id":"POL-001@2026-08-01",...},
+#                 {"citation_id":"TRN-014@2026-07-15",...}], ...}
+DRAFT_ID=$(jq -r .id /tmp/draft.json)
+
+# 3. Clinician approval
+curl -s -X POST $BASE/agent-drafts/$DRAFT_ID/decision \
+  -H "Authorization: Bearer $KIM" -H 'Content-Type: application/json' \
+  -d '{"decision":"approved"}'
+# -> 200, {"status":"approved", "provenance_label":"real", ...}
+
+# 4. Patient login (note: portalportal123, NOT portal123 -- see PR #82)
+PATIENT=$(curl -s -X POST $BASE/login -H 'Content-Type: application/json' \
+  -d '{"username":"patient-1738","password":"portalportal123"}' | jq -r .token)
+
+# 5. Patient views the approved-only summary
+curl -s $BASE/patient/me/agent-summary -H "Authorization: Bearer $PATIENT"
+# -> 200, {"status":"approved","provenance_label":"real","version":1,
+#    "citations":[...same two as step 2...], "generated_text":"..."}
+# Exact approved-only display: no pending/rejected content leaks through.
+
+# 6. Clinician asks a real policy question
+curl -s -X POST $BASE/policy/ask -H "Authorization: Bearer $KIM" \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What must a clinician confirm before releasing a critical lab result early?"}'
+# Observed: 200, but {"label":"fallback","termination_reason":"provider_error",...}
+# records-service log: error_type=GraphRecursionError -- the LangChain agent
+# loop hit its turn bound without converging to a final answer. Caught by
+# the generic exception handler in run_policy_navigator; returned the safe,
+# truthful, generic reply with no citations and no raw error exposed.
+# CLASSIFIED AS INTERMITTENT BOUNDED-LOOP EXHAUSTION -- an occasional, real
+# failure mode of a bounded agent loop under load, not a configuration
+# problem; it did not recur in rehearsal 2 against the identical question.
+# This is an incidental, genuine observation of the fallback contract --
+# it is NOT the planned provider-failure exercise (that is the separate,
+# controlled test in §4).
+
+# 7. Patient asks an out-of-their-workflow question
+curl -s -X POST $BASE/policy/ask -H "Authorization: Bearer $PATIENT" \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What is the minimum-necessary rule for ROI disclosure record selection?"}'
+# -> 200, {"label":"real","termination_reason":"answered",
+#    "citations":[{"citation_id":"GUIDE-REC-ACCESS-001@1.1#explicit-role-boundaries",...},
+#                 {"citation_id":"GUIDE-INTAKE-CONSENT-001@1.0#...",...}]}
+# NOT ROI-DISC-001 (the ROI-clerk-scoped source) -- the retrieval boundary
+# held: the patient got a real, scoped answer from material actually inside
+# their own authorized audience, never the ROI-specific document.
+
+# 8. Front-desk login
+FRONTDESK=$(curl -s -X POST $BASE/login -H 'Content-Type: application/json' \
+  -d '{"username":"frontdesk","password":"portal123"}' | jq -r .token)
+
+# 9. Coverage load
+curl -s $BASE/patients/1738/coverages -H "Authorization: Bearer $FRONTDESK"
+# -> 200, {"items":[{"id":6,"status":"stale","payer_name":"Aetna"}]}
+
+# 10. Eligibility chat -- {id} is obtained from this same appointments call,
+#     never supplied by the browser/caller directly
+curl -s "$BASE/appointments?patient_id=1738" -H "Authorization: Bearer $FRONTDESK" \
+  | tee /tmp/appts.json
+VISIT_ID=$(jq -r '.[0].id' /tmp/appts.json)   # 2 rows returned; first used here
+
+curl -s -X POST $BASE/visits/$VISIT_ID/messages -H "Authorization: Bearer $FRONTDESK" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Is this patient'"'"'s coverage still active?"}'
+# -> 200, {"termination_reason":"answered", "reply":"...Payer: Aetna...
+#    Stored Status: Stale...Live Verification: unavailable..."} -- a real,
+# substantive reply naming the payer, masked member ID, and stored/live
+# verification status.
+```
+
+**Rehearsal 2 — patient 1739, clinician `drnguyen` — same script, three
+substitutions:** `drkim`→`drnguyen`, `1738`→`1739`, `patient-1738`→
+`patient-1739`. Observed differences from rehearsal 1's output: step 2's
+draft got `id=2`; step 6 (clinician policy question) this time returned
 `label=real`, `termination_reason=answered`, citing
 `LAB-REL-EXCEPTION-001` (the clinician-only early-release companion) and
-`LAB-REL-001` — the GraphRecursionError from rehearsal 1 did not recur; the
-same question resolved normally. Step 7 (patient ROI-boundary question)
-again `answered` from in-scope role-boundary guidance, never
-`ROI-DISC-001`. Step 9: coverage `status=unknown`, `payer_name=
-UnitedHealthcare`. Step 10: eligibility chat `answered`, correctly reporting
-it could not confirm live status and showing the stored/masked data instead.
+`LAB-REL-001` — the `GraphRecursionError` from rehearsal 1 did not recur on
+the identical question; step 9 coverage returned `status=unknown`,
+`payer_name=UnitedHealthcare`; step 10 eligibility chat again `answered`,
+correctly reporting it could not confirm live status and showing the
+stored/masked data instead. Step 7 (patient ROI-boundary question) again
+`answered` from in-scope role-boundary guidance, never `ROI-DISC-001`.
 
 ## 4. Provider-failure/fallback path — the planned, controlled exercise
 
@@ -117,16 +170,48 @@ exercise.
 configured test against the real policy-navigator runtime**, run without
 editing `.env`:
 
-```bash
-docker compose run --rm -e BEDROCK_MODEL_ID=changeme records-service \
-  python /tmp/check.py   # calls policy_navigator_path.ask_policy_navigator directly
-```
-
 `services/records-service/policy_navigator_path.py::ask_policy_navigator`
 was called directly (real code, real Postgres, real embedding
 provider/retrieval — only the chat model's `BEDROCK_MODEL_ID` was
 overridden to `changeme` for this one container invocation) with a real
-clinician question. Observed and asserted:
+clinician question. Full, exact reproduction from `6c7fc49` — no file in
+this repo needed, the script is written to disk and run in one step:
+
+```bash
+cat > /tmp/check.py <<'PYEOF'
+import os
+import sys
+
+sys.path.insert(0, "/app")
+
+from policy_navigator_path import ask_policy_navigator  # noqa: E402
+
+assert os.getenv("BEDROCK_MODEL_ID") == "changeme", "test setup error: BEDROCK_MODEL_ID must be changeme"
+
+result = ask_policy_navigator(
+    "What must a clinician confirm before releasing a critical lab result early?",
+    actor_role="clinician",
+)
+
+print("label:", result.label)
+print("termination_reason:", result.termination_reason)
+print("model_id:", result.model_id)
+print("citations:", result.citations)
+
+assert result.label == "fallback", f"expected label=fallback, got {result.label}"
+assert result.termination_reason == "provider_error", f"expected termination_reason=provider_error, got {result.termination_reason}"
+assert result.model_id is None, f"expected model_id=None, got {result.model_id}"
+assert result.citations == (), f"expected zero citations, got {result.citations}"
+print("ALL ASSERTIONS PASSED")
+PYEOF
+
+docker compose up -d postgres
+docker compose run --rm -e BEDROCK_MODEL_ID=changeme \
+  -v "/tmp/check.py:/tmp/check.py:ro" \
+  records-service python /tmp/check.py
+```
+
+Observed and asserted:
 
 ```
 label: fallback
@@ -158,8 +243,11 @@ been applied on a separate draft PR, built in a clean temporary worktree
 from exact `main` so this session's other preserved, unrelated
 working-tree edits to these same two files stayed untouched:
 [PR #82](https://github.com/2463-FDE/jf-riverbend-portal/pull/82),
-commit `e1f253e`. Still draft, still requires its own explicit
-merge approval — recorded here, not assumed:
+latest commit `dc23001` (a review round added a third and fourth
+correction — the clinician-count/reviewer claims and the `demo-reset`
+sample-output shape — beyond the two found during this Stage 5 pass).
+Still draft, still requires its own explicit merge approval — recorded
+here, not assumed:
 
 1. **`docs/runbook.md`'s "Demo accounts" section never documents the
    patient-portal password.** It states "All seeded users share password
