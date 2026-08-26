@@ -812,3 +812,27 @@ CREATE TABLE IF NOT EXISTS policy_chunk_embeddings (
 );
 
 CREATE INDEX IF NOT EXISTS policy_chunk_embeddings_chunk_id_idx ON policy_chunk_embeddings (chunk_id);
+
+-- ---------------------------------------------------------------------------
+-- Runtime role privileges (028, w8-planner-2 P3 — closes AUD-B01, a code
+-- review finding on PR #84). db/docker-init/00-create-app-role.sh creates
+-- riverbend_app before this file runs, LOGIN but owning nothing and never
+-- superuser — this section is what actually grants it the ability to do its
+-- job now that every table above exists. Kept in sync with
+-- db/migrations/028_admin_runtime_role_separation.sql, which applies the
+-- same grants (plus the one-time ownership transfer) to a volume that
+-- predates this split; duplicated between the two for the same reason
+-- schema.sql duplicates every other migration's cumulative effect.
+--
+-- Broad grant first, then a narrower carve-out for audit_logs: no UPDATE or
+-- DELETE there, and — because ALTER TABLE requires ownership, not a
+-- grantable privilege — no ability to disable its triggers either, which is
+-- the actual fix (026's trigger alone could not stop the table's OWNER from
+-- disabling it).
+-- ---------------------------------------------------------------------------
+GRANT USAGE ON SCHEMA public TO riverbend_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO riverbend_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO riverbend_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO riverbend_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO riverbend_app;
+REVOKE UPDATE, DELETE ON audit_logs FROM riverbend_app;

@@ -14,18 +14,37 @@
 # Idempotent-by-construction migrations sidestep that unknown instead of
 # guessing it. See docs/runbook.md "Deploying a new release."
 #
+# Admin/runtime role separation (028, w8-planner-2 P3 — AUD-B01): migrations
+# create/ALTER schema objects, which needs ownership-level privilege, so
+# this now connects as DB_ADMIN_USER, not the app's own runtime credential
+# (DB_USER/riverbend_app — demoted to non-owner by 028). On a volume that
+# predates 028, DB_ADMIN_USER does not exist yet; run
+# db/migrations/scripts/bootstrap_admin_role.sh once first (it creates it,
+# using the current DB_USER/DB_PASSWORD credential, which is still the
+# original bootstrap superuser on such a volume).
+#
 # Usage: db/migrations/apply.sh   (run from anywhere; the stack must be up)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DB_USER="${DB_USER:-riverbend_app}"
+DB_ADMIN_USER="${DB_ADMIN_USER:-riverbend_admin}"
+DB_ADMIN_PASSWORD="${DB_ADMIN_PASSWORD:-${DB_PASSWORD:-}}"
 DB_NAME="${DB_NAME:-riverbend}"
 
 cd "$REPO_ROOT"
 
+if ! docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_ADMIN_USER" -d "$DB_NAME" -c 'SELECT 1' >/dev/null 2>&1; then
+    echo "Could not connect as DB_ADMIN_USER ($DB_ADMIN_USER)." >&2
+    echo "On a volume that predates admin/runtime role separation, run" >&2
+    echo "db/migrations/scripts/bootstrap_admin_role.sh once first." >&2
+    exit 1
+fi
+
 for f in db/migrations/*.sql; do
     echo "Applying $(basename "$f") ..."
-    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$f"
+    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+        -v admin_user="$DB_ADMIN_USER" -v admin_password="$DB_ADMIN_PASSWORD" \
+        -U "$DB_ADMIN_USER" -d "$DB_NAME" < "$f"
 done
 
 echo "All migrations applied (already-applied ones were no-ops)."

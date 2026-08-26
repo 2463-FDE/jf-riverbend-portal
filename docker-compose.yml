@@ -6,17 +6,33 @@ services:
     image: pgvector/pgvector:0.8.0-pg15
     environment:
       POSTGRES_DB: ${DB_NAME:-riverbend}
-      POSTGRES_USER: ${DB_USER:-riverbend_app}
-      # No `:-changeme` default. A guessable fallback for the database
-      # password is worse than a failed start: it boots a working stack that
-      # anyone can predict the credentials for, and nothing reports it. Same
-      # `${VAR:?}` shape as INTERNAL_SERVICE_TOKEN below — a missing value
-      # stops compose before any container starts.
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — copy .env.example and set a real value; see docs/runbook.md}
+      # Admin/runtime role separation (P3 AUD-B01, w8-planner-2): the
+      # cluster's bootstrap role — which the official Postgres image always
+      # makes a superuser, and which therefore owns everything schema.sql
+      # creates — is now the ADMIN account, not the app's own runtime
+      # credential. Fixes riverbend_app being able to `ALTER TABLE
+      # audit_logs DISABLE TRIGGER ...` on a table it owned, bypassing 026's
+      # append-only guard outright. See
+      # db/migrations/028_admin_runtime_role_separation.sql for the
+      # existing-volume transition and db/docker-init/00-create-app-role.sh
+      # for how riverbend_app itself gets created on a fresh one.
+      POSTGRES_USER: ${DB_ADMIN_USER:-riverbend_admin}
+      # No `:-changeme` default, same reasoning as DB_PASSWORD below. Falls
+      # back to DB_PASSWORD (not a new insecure default) when DB_ADMIN_PASSWORD
+      # is unset, which is the common case — admin and app end up as
+      # different ROLES either way, which is what privilege separation
+      # actually requires; they don't need distinct secrets to get it.
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:-$DB_PASSWORD}
+      # Read by db/docker-init/00-create-app-role.sh (fresh-volume path
+      # only) to create the riverbend_app runtime role. Same DB_USER/
+      # DB_PASSWORD every service already connects with — unchanged.
+      DB_APP_USER: ${DB_USER:-riverbend_app}
+      DB_APP_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — copy .env.example and set a real value; see docs/runbook.md}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./db/docker-init/00-create-app-role.sh:/docker-entrypoint-initdb.d/00-create-app-role.sh:ro
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./db/seed/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
