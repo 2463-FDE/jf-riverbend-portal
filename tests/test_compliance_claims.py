@@ -92,12 +92,36 @@ def test_no_file_claims_protection_that_does_not_exist(label, pattern):
 
 def test_the_readme_states_the_actual_posture():
     """A negative test alone would pass if the Compliance section were simply
-    deleted. The claim has to be replaced by the truth, not removed."""
+    deleted. The claim has to be replaced by the truth, not removed.
+
+    w8-planner-2 P2 (adr/0012), corrected again after review (PR #99 round
+    2): "PHI columns are encrypted" overclaimed completeness — ssn/dob/notes
+    and (adr/0012 follow-up) agent_draft_provenance.generated_text are
+    application-layer encrypted, but most PHI is NOT, and the README must
+    say so precisely — "selected PHI fields are application-encrypted",
+    never a bare "PHI columns/is encrypted" that implies every column. What
+    must still hold: the README names specific fields as encrypted, names
+    at least one specific field that is NOT (records.title/body is the
+    running example throughout this codebase's docs), still denies
+    disk/volume-level encryption and KMS-backed custody (both genuinely
+    absent), and still points to both the original risk decision (adr/0008)
+    and the design that closed part of the gap (adr/0012)."""
     readme = (REPO / "README.md").read_text()
-    assert "not** encrypted at rest" in readme or "not encrypted at rest" in readme, (
-        "README must state plainly that PHI is not encrypted at rest"
+    assert "selected phi fields are application-encrypted" in readme.lower(), (
+        "README must say 'selected PHI fields are application-encrypted', not a bare "
+        "'PHI columns are encrypted' that implies every column"
+    )
+    assert "records.title" in readme, (
+        "README must name at least one specific still-plaintext PHI surface (records.title/body)"
+    )
+    assert re.search(r"no\*?\*?\s+disk/volume-level encryption", readme), (
+        "README must still deny disk/volume-level encryption — that part of the gap is real"
+    )
+    assert "no kms-backed key custody" in readme.lower(), (
+        "README must still deny KMS-backed key custody for the fields that ARE encrypted"
     )
     assert "adr/0008" in readme, "README must point to the recorded risk decision"
+    assert "adr/0012" in readme, "README must point to the design that closed part of it"
 
 
 def test_the_guard_still_catches_an_affirmative_claim():
@@ -118,7 +142,10 @@ def test_the_guard_still_catches_an_affirmative_claim():
 def test_architecture_doc_states_the_actual_posture():
     # It is the doc engineers read, and it claimed storage-layer encryption and
     # TLS in transit until 2026-08-20 — telling them the opposite of the README.
+    # w8-planner-2 P2 (adr/0012): "no encryption anywhere" stopped being true —
+    # see test_the_readme_states_the_actual_posture's identical note.
     arch = (REPO / "ARCHITECTURE.md").read_text()
 
-    assert "no encryption anywhere" in arch.lower()
+    assert "nothing is encrypted at the storage layer" in arch.lower()
     assert "adr/0008" in arch
+    assert "adr/0012" in arch

@@ -1,4 +1,4 @@
-PHI in this system is **not** encrypted at rest, and the system is **not** HIPAA compliant. See Compliance below and `adr/0008`.
+Selected PHI fields are application-encrypted (`patients.ssn`/`dob`/`notes`, `agent_draft_provenance.generated_text` — `libs/phi_crypto`, `adr/0012`) — most PHI in this system, including `records.title`/`body`, is **not**. There is also **no** disk/volume-level encryption, no KMS-backed key custody, no TLS on any hop, and the system is **not** HIPAA compliant overall. See Compliance below, `adr/0008`, and `adr/0012`.
 
 # Riverbend Patient Portal
 
@@ -84,8 +84,10 @@ are not. See `tests/README.md`.
 
 Riverbend Community Health is a HIPAA covered entity. **This application does
 not currently meet the Security Rule.** The claim previously on this line —
-that patient data was encrypted and the system was compliant — was false:
-`dob`, `ssn` and clinical `notes` are stored in plain text (`db/schema.sql`).
+that patient data was encrypted and the system was compliant — was false at
+the time; selected PHI fields are now application-encrypted (not "PHI
+columns," plural and complete — see the exact list below), but the system
+is still not compliant overall (see the remaining gaps below).
 
 What is implemented and tested:
 
@@ -96,10 +98,26 @@ What is implemented and tested:
 - caller verification between every service, refusing untokened in-network calls
 - PHI-safe logging with redaction (`libs/safe_logging`)
 - a default-deny clinician review gate over withheld patient-facing content
+- **Exactly these fields are AEAD-encrypted at the application layer**
+  (`libs/phi_crypto`) — no other PHI-bearing column is:
+  - `patients.ssn`, `patients.dob`, `patients.notes` (`adr/0012`), with an
+    HMAC-SHA256 blind index replacing the old plaintext-derived SSN match key
+  - `agent_draft_provenance.generated_text` (`adr/0012` follow-up, migration 032)
+  - Key custody is environment-variable-based (no KMS/secrets-manager
+    integration exists), a documented, accepted limitation, not an oversight.
 
 What is not:
 
-- **no encryption at rest** — see `adr/0008` for the recorded risk decision
+- **Most PHI in this system is still plaintext.** Encryption above is
+  field-by-field, not blanket — every other PHI-bearing column is
+  unencrypted, including (not an exhaustive list): `records.title`/`body`/
+  `reference_range` (the clinical record content itself), `encounters.reason`/
+  `allergies`/`medications`, `patients.address`/`phone`/`email`,
+  `insurance_coverages.member_id`/`group_number`, and secure-message bodies.
+- **no disk/volume-level encryption** — no managed-database deployment
+  exists behind this stack (docker compose, local volume); see `adr/0008`
+  for the recorded risk decision this doesn't change
+- **no KMS-backed key custody** for the fields that ARE encrypted (see above)
 - no TLS on any hop
 - no MFA outside a pilot-clinic scope
 - **`audit_logs` is append-only and tamper-evident against a compromised
