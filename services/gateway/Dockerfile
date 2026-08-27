@@ -8,7 +8,12 @@
 #
 # Same pattern intake-service, eligibility-service and records-service already
 # use to reach libs/ — see their Dockerfiles and docker-compose.yml.
-FROM python:3.12-slim
+# P5 follow-up, item 3: python:3.12-slim floats to whatever Debian release is
+# current (trixie/13 as of this pin, which still carries HIGH-severity
+# util-linux/bsdutils/OpenSSL findings). python:3.12-slim-bookworm (Debian
+# 12) scanned fully clean (0 CRITICAL/HIGH) at pin time; explicit variant +
+# digest so this doesn't silently float again.
+FROM python:3.12-slim-bookworm@sha256:0f5b26b9518d002b6173fd61daad821fa340635ebfec5bba471013f9ca114579
 
 WORKDIR /app
 

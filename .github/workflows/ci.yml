@@ -101,7 +101,6 @@ jobs:
           python3 -c "
           import sys, yaml
           files = (
-              '.trivyignore.backend-image.yaml',
               '.trivyignore.frontend-image.yaml',
           )
           for path in files:
@@ -248,20 +247,19 @@ jobs:
       - name: Container image scan — repo-built images (fails on CRITICAL/HIGH)
         # Blocking, per Option 2: this repo can actually fix a finding here
         # (a dependency bump, a base-image pin), unlike a vendor's own base
-        # image. frontend uses .trivyignore.frontend-image.yaml (P5
-        # follow-up, item 1 fully resolved .trivyignore.deps.yaml's
-        # findings, so no merge is needed anymore — frontend-image.yaml
-        # alone covers what's left); every other built image is
-        # Python-based and shares one baseline
-        # (.trivyignore.backend-image.yaml — the same python:3.12-slim
-        # base, so the same findings, on all seven).
+        # image. frontend still carries .trivyignore.frontend-image.yaml
+        # (4 findings vendored inside npm's own CLI, no fix published yet
+        # — P5 follow-up, item 1). The 7 Python-based backend images need
+        # no ignorefile at all: item 3 (pinning python:3.12-slim-bookworm
+        # instead of the floating, trixie-resolving python:3.12-slim)
+        # resolved every finding they used to share.
         run: |
           set -euo pipefail
           while IFS= read -r image; do
             echo "Scanning (blocking) $image ..."
+            extra_args=()
             case "$image" in
-              *-frontend) ignorefile=/repo/.trivyignore.frontend-image.yaml ;;
-              *) ignorefile=/repo/.trivyignore.backend-image.yaml ;;
+              *-frontend) extra_args+=(--ignorefile /repo/.trivyignore.frontend-image.yaml) ;;
             esac
             docker run --rm \
               -v /var/run/docker.sock:/var/run/docker.sock \
@@ -269,7 +267,7 @@ jobs:
               -v "$PWD:/repo" \
               ghcr.io/aquasecurity/trivy:0.74.0 image \
               --severity CRITICAL,HIGH --ignore-unfixed \
-              --ignorefile "$ignorefile" --exit-code 1 "$image"
+              "${extra_args[@]+"${extra_args[@]}"}" --exit-code 1 "$image"
           done < /tmp/built-images.txt
       - name: Container image scan — third-party images (report-only)
         # NOT blocking, per Option 2: postgres/redis are pinned, unbuilt
