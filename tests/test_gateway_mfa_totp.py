@@ -67,15 +67,71 @@ def test_verify_code_rejects_a_replayed_step():
     assert mfa_totp.verify_code(secret, code, last_accepted_step=step) is None
 
 
-def test_verify_code_replay_check_is_scoped_to_the_specific_step(monkeypatch):
-    # A DIFFERENT valid step (e.g. clock drift tolerance) must still work
-    # even if some other step was already accepted — replay prevention is
-    # per-step, not "this secret can only ever be used once."
+# --- Round-1 review (M02): accepted steps must increase MONOTONICALLY ------
+#
+# The original design only rejected an EXACT repeat of last_accepted_step,
+# which let an older step still inside the +/-1 drift window verify
+# successfully after a newer one had already been accepted — a replay, just
+# of a different code. `step <= last_accepted_step` closes that: once step N
+# has been accepted, nothing at or behind N verifies again, ever, regardless
+# of whether N itself is being repeated or a neighboring step is being tried
+# instead.
+
+
+def test_last_accepted_is_current_step_previous_step_is_rejected():
     secret = mfa_totp.generate_secret()
     totp = pyotp.TOTP(secret)
     current_step = int(time.time() // 30)
-    code_now = totp.generate_otp(current_step)
-    code_prev = totp.generate_otp(current_step - 1)
+    previous_code = totp.generate_otp(current_step - 1)
 
-    assert mfa_totp.verify_code(secret, code_prev, last_accepted_step=current_step) == current_step - 1
-    assert mfa_totp.verify_code(secret, code_now, last_accepted_step=current_step - 1) == current_step
+    assert mfa_totp.verify_code(secret, previous_code, last_accepted_step=current_step) is None
+
+
+def test_last_accepted_is_current_step_current_step_is_rejected():
+    secret = mfa_totp.generate_secret()
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time() // 30)
+    current_code = totp.generate_otp(current_step)
+
+    assert mfa_totp.verify_code(secret, current_code, last_accepted_step=current_step) is None
+
+
+def test_last_accepted_is_current_step_next_step_is_accepted_within_drift_window():
+    # The +1 branch of the drift-tolerance window is the only one that can
+    # ever be genuinely newer than an already-accepted current step.
+    secret = mfa_totp.generate_secret()
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time() // 30)
+    next_code = totp.generate_otp(current_step + 1)
+
+    assert mfa_totp.verify_code(secret, next_code, last_accepted_step=current_step) == current_step + 1
+
+
+def test_last_accepted_is_previous_step_current_step_is_accepted():
+    secret = mfa_totp.generate_secret()
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time() // 30)
+    current_code = totp.generate_otp(current_step)
+
+    assert mfa_totp.verify_code(secret, current_code, last_accepted_step=current_step - 1) == current_step
+
+
+def test_last_accepted_is_previous_step_that_same_previous_step_is_rejected():
+    secret = mfa_totp.generate_secret()
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time() // 30)
+    previous_code = totp.generate_otp(current_step - 1)
+
+    assert mfa_totp.verify_code(secret, previous_code, last_accepted_step=current_step - 1) is None
+
+
+def test_no_last_accepted_step_still_supports_the_full_drift_window():
+    # Unchanged behavior for a brand-new enrollment (mfa_last_totp_step is
+    # NULL) — both the previous and current steps inside the tolerance
+    # window verify when there is nothing yet to be monotonic against.
+    secret = mfa_totp.generate_secret()
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time() // 30)
+
+    assert mfa_totp.verify_code(secret, totp.generate_otp(current_step - 1)) == current_step - 1
+    assert mfa_totp.verify_code(secret, totp.generate_otp(current_step)) == current_step

@@ -273,3 +273,64 @@ def test_enroll_start_refuses_without_a_session_or_challenge(client):
     resp = client.post("/mfa/enroll/start", json={})
 
     assert resp.status_code == 401
+
+
+# --- B01 (Round-1 review): exactly one authentication source, never both ---
+#
+# A request naming BOTH a session and a challenge_token could be a browser
+# genuinely holding a stale session for one account alongside a fresh
+# challenge for a different login — _resolve_mfa_principal used to try the
+# session first and silently ignore challenge_token, which would run this
+# route against whichever user the leftover session named instead of the
+# user the challenge is actually for.
+
+
+def test_enroll_start_rejects_a_session_and_challenge_naming_different_users(client):
+    user_a = _make_user(client, username="user-a")
+    user_b = _make_user(client, username="user-b")
+    token_a = _real_session_token(client, user_a, username="user-a")
+    challenge_b = _login_challenge(client, username="user-b")
+
+    resp = client.post(
+        "/mfa/enroll/start",
+        json={"challenge_token": challenge_b},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+
+    assert resp.status_code == 400
+    with client.Session() as s:
+        assert s.get(app_mod.User, user_a).mfa_secret_ciphertext is None
+        assert s.get(app_mod.User, user_b).mfa_secret_ciphertext is None
+
+
+def test_enroll_start_rejects_a_session_and_challenge_for_the_same_user(client):
+    # "Exactly one source" is the contract, not "at most one, unless they
+    # happen to agree" — a matching principal does not earn an exception.
+    user_id = _make_user(client)
+    token = _real_session_token(client, user_id)
+    challenge = _login_challenge(client)
+
+    resp = client.post(
+        "/mfa/enroll/start",
+        json={"challenge_token": challenge},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 400
+    with client.Session() as s:
+        assert s.get(app_mod.User, user_id).mfa_secret_ciphertext is None
+
+
+def test_enroll_confirm_also_rejects_a_session_and_challenge_naming_different_users(client):
+    user_a = _make_user(client, username="user-a")
+    user_b = _make_user(client, username="user-b")
+    token_a = _real_session_token(client, user_a, username="user-a")
+    challenge_b = _login_challenge(client, username="user-b")
+
+    resp = client.post(
+        "/mfa/enroll/confirm",
+        json={"challenge_token": challenge_b, "code": "000000"},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+
+    assert resp.status_code == 400

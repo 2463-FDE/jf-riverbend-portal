@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { setPendingMfaChallenge, setSession } from "../lib/session";
+import { clearPendingMfaChallenge, clearSession, setPendingMfaChallenge, setSession } from "../lib/session";
 import type { LoginResponse } from "../lib/types";
 
 function Logo() {
@@ -50,7 +50,19 @@ export default function LoginPage() {
       // complete either forced enrollment or a login challenge first. See
       // lib/session.ts's PendingMfaChallenge doc comment for what this
       // token does and does not prove.
+      //
+      // Round-1 review (B01): a browser holding a stale session for one
+      // account must never ALSO hold a pending challenge for a different
+      // login — mfa/enroll's post() attaches Authorization whenever a
+      // token exists, and a leftover session from a previous (or
+      // abandoned) sign-in would then reach the gateway alongside this
+      // new challenge_token. Clearing the old session before storing the
+      // new challenge closes that off at the source, not just at the
+      // gateway (see app.py::_resolve_mfa_principal's own fail-closed
+      // fix for the same finding).
       if (!data.token && data.mfa?.challenge_token) {
+        clearSession();
+        clearPendingMfaChallenge();
         setPendingMfaChallenge(data.mfa.challenge_token, Boolean(data.mfa.enrollment_required));
         router.replace(data.mfa.enrollment_required ? "/mfa/enroll" : "/login/mfa");
         return;
@@ -62,6 +74,9 @@ export default function LoginPage() {
         return;
       }
 
+      // Symmetric with the branch above: a full session must not coexist
+      // with a stale pending challenge left over from an earlier attempt.
+      clearPendingMfaChallenge();
       setSession(data.token, data.user);
 
       // Prompt mode never blocks login — this is a nudge, not a gate. An

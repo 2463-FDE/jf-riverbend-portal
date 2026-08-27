@@ -134,6 +134,30 @@ describe("MFA enrollment screen", () => {
     expect((startInit as RequestInit).headers).toMatchObject({ Authorization: "Bearer existing-session-token" });
   });
 
+  it("B01: a pending challenge takes sole precedence over a leftover session token — no Authorization is sent", async () => {
+    // A browser can genuinely be holding BOTH a stale session (an earlier,
+    // unrelated sign-in that was never cleared) and a fresh pending
+    // challenge (from the /login call that just happened) — login/page.tsx
+    // now clears the old session before storing a new challenge, but this
+    // page must not depend on that: post() resolves fresh from storage on
+    // every call and a pending challenge always wins outright.
+    getPendingMfaChallenge.mockReturnValue({ challengeToken: "chal-b", enrollmentRequired: true });
+    getToken.mockReturnValue("leftover-session-for-a-different-user");
+    const fetchMock = vi.fn();
+    fetchMock.mockResolvedValue(jsonResponse({ otpauth_uri: "otpauth://totp/x", manual_entry_key: "K" }));
+    global.fetch = fetchMock;
+
+    render(<MfaEnrollPage />);
+    await screen.findByText(/two-factor authentication/i);
+    fireEvent.click(screen.getByRole("button", { name: /get started/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({ challenge_token: "chal-b" });
+    expect((init as RequestInit).headers).not.toHaveProperty("Authorization");
+  });
+
   it("shows an error and stays on the confirm step for a wrong code", async () => {
     getPendingMfaChallenge.mockReturnValue({ challengeToken: "chal-1", enrollmentRequired: true });
     getToken.mockReturnValue(null);

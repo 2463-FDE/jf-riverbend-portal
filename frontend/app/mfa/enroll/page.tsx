@@ -60,14 +60,31 @@ function MfaEnrollPageInner() {
     }
   }, [router]);
 
+  // Round-1 review (B01): exactly ONE authentication source per request,
+  // never both. Resolved fresh from sessionStorage on every call — not
+  // from the `challengeToken`/`hasSession` React state set by the mount
+  // effect above — so a click that fires before that effect has run (or
+  // a value captured in a stale closure) can never send a leftover
+  // Authorization header alongside a challenge_token, or vice versa. A
+  // pending challenge always wins when one exists: it means this browser
+  // is mid a forced enrollment, which takes precedence over whatever
+  // session happens to still be sitting in storage (see login/page.tsx's
+  // own fix for the matching half of this — it clears the other one
+  // proactively, but this read-time resolution holds even if it didn't).
   async function post<T>(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; data: T & { error?: string; detail?: string } }> {
+    const pending = getPendingMfaChallenge();
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const token = getToken();
-    if (token) headers["Authorization"] = `Bearer ${token}`;
+    let requestBody = body;
+    if (pending) {
+      requestBody = { challenge_token: pending.challengeToken, ...body };
+    } else {
+      const token = getToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+    }
     const res = await fetch(path, {
       method: "POST",
       headers,
-      body: JSON.stringify(challengeToken ? { challenge_token: challengeToken, ...body } : body),
+      body: JSON.stringify(requestBody),
     });
     const data = await res.json();
     return { ok: res.ok, status: res.status, data };

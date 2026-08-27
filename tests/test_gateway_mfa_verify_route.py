@@ -279,6 +279,210 @@ def test_regeneration_requires_an_existing_session(client):
     assert resp.status_code == 401
 
 
+# --- M01 (Round-1 review): the backup-code claim is atomic against an
+# invalidation racing in between the SELECT scan and the claiming UPDATE ---
+
+
+def test_claim_backup_code_helper_rejects_a_row_invalidated_after_selection(client):
+    # The exact scenario the finding describes, as a direct unit test of the
+    # extracted helper: invalidate the row, THEN call the real guarded
+    # UPDATE, and confirm it returns False rather than claiming anyway.
+    user_id, _secret, codes = _enrolled_user_with_secret(client)
+    with client.Session() as s:
+        target = s.query(app_mod.MfaBackupCode).filter_by(user_id=user_id).first()
+        target_id = target.id
+        target.invalidated_at = app_mod.func.now()
+        s.commit()
+
+        claimed = app_mod._claim_backup_code(s, backup_code_id=target_id, user_id=user_id)
+
+        assert claimed is False
+        s.rollback()
+        row = s.get(app_mod.MfaBackupCode, target_id)
+        assert row.used_at is None  # never claimed despite the helper running
+
+
+def test_claim_backup_code_helper_rejects_a_row_owned_by_a_different_user(client):
+    user_a, _secret_a, codes_a = _enrolled_user_with_secret(client, username="user-a")
+    user_b, _secret_b, _codes_b = _enrolled_user_with_secret(client, username="user-b")
+    with client.Session() as s:
+        row_a = s.query(app_mod.MfaBackupCode).filter_by(user_id=user_a).first()
+
+        claimed = app_mod._claim_backup_code(s, backup_code_id=row_a.id, user_id=user_b)
+
+        assert claimed is False
+        s.rollback()
+        row = s.get(app_mod.MfaBackupCode, row_a.id)
+        assert row.used_at is None
+
+
+def test_verify_rejects_a_code_invalidated_between_the_scan_and_the_claim(client, monkeypatch):
+    # Simulates the real race: a regeneration or reset commits its
+    # invalidation in the window between this route's SELECT-time hash scan
+    # and the claiming UPDATE. verify_password is the call that sits right
+    # at that boundary (it runs once per candidate row, inside the scan
+    # loop) — wrapping it to invalidate the matched row the instant it
+    # would otherwise succeed reproduces the race deterministically, without
+    # threads.
+    user_id, _secret, codes = _enrolled_user_with_secret(client)
+    challenge = _login_challenge(client)
+    target_code = codes[0]
+
+    real_verify_password = app_mod.verify_password
+    invalidated = []
+
+    def racy_verify_password(candidate, encoded):
+        result = real_verify_password(candidate, encoded)
+        if result and not invalidated:
+            invalidated.append(True)
+            # Only the ONE row this call is checking — a real concurrent
+            # regeneration/reset would invalidate every active code, but
+            # this test isolates the exact race (this row's own
+            # invalidated_at flips between the SELECT scan and the
+            # claiming UPDATE) rather than incidentally also removing the
+            # "retry with a different, still-valid code" cross-check below.
+            with client.Session() as s:
+                s.execute(
+                    app_mod.update(app_mod.MfaBackupCode)
+                    .where(app_mod.MfaBackupCode.code_hash == encoded)
+                    .values(invalidated_at=app_mod.func.now())
+                )
+                s.commit()
+        return result
+
+    monkeypatch.setattr(app_mod, "verify_password", racy_verify_password)
+    create_session_calls = []
+    monkeypatch.setattr(
+        app_mod, "create_session",
+        lambda *a, **k: create_session_calls.append(a) or "unexpected-session",
+    )
+
+    resp = client.post("/mfa/verify", json={"challenge_token": challenge, "backup_code": target_code})
+
+    assert resp.status_code == 401
+    assert create_session_calls == []
+    # The challenge was never consumed — a genuinely valid factor (a
+    # different, still-active backup code) still completes the login.
+    assert f"mfa_challenge:{challenge}" not in client.fake_redis.deleted
+    resp2 = client.post("/mfa/verify", json={"challenge_token": challenge, "backup_code": codes[1]})
+    assert resp2.status_code == 200
+
+
+# --- M02 (Round-1 review): monotonic TOTP steps + atomic step claim --------
+
+
+def test_a_previous_step_code_is_rejected_after_the_current_step_was_accepted(client):
+    user_id, secret, _codes = _enrolled_user_with_secret(client)
+    totp = pyotp.TOTP(secret)
+    current_step = int(__import__("time").time() // 30)
+
+    challenge1 = _login_challenge(client)
+    ok = client.post("/mfa/verify", json={"challenge_token": challenge1, "code": totp.generate_otp(current_step)})
+    assert ok.status_code == 200
+
+    challenge2 = _login_challenge(client)
+    replay = client.post(
+        "/mfa/verify", json={"challenge_token": challenge2, "code": totp.generate_otp(current_step - 1)}
+    )
+    assert replay.status_code == 401
+
+
+def test_the_exact_same_step_is_rejected_on_a_second_attempt(client):
+    user_id, secret, _codes = _enrolled_user_with_secret(client)
+    code = pyotp.TOTP(secret).now()
+
+    challenge1 = _login_challenge(client)
+    first = client.post("/mfa/verify", json={"challenge_token": challenge1, "code": code})
+    assert first.status_code == 200
+
+    challenge2 = _login_challenge(client)
+    second = client.post("/mfa/verify", json={"challenge_token": challenge2, "code": code})
+    assert second.status_code == 401
+
+
+def test_a_strictly_newer_step_succeeds_after_an_earlier_one_was_accepted(client):
+    user_id, secret, _codes = _enrolled_user_with_secret(client)
+    totp = pyotp.TOTP(secret)
+    current_step = int(__import__("time").time() // 30)
+
+    challenge1 = _login_challenge(client)
+    first = client.post("/mfa/verify", json={"challenge_token": challenge1, "code": totp.generate_otp(current_step)})
+    assert first.status_code == 200
+
+    challenge2 = _login_challenge(client)
+    second = client.post(
+        "/mfa/verify", json={"challenge_token": challenge2, "code": totp.generate_otp(current_step + 1)}
+    )
+    assert second.status_code == 200
+
+
+def test_a_replay_rejection_does_not_consume_the_challenge(client):
+    user_id, secret, _codes = _enrolled_user_with_secret(client)
+    code = pyotp.TOTP(secret).now()
+    challenge1 = _login_challenge(client)
+    client.post("/mfa/verify", json={"challenge_token": challenge1, "code": code})  # accepted
+
+    challenge2 = _login_challenge(client)
+    replay = client.post("/mfa/verify", json={"challenge_token": challenge2, "code": code})
+    assert replay.status_code == 401
+    assert f"mfa_challenge:{challenge2}" not in client.fake_redis.deleted
+
+    # Retry the SAME challenge with a genuinely newer, valid code succeeds.
+    totp = pyotp.TOTP(secret)
+    current_step = int(__import__("time").time() // 30)
+    retry = client.post(
+        "/mfa/verify", json={"challenge_token": challenge2, "code": totp.generate_otp(current_step + 1)}
+    )
+    assert retry.status_code == 200
+
+
+def test_claim_totp_step_helper_rejects_equal_and_lower_stored_values(client):
+    user_id, _secret, _codes = _enrolled_user_with_secret(client)
+    with client.Session() as s:
+        user = s.get(app_mod.User, user_id)
+        user.mfa_last_totp_step = 100
+        s.commit()
+
+        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=100) is False
+        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=99) is False
+        s.rollback()
+        user = s.get(app_mod.User, user_id)
+        assert user.mfa_last_totp_step == 100
+
+
+def test_claim_totp_step_helper_accepts_a_strictly_greater_value(client):
+    user_id, _secret, _codes = _enrolled_user_with_secret(client)
+    with client.Session() as s:
+        user = s.get(app_mod.User, user_id)
+        user.mfa_last_totp_step = 100
+        s.commit()
+
+        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=101) is True
+        s.commit()
+        user = s.get(app_mod.User, user_id)
+        assert user.mfa_last_totp_step == 101
+
+
+def test_claim_totp_step_helper_accepts_the_first_ever_claim_from_null(client):
+    user_id, _secret, _codes = _enrolled_user_with_secret(client)
+    with client.Session() as s:
+        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=1) is True
+
+
+def test_two_concurrent_claims_of_the_same_step_only_one_succeeds(client):
+    # Simulates two requests racing to persist the same accepted step —
+    # exactly the case verify_code's own monotonic check cannot catch on
+    # its own (both would compute the same valid step from two independent
+    # calls). Only the guarded UPDATE decides the winner.
+    user_id, _secret, _codes = _enrolled_user_with_secret(client)
+    with client.Session() as s:
+        first = app_mod._claim_totp_step(s, user_id=user_id, candidate_step=500)
+        second = app_mod._claim_totp_step(s, user_id=user_id, candidate_step=500)
+        s.commit()
+
+    assert (first, second) == (True, False)
+
+
 def test_regeneration_refuses_for_an_unenrolled_account(client):
     with client.Session() as s:
         user = app_mod.User(

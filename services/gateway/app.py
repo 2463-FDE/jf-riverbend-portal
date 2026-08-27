@@ -798,14 +798,32 @@ def me(session: dict = Depends(require_session)):
 def _resolve_mfa_principal(
     db: Session, authorization: Optional[str], challenge_token: Optional[str]
 ) -> Tuple[User, bool]:
-    """An active User row from EITHER a valid session OR a valid pending
-    'login' challenge — never both required, either is sufficient. Returns
-    (user, via_challenge) so callers that only mint a session for the
-    challenge path (confirm_mfa_enrollment) don't have to re-derive which
-    one actually matched. Raises 401 if neither resolves. Session is tried
-    first: an existing session takes precedence if a caller somehow sends
-    both, and it never touches Redis a second time to find out.
+    """An active User row from EXACTLY ONE of: a valid session, OR a valid
+    pending 'login' challenge. Returns (user, via_challenge).
+
+    Round-1 review (B01): this used to try the session first and silently
+    ignore challenge_token whenever one was present, on the theory that a
+    caller sending both was presumably the same principal via two routes.
+    It is not a safe assumption — the browser can genuinely be holding a
+    stale session for one account AND a fresh challenge for a different
+    login at the same time (frontend/app/mfa/enroll/page.tsx's post()
+    attaches whichever value happens to be in storage; login/page.tsx now
+    clears the other one proactively, but this route must not depend on
+    the frontend doing that correctly). Silently preferring the session
+    would let a fresh challenge for user B confirm enrollment/return data
+    scoped to whatever user A's leftover session names instead — two
+    different principals in one request, one of them attacker-controlled
+    if a public/shared browser is involved.
+
+    A request supplying BOTH is refused outright, even when they happen to
+    name the same user — "exactly one source" is the contract, not "at
+    most one, unless they happen to agree." A caller with a genuine reason
+    to hold both (there isn't one in this UI) can complete the challenge
+    first, or use the session alone.
     """
+    if authorization and challenge_token:
+        raise HTTPException(status_code=400, detail="supply exactly one of a session or a challenge_token")
+
     if authorization:
         sess = get_session(_bearer(authorization))
         if sess:
@@ -814,7 +832,7 @@ def _resolve_mfa_principal(
                 user = db.get(User, user_id)
                 if user is not None and user.is_active:
                     return user, False
-    if challenge_token:
+    elif challenge_token:
         challenge = get_mfa_challenge(challenge_token)
         if challenge and challenge.get("purpose") == "login":
             user = db.get(User, challenge["user_id"])
@@ -842,6 +860,67 @@ def _generate_and_store_backup_codes(db: Session, user: User) -> list:
     for code in codes:
         db.add(MfaBackupCode(user_id=user.id, code_hash=hash_password(code)))
     return codes
+
+
+def _claim_backup_code(db: Session, *, backup_code_id: int, user_id: int) -> bool:
+    """The ENTIRE validity check, as one guarded UPDATE — not a re-check of
+    what an earlier SELECT already looked at.
+
+    Round-1 review (M01): verify_mfa_challenge used to SELECT active codes
+    (used_at IS NULL AND invalidated_at IS NULL), pick a match by hashing,
+    and then UPDATE ... WHERE id = :id AND used_at IS NULL — dropping the
+    invalidated_at condition at the exact step meant to be atomic. A
+    regeneration or a supervisor reset committed in the window between
+    those two statements sets invalidated_at, which the SELECT already
+    saw as NULL and the UPDATE never re-checked — so a code a reset just
+    invalidated could still be claimed. Every condition that made the row
+    valid in the first place (ownership, unused, not invalidated) has to
+    be part of the SAME statement that claims it, or "atomic" only covers
+    half the race.
+
+    Returns True iff exactly one row was claimed. Does not commit — the
+    caller's transaction does, alongside minting the session."""
+    claimed = db.execute(
+        update(MfaBackupCode)
+        .where(
+            MfaBackupCode.id == backup_code_id,
+            MfaBackupCode.user_id == user_id,
+            MfaBackupCode.used_at.is_(None),
+            MfaBackupCode.invalidated_at.is_(None),
+        )
+        .values(used_at=func.now())
+        .returning(MfaBackupCode.id)
+    ).scalar_one_or_none()
+    return claimed is not None
+
+
+def _claim_totp_step(db: Session, *, user_id: int, candidate_step: int) -> bool:
+    """Atomic compare-and-set for users.mfa_last_totp_step — the
+    authoritative TOTP replay guard, not the ORM assignment
+    `user.mfa_last_totp_step = step` it replaces.
+
+    Round-1 review (M02): mfa_totp.verify_code's own last_accepted_step
+    check only prevents SEQUENTIAL replay within one process's view of
+    `user.mfa_last_totp_step` — it says nothing about two concurrent
+    requests that both read the same (not-yet-updated) value and both
+    compute a valid step for the current 30s window. Persisting the
+    accepted step via a plain UPDATE (or an ORM attribute set that
+    flushes unconditionally) lets both win. This UPDATE only succeeds when
+    the stored value is still NULL or strictly less than candidate_step,
+    so of two concurrent claims for the same step at most one returns
+    True — the loser must be treated as invalid, not silently retried.
+
+    Returns True iff exactly one row was updated. Does not commit."""
+    claimed = db.execute(
+        update(User)
+        .where(
+            User.id == user_id,
+            (User.mfa_last_totp_step.is_(None)) | (User.mfa_last_totp_step < candidate_step),
+        )
+        .values(mfa_last_totp_step=candidate_step)
+        .returning(User.id)
+    ).scalar_one_or_none()
+    return claimed is not None
 
 
 class MfaEnrollStartRequest(BaseModel):
@@ -988,7 +1067,18 @@ def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
         if step is None:
             _write_audit(db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=totp")
             raise HTTPException(status_code=401, detail="invalid code")
-        user.mfa_last_totp_step = step
+        # Atomic compare-and-set (_claim_totp_step, M02): the ORM assignment
+        # this replaced (`user.mfa_last_totp_step = step`) is not a claim —
+        # two concurrent requests that both compute a valid step for the
+        # same window would both pass verify_code above and both flush the
+        # same value. Only a guarded UPDATE lets at most one of them win;
+        # the loser is treated as invalid below, same as a wrong code, and
+        # must NOT consume the challenge (retry with a genuinely newer code
+        # is still possible within the challenge's own TTL).
+        if not _claim_totp_step(db, user_id=user.id, candidate_step=step):
+            db.rollback()
+            _write_audit(db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=totp")
+            raise HTTPException(status_code=401, detail="invalid code")
     else:
         candidate = mfa_backup_codes.normalize(req.backup_code)
         active_codes = db.execute(
@@ -1008,16 +1098,14 @@ def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
                 db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=backup_code"
             )
             raise HTTPException(status_code=401, detail="invalid backup code")
-        # Atomic claim (mirrors _activate_invitation's UPDATE ... RETURNING
-        # pattern above): a concurrent redemption of the same code cannot
-        # also succeed, since only the first UPDATE finds used_at still NULL.
-        claimed = db.execute(
-            update(MfaBackupCode)
-            .where(MfaBackupCode.id == matched_id, MfaBackupCode.used_at.is_(None))
-            .values(used_at=func.now())
-            .returning(MfaBackupCode.id)
-        ).scalar_one_or_none()
-        if claimed is None:
+        # Atomic claim (_claim_backup_code, M01): the SELECT above already
+        # filtered on used_at/invalidated_at, but that snapshot can go
+        # stale before this statement runs (a regeneration or reset
+        # committing in between) — the claiming UPDATE re-checks every
+        # validity condition itself rather than trusting the SELECT's
+        # now-possibly-outdated view. See that helper's own docstring.
+        if not _claim_backup_code(db, backup_code_id=matched_id, user_id=user.id):
+            db.rollback()
             _write_audit(
                 db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=backup_code"
             )
