@@ -265,6 +265,35 @@ def healthz():
     return {"status": "ok", "service": settings.service_name}
 
 
+def _stage_audit(db: Session, *, actor: str, message: str) -> None:
+    """Add an MFA audit row to the caller's current transaction.
+
+    Success paths that mutate MFA credential state use this helper so the
+    state change and the audit row either commit together or both roll back.
+    It deliberately does not flush or commit.
+    """
+    db.add(AuditLog(actor=actor, message=message))
+
+
+def _commit_mfa_transaction(db: Session, *, audit_events: list[tuple[str, str]]) -> None:
+    """Stage `audit_events` and commit the current MFA transaction once.
+
+    Round-2 review (B02): committing credential state and then calling the
+    independently-committing _write_audit left successful state behind when
+    the audit INSERT failed. Every state-changing MFA success path now comes
+    through this boundary, so an audit failure rolls the credential mutation
+    back before any Redis session/challenge side effect occurs.
+    """
+    try:
+        for actor, message in audit_events:
+            _stage_audit(db, actor=actor, message=message)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("mfa: failed to commit credential state with audit event")
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+
 def _write_audit(db: Session, *, actor: str, message: str) -> None:
     """Same append-only audit_logs table records-service writes to
     (migrations 026/027; ADR 0001 mirror, see models.AuditLog) — MFA events
@@ -275,12 +304,12 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
     below is reviewed against that invariant (see
     tests/test_gateway_mfa_no_secrets_in_audit.py).
 
-    Fails closed, same as records-service's identical helper: an audit
-    write that doesn't commit turns into a 503 for the whole request rather
-    than letting an MFA event complete with zero durable trace of it.
+    This independently-committing form is only for failure/informational
+    events with no credential-state mutation in the transaction. Successful
+    state changes use _commit_mfa_transaction instead.
     """
     try:
-        db.add(AuditLog(actor=actor, message=message))
+        _stage_audit(db, actor=actor, message=message)
         db.commit()
     except SQLAlchemyError:
         db.rollback()
@@ -923,6 +952,49 @@ def _claim_totp_step(db: Session, *, user_id: int, candidate_step: int) -> bool:
     return claimed is not None
 
 
+def _claim_mfa_enrollment(
+    db: Session,
+    *,
+    user_id: int,
+    candidate_step: int,
+    expected_ciphertext: str,
+    expected_key_version: str,
+    mark_login: bool,
+) -> bool:
+    """Atomically transition one pending enrollment to confirmed.
+
+    Round-2 review (M03): a plain ORM assignment allowed two confirmations to
+    observe an unenrolled user, accept the same first TOTP step, generate two
+    backup-code batches, and potentially mint two sessions. The guarded
+    UPDATE gives exactly one request ownership of the transition. Binding the
+    predicate to the ciphertext/key version also prevents confirming a stale
+    secret if a concurrent /mfa/enroll/start replaced it after verification.
+
+    Returns True iff this transaction claimed the pending enrollment. Does
+    not commit; backup codes and audit rows join the same transaction.
+    """
+    values = {
+        "mfa_enrolled_at": func.now(),
+        "mfa_last_totp_step": candidate_step,
+    }
+    if mark_login:
+        values["last_login_at"] = func.now()
+
+    claimed = db.execute(
+        update(User)
+        .where(
+            User.id == user_id,
+            User.mfa_enrolled_at.is_(None),
+            User.mfa_secret_ciphertext == expected_ciphertext,
+            User.mfa_secret_key_version == expected_key_version,
+            (User.mfa_last_totp_step.is_(None)) | (User.mfa_last_totp_step < candidate_step),
+        )
+        .values(**values)
+        .returning(User.id)
+    ).scalar_one_or_none()
+    return claimed is not None
+
+
 class MfaEnrollStartRequest(BaseModel):
     challenge_token: Optional[str] = None
 
@@ -955,9 +1027,10 @@ def start_mfa_enrollment(
     envelope, key_version = mfa_crypto.encrypt_totp_secret(user.id, secret)
     user.mfa_secret_ciphertext = envelope
     user.mfa_secret_key_version = key_version
-    db.commit()
-
-    _write_audit(db, actor=user.username, message=f"mfa_enrollment_started user_id={user.id}")
+    _commit_mfa_transaction(
+        db,
+        audit_events=[(user.username, f"mfa_enrollment_started user_id={user.id}")],
+    )
     log.info("mfa: enrollment started user=%s", user.username)
 
     return {
@@ -1001,21 +1074,40 @@ def confirm_mfa_enrollment(
         _write_audit(db, actor=user.username, message=f"mfa_enrollment_confirm_failed user_id={user.id}")
         raise HTTPException(status_code=401, detail="invalid code")
 
-    user.mfa_enrolled_at = func.now()
-    user.mfa_last_totp_step = step
+    if not _claim_mfa_enrollment(
+        db,
+        user_id=user.id,
+        candidate_step=step,
+        expected_ciphertext=user.mfa_secret_ciphertext,
+        expected_key_version=user.mfa_secret_key_version,
+        mark_login=via_challenge,
+    ):
+        db.rollback()
+        _write_audit(
+            db,
+            actor=user.username,
+            message=f"mfa_enrollment_confirm_failed user_id={user.id} reason=state_changed",
+        )
+        raise HTTPException(status_code=409, detail="mfa enrollment was already completed or changed")
+
     codes = _generate_and_store_backup_codes(db, user)
 
+    _commit_mfa_transaction(
+        db,
+        audit_events=[
+            (user.username, f"mfa_enrollment_confirmed user_id={user.id}"),
+            (user.username, f"mfa_backup_codes_generated user_id={user.id} reason=enrollment"),
+        ],
+    )
+
+    # Redis effects come only after the credential state and both audit rows
+    # committed. Create the replacement session before consuming the
+    # challenge; if Redis cannot mint it, the challenge remains available and
+    # no unaudited session exists.
     session_out = None
     if via_challenge:
-        destroy_mfa_challenge(req.challenge_token)
-        user.last_login_at = func.now()
         session_out = create_session(user.id, user.username, user.role)
-
-    db.commit()
-    _write_audit(db, actor=user.username, message=f"mfa_enrollment_confirmed user_id={user.id}")
-    _write_audit(
-        db, actor=user.username, message=f"mfa_backup_codes_generated user_id={user.id} reason=enrollment"
-    )
+        destroy_mfa_challenge(req.challenge_token)
     log.info("mfa: enrollment confirmed user=%s", user.username)
 
     out = {"status": "enrolled", "backup_codes": codes}
@@ -1118,11 +1210,16 @@ def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
             )
         ).scalar_one()
 
-    destroy_mfa_challenge(req.challenge_token)
     user.last_login_at = func.now()
-    db.commit()
+    _commit_mfa_transaction(
+        db,
+        audit_events=[(user.username, f"mfa_verified user_id={user.id} method={method}")],
+    )
+
+    # Do not create or consume Redis authentication state until the factor
+    # claim and its audit row are durably committed together.
     token = create_session(user.id, user.username, user.role)
-    _write_audit(db, actor=user.username, message=f"mfa_verified user_id={user.id} method={method}")
+    destroy_mfa_challenge(req.challenge_token)
     log.info("mfa: verified user=%s method=%s", user.username, method)
 
     out = {
@@ -1147,9 +1244,11 @@ def regenerate_backup_codes(session: dict = Depends(require_session), db: Sessio
         raise HTTPException(status_code=409, detail="mfa is not enrolled for this account")
 
     codes = _generate_and_store_backup_codes(db, user)
-    db.commit()
-    _write_audit(
-        db, actor=user.username, message=f"mfa_backup_codes_generated user_id={user.id} reason=regeneration"
+    _commit_mfa_transaction(
+        db,
+        audit_events=[
+            (user.username, f"mfa_backup_codes_generated user_id={user.id} reason=regeneration")
+        ],
     )
     log.info("mfa: backup codes regenerated user=%s", user.username)
     return {"backup_codes": codes}
@@ -1225,8 +1324,12 @@ def reset_mfa(
         .values(invalidated_at=func.now())
     )
     actor_label = session.get("username") or f"user_id={actor_id}"
-    db.add(AuditLog(actor=actor_label, message=f"mfa_reset target_user_id={target.id} target_username={target.username}"))
-    db.commit()
+    _commit_mfa_transaction(
+        db,
+        audit_events=[
+            (actor_label, f"mfa_reset target_user_id={target.id} target_username={target.username}")
+        ],
+    )
 
     log.info("mfa: reset for user=%s by=%s", target.username, actor_label)
     return {"status": "reset", "username": target.username}

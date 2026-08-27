@@ -11,7 +11,8 @@ import base64
 import pyotp
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -481,6 +482,60 @@ def test_two_concurrent_claims_of_the_same_step_only_one_succeeds(client):
         s.commit()
 
     assert (first, second) == (True, False)
+
+
+# --- Round-2 review: credential state and success audit commit together ------
+
+
+def _fail_audit_inserts(session, _flush_context, _instances):
+    if any(isinstance(obj, app_mod.AuditLog) for obj in session.new):
+        raise SQLAlchemyError("forced audit insert failure")
+
+
+def test_totp_claim_rolls_back_and_keeps_challenge_when_audit_insert_fails(client, monkeypatch):
+    user_id, secret, _codes = _enrolled_user_with_secret(client)
+    challenge = _login_challenge(client)
+    create_session_calls = []
+    monkeypatch.setattr(
+        app_mod,
+        "create_session",
+        lambda *args, **kwargs: create_session_calls.append(args) or "unexpected-session",
+    )
+
+    event.listen(client.Session.class_, "before_flush", _fail_audit_inserts)
+    try:
+        resp = client.post(
+            "/mfa/verify",
+            json={"challenge_token": challenge, "code": pyotp.TOTP(secret).now()},
+        )
+    finally:
+        event.remove(client.Session.class_, "before_flush", _fail_audit_inserts)
+
+    assert resp.status_code == 503
+    assert create_session_calls == []
+    assert f"mfa_challenge:{challenge}" in client.fake_redis._store
+    with client.Session() as s:
+        assert s.get(app_mod.User, user_id).mfa_last_totp_step is None
+
+
+def test_regeneration_rolls_back_old_code_invalidation_when_audit_insert_fails(client):
+    user_id, _secret, _codes = _enrolled_user_with_secret(client)
+    token = app_mod.create_session(user_id, "drnguyen", "clinician")
+
+    event.listen(client.Session.class_, "before_flush", _fail_audit_inserts)
+    try:
+        resp = client.post(
+            "/mfa/backup-codes/regenerate",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        event.remove(client.Session.class_, "before_flush", _fail_audit_inserts)
+
+    assert resp.status_code == 503
+    with client.Session() as s:
+        rows = s.query(app_mod.MfaBackupCode).filter_by(user_id=user_id).all()
+        assert len(rows) == 10
+        assert all(row.used_at is None and row.invalidated_at is None for row in rows)
 
 
 def test_regeneration_refuses_for_an_unenrolled_account(client):

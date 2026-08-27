@@ -10,7 +10,8 @@ import base64
 import pyotp
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -73,6 +74,7 @@ def client(monkeypatch):
     app_mod.app.dependency_overrides[app_mod.get_db] = fake_db
     tc = TestClient(app_mod.app)
     tc.Session = Session
+    tc.fake_redis = fake
     yield tc
     app_mod.app.dependency_overrides.clear()
 
@@ -334,3 +336,101 @@ def test_enroll_confirm_also_rejects_a_session_and_challenge_naming_different_us
     )
 
     assert resp.status_code == 400
+
+
+# --- Round-2 review: enrollment state/audit transaction and atomic claim -----
+
+
+def _fail_audit_inserts(session, _flush_context, _instances):
+    if any(isinstance(obj, app_mod.AuditLog) for obj in session.new):
+        raise SQLAlchemyError("forced audit insert failure")
+
+
+def test_enroll_start_rolls_back_the_secret_when_its_audit_insert_fails(client):
+    user_id = _make_user(client)
+    challenge = _login_challenge(client)
+    event.listen(client.Session.class_, "before_flush", _fail_audit_inserts)
+    try:
+        resp = client.post("/mfa/enroll/start", json={"challenge_token": challenge})
+    finally:
+        event.remove(client.Session.class_, "before_flush", _fail_audit_inserts)
+
+    assert resp.status_code == 503
+    with client.Session() as s:
+        user = s.get(app_mod.User, user_id)
+        assert user.mfa_secret_ciphertext is None
+        assert user.mfa_secret_key_version is None
+
+
+def test_enroll_confirm_rolls_back_state_and_keeps_challenge_when_audit_insert_fails(client, monkeypatch):
+    user_id = _make_user(client)
+    challenge = _login_challenge(client)
+    secret = client.post("/mfa/enroll/start", json={"challenge_token": challenge}).json()["manual_entry_key"]
+    code = pyotp.TOTP(secret).now()
+    create_session_calls = []
+    monkeypatch.setattr(
+        app_mod,
+        "create_session",
+        lambda *args, **kwargs: create_session_calls.append(args) or "unexpected-session",
+    )
+
+    event.listen(client.Session.class_, "before_flush", _fail_audit_inserts)
+    try:
+        resp = client.post("/mfa/enroll/confirm", json={"challenge_token": challenge, "code": code})
+    finally:
+        event.remove(client.Session.class_, "before_flush", _fail_audit_inserts)
+
+    assert resp.status_code == 503
+    assert create_session_calls == []
+    assert f"mfa_challenge:{challenge}" in client.fake_redis._store
+    with client.Session() as s:
+        user = s.get(app_mod.User, user_id)
+        assert user.mfa_enrolled_at is None
+        assert user.mfa_last_totp_step is None
+        assert s.query(app_mod.MfaBackupCode).filter_by(user_id=user_id).count() == 0
+
+
+def test_only_one_atomic_claim_can_confirm_a_pending_enrollment(client):
+    user_id = _make_user(client)
+    challenge = _login_challenge(client)
+    client.post("/mfa/enroll/start", json={"challenge_token": challenge})
+
+    with client.Session() as s:
+        user = s.get(app_mod.User, user_id)
+        kwargs = {
+            "user_id": user_id,
+            "candidate_step": 500,
+            "expected_ciphertext": user.mfa_secret_ciphertext,
+            "expected_key_version": user.mfa_secret_key_version,
+            "mark_login": True,
+        }
+        first = app_mod._claim_mfa_enrollment(s, **kwargs)
+        second = app_mod._claim_mfa_enrollment(s, **kwargs)
+        s.commit()
+
+    assert (first, second) == (True, False)
+
+
+def test_losing_enrollment_confirmation_generates_no_codes_or_session(client, monkeypatch):
+    user_id = _make_user(client)
+    challenge = _login_challenge(client)
+    secret = client.post("/mfa/enroll/start", json={"challenge_token": challenge}).json()["manual_entry_key"]
+    code = pyotp.TOTP(secret).now()
+    monkeypatch.setattr(app_mod, "_claim_mfa_enrollment", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        app_mod,
+        "_generate_and_store_backup_codes",
+        lambda *args, **kwargs: pytest.fail("losing confirmation generated backup codes"),
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "create_session",
+        lambda *args, **kwargs: pytest.fail("losing confirmation minted a session"),
+    )
+
+    resp = client.post("/mfa/enroll/confirm", json={"challenge_token": challenge, "code": code})
+
+    assert resp.status_code == 409
+    assert f"mfa_challenge:{challenge}" in client.fake_redis._store
+    with client.Session() as s:
+        assert s.query(app_mod.MfaBackupCode).filter_by(user_id=user_id).count() == 0
