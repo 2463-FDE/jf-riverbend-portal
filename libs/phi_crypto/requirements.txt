@@ -1,0 +1,6 @@
+# libs/phi_crypto's own dependency, for reference — mirrors
+# libs/tracing/requirements.txt's pattern (this repo has no shared install
+# step for libs/, so each consuming service's own requirements.txt must
+# list this directly; see services/intake-service/requirements.txt and
+# services/records-service/requirements.txt).
+cryptography==50.0.1
