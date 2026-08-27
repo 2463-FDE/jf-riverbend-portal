@@ -686,12 +686,35 @@ CREATE TRIGGER agent_draft_citation_guard_trigger
 -- ---------------------------------------------------------------------------
 -- Release of Information (ROI)
 -- ---------------------------------------------------------------------------
--- A request to release records to a third party. Migration 029 (w8-planner-2)
--- added authorization_reference/signed_at/signed_by, and roi-service now
--- refuses to fulfill a request unless all three are supplied — closing the
--- 45 CFR 164.508 leg of the DEBT D12 gap services/roi-service/app.py's
--- module comment used to name in full. There is still no place to record a
--- 164.522 agreed restriction — that leg remains open, unchanged.
+-- A persisted, human-reviewed 45 CFR 164.508 authorization record — NOT a
+-- fresh signer/reference/timestamp payload trusted at the moment of
+-- fulfillment (029's original, weaker design). Fulfillment loads one of
+-- these by id and revalidates status/expiry/patient/recipient/scope; see
+-- migration 030 and services/roi-service/app.py::fulfill_roi_request.
+CREATE TABLE IF NOT EXISTS roi_authorizations (
+    id                            SERIAL PRIMARY KEY,
+    patient_id                    INTEGER NOT NULL REFERENCES patients(id),
+    recipient                     TEXT NOT NULL,
+    purpose                       TEXT,
+    scope_start                   TEXT,  -- NULL = no date-range limit stated
+    scope_end                     TEXT,
+    signature_evidence_reference  TEXT NOT NULL,
+    signature_evidence_digest     TEXT,
+    signed_by                     TEXT NOT NULL,
+    signed_at                     TIMESTAMPTZ NOT NULL,
+    expires_at                    TIMESTAMPTZ,
+    status                        TEXT NOT NULL DEFAULT 'pending',  -- pending | valid | rejected | revoked
+    reviewed_by                   TEXT,
+    reviewed_at                   TIMESTAMPTZ,
+    revoked_at                    TIMESTAMPTZ,
+    representative_authority      TEXT,  -- NULL = patient signed for themselves
+    created_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A request to release records to a third party. authorization_reference/
+-- signed_at/signed_by (029) are still populated at fulfillment time, but
+-- now copied FROM the loaded, validated roi_authorizations row referenced
+-- by authorization_id — never from caller-supplied input.
 CREATE TABLE IF NOT EXISTS roi_requests (
     id                       SERIAL PRIMARY KEY,
     patient_id               INTEGER NOT NULL REFERENCES patients(id),
@@ -702,27 +725,51 @@ CREATE TABLE IF NOT EXISTS roi_requests (
     date_range_start         TEXT,
     date_range_end           TEXT,
     status                   TEXT NOT NULL DEFAULT 'pending',  -- pending | fulfilled | denied
+    authorization_id         INTEGER REFERENCES roi_authorizations(id),
     authorization_reference  TEXT,  -- set at fulfillment; see roi-service's fulfill route
     authorization_signed_at  TIMESTAMPTZ,
     authorization_signed_by  TEXT,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
-    -- no restriction tracking (164.522) — deliberately still out of scope
 );
 
--- Disclosures (what actually went out). Carries its OWN copy of
--- authorization_reference/purpose (not just a roi_request_id FK) so a
--- 164.528 accounting of disclosures describes what was true AT THE TIME OF
--- DISCLOSURE, unaffected by any later edit to the request row — read back via
--- GET /roi/patients/{id}/accounting.
+-- Disclosures (what actually went out) — every disclosure is logged here
+-- internally regardless of type, but this is NOT the same thing as a formal
+-- 45 CFR 164.528 accounting of disclosures: 164.528(a)(2) EXEMPTS
+-- disclosures made pursuant to a valid 164.508 authorization from the
+-- mandatory accounting requirement, which is exactly what this table's
+-- rows are (see fulfill_roi_request). A true 164.528 accounting would need
+-- to track the NON-exempt categories this system does not model at all
+-- (public health, law enforcement, judicial/administrative proceedings,
+-- etc.) — do not describe this table or GET /roi/patients/{id}/accounting
+-- as satisfying 164.528; it is an internal disclosure log with 164.528-
+-- shaped fields, not a substitute for one. Carries its OWN copy of
+-- authorization_reference/purpose (not just a roi_request_id FK) so this
+-- log describes what was true AT THE TIME OF DISCLOSURE, unaffected by any
+-- later edit to the request or authorization row.
 CREATE TABLE IF NOT EXISTS disclosures (
     id                       SERIAL PRIMARY KEY,
-    patient_id               INTEGER NOT NULL REFERENCES patients(id),
+    patient_id                INTEGER NOT NULL REFERENCES patients(id),
     roi_request_id           INTEGER REFERENCES roi_requests(id),
+    authorization_id         INTEGER REFERENCES roi_authorizations(id),
     disclosed_to             TEXT,
     disclosed_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     authorization_reference  TEXT,
     purpose                  TEXT
-    -- no restriction tracking (164.522) — deliberately still out of scope
+);
+
+-- Narrowly scoped patient disclosure-restriction record (45 CFR 164.522) —
+-- NOT a general consent-management platform: no category taxonomy, no
+-- per-record-type scoping, no expiration logic beyond an explicit revoke.
+-- Rechecked inside fulfill_roi_request's own transaction; an active,
+-- matching row refuses fulfillment outright.
+CREATE TABLE IF NOT EXISTS roi_disclosure_restrictions (
+    id          SERIAL PRIMARY KEY,
+    patient_id  INTEGER NOT NULL REFERENCES patients(id),
+    recipient   TEXT,  -- NULL = blanket restriction; set = blocks this recipient only
+    reason      TEXT,
+    active      BOOLEAN NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at  TIMESTAMPTZ
 );
 
 -- ---------------------------------------------------------------------------

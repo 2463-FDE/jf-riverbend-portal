@@ -5,24 +5,30 @@ Replaces the old "staff emails a PDF" workflow: create an ROI request, fulfill
 it (release records to the named recipient), and read back what was disclosed.
 """
 import hmac
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db
 from logging_config import configure
-from models import Disclosure, Patient, Record, RoiRequest
+from models import Disclosure, Patient, Record, RoiAuthorization, RoiDisclosureRestriction, RoiRequest
 from schemas import (
+    AuthorizationCreate,
+    AuthorizationOut,
+    AuthorizationRevoke,
+    AuthorizationReview,
     DisclosureAccounting,
     DisclosureAccountingEntry,
-    DisclosureRecords,
-    FulfillAuthorization,
+    FulfillRequest,
     FulfillResult,
     RecordOut,
+    RestrictionCreate,
+    RestrictionOut,
     RoiRequestCreate,
     RoiRequestOut,
 )
@@ -65,8 +71,10 @@ def _verify_internal_token(x_internal_token: Optional[str] = Header(default=None
     _MIN_INTERNAL_TOKEN_LENGTH, is never treated as "no check needed".
 
     This is transport trust — it proves the call arrived through the gateway.
-    It is NOT per-resource authorization, and this branch does not claim to
-    add that. See the PR body for what remains deferred.
+    It is NOT per-resource authorization on its own; w8-planner-2's
+    authorization/restriction checks below are what add that for the release
+    path specifically. A valid internal token alone never bypasses them —
+    see disclose() below, which proves that for the legacy route.
     """
     configured = settings.internal_service_token
     if (
@@ -144,41 +152,299 @@ def create_roi_request(payload: RoiRequestCreate, db: Session = Depends(get_db))
     return RoiRequestOut.model_validate(req)
 
 
+# --- 164.508 authorization lifecycle (030) ----------------------------------- #
+
+
+@app.post(
+    "/roi/authorizations", response_model=AuthorizationOut, status_code=201,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def create_authorization(payload: AuthorizationCreate, db: Session = Depends(get_db)):
+    """Record a submitted authorization. Always starts 'pending' — nothing in
+    the payload can mark itself 'valid'; only review_authorization can."""
+    try:
+        patient = db.get(Patient, payload.patient_id)
+        if patient is None:
+            raise HTTPException(status_code=404, detail="patient not found")
+
+        auth = RoiAuthorization(
+            patient_id=payload.patient_id,
+            recipient=payload.recipient,
+            purpose=payload.purpose,
+            scope_start=payload.scope_start,
+            scope_end=payload.scope_end,
+            signature_evidence_reference=payload.signature_evidence_reference,
+            signature_evidence_digest=payload.signature_evidence_digest,
+            signed_by=payload.signed_by,
+            signed_at=payload.signed_at,
+            expires_at=payload.expires_at,
+            representative_authority=payload.representative_authority,
+            status="pending",
+        )
+        db.add(auth)
+        db.commit()
+        db.refresh(auth)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("create_authorization: database error")
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    return AuthorizationOut.model_validate(auth)
+
+
+@app.get(
+    "/roi/authorizations/{authorization_id}", response_model=AuthorizationOut,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def get_authorization(authorization_id: int, db: Session = Depends(get_db)):
+    try:
+        auth = db.get(RoiAuthorization, authorization_id)
+    except SQLAlchemyError:
+        log.exception("get_authorization: database error for authorization_id=%s", authorization_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+    if auth is None:
+        raise HTTPException(status_code=404, detail="authorization not found")
+    return AuthorizationOut.model_validate(auth)
+
+
+@app.post(
+    "/roi/authorizations/{authorization_id}/review", response_model=AuthorizationOut,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def review_authorization(authorization_id: int, payload: AuthorizationReview, db: Session = Depends(get_db)):
+    """The ONLY path an authorization can reach 'valid' through. Refuses a
+    second review of an authorization that already left 'pending' — a
+    reviewed decision does not get silently overwritten by another review
+    call; use revoke_authorization to withdraw an already-valid one."""
+    try:
+        auth = db.get(RoiAuthorization, authorization_id)
+        if auth is None:
+            raise HTTPException(status_code=404, detail="authorization not found")
+        if auth.status != "pending":
+            raise HTTPException(status_code=409, detail=f"authorization already reviewed (status={auth.status!r})")
+
+        auth.status = payload.decision
+        auth.reviewed_by = payload.reviewed_by
+        auth.reviewed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(auth)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("review_authorization: database error for authorization_id=%s", authorization_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    return AuthorizationOut.model_validate(auth)
+
+
+@app.post(
+    "/roi/authorizations/{authorization_id}/revoke", response_model=AuthorizationOut,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def revoke_authorization(authorization_id: int, payload: AuthorizationRevoke, db: Session = Depends(get_db)):
+    """Withdraws a previously valid authorization. A pending/rejected one
+    cannot be revoked — there is nothing valid to withdraw; an already-revoked
+    one is a no-op-with-409, not a silently repeated revocation."""
+    try:
+        auth = db.get(RoiAuthorization, authorization_id)
+        if auth is None:
+            raise HTTPException(status_code=404, detail="authorization not found")
+        if auth.status != "valid":
+            raise HTTPException(status_code=409, detail=f"cannot revoke an authorization with status={auth.status!r}")
+
+        auth.status = "revoked"
+        auth.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(auth)
+        log.info("authorization revoked (authorization_id=%s revoked_by=%s)", authorization_id, payload.revoked_by)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("revoke_authorization: database error for authorization_id=%s", authorization_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    return AuthorizationOut.model_validate(auth)
+
+
+# --- 164.522 disclosure restrictions (030) ------------------------------------ #
+
+
+@app.post(
+    "/roi/restrictions", response_model=RestrictionOut, status_code=201,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def create_restriction(payload: RestrictionCreate, db: Session = Depends(get_db)):
+    """Register a narrowly scoped disclosure restriction. Not a general
+    consent-management platform — see models.py::RoiDisclosureRestriction."""
+    try:
+        patient = db.get(Patient, payload.patient_id)
+        if patient is None:
+            raise HTTPException(status_code=404, detail="patient not found")
+
+        restriction = RoiDisclosureRestriction(
+            patient_id=payload.patient_id,
+            recipient=payload.recipient,
+            reason=payload.reason,
+            active=True,
+        )
+        db.add(restriction)
+        db.commit()
+        db.refresh(restriction)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("create_restriction: database error")
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    return RestrictionOut.model_validate(restriction)
+
+
+@app.post(
+    "/roi/restrictions/{restriction_id}/revoke", response_model=RestrictionOut,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def revoke_restriction(restriction_id: int, db: Session = Depends(get_db)):
+    try:
+        restriction = db.get(RoiDisclosureRestriction, restriction_id)
+        if restriction is None:
+            raise HTTPException(status_code=404, detail="restriction not found")
+        if not restriction.active:
+            raise HTTPException(status_code=409, detail="restriction is already inactive")
+
+        restriction.active = False
+        restriction.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(restriction)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("revoke_restriction: database error for restriction_id=%s", restriction_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    return RestrictionOut.model_validate(restriction)
+
+
+# --- fulfillment: authorization + restriction enforcement, one transaction -- #
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    """SQLAlchemy's postgres TIMESTAMPTZ type always round-trips
+    timezone-aware datetimes in production, but SQLite (used by the unit
+    tests here — there's no live Postgres in this test tier) stores and
+    returns naive ones. Normalize rather than let the two backends disagree
+    on whether an expiry check is even comparable."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _authorization_error(auth: RoiAuthorization, req: RoiRequest, now: datetime) -> str | None:
+    """Every reason a loaded, existing authorization may not be used to
+    fulfill this specific request — returns the first violated reason, or
+    None if it is good to use. Centralized so fulfill_roi_request has one
+    validation path, not a chain of separately-maintained checks."""
+    if auth.status == "revoked" or auth.revoked_at is not None:
+        return "authorization has been revoked"
+    if auth.status == "rejected":
+        return "authorization was rejected on review"
+    if auth.status == "pending":
+        return "authorization has not been reviewed yet"
+    if auth.status != "valid":
+        return f"authorization status is {auth.status!r}, not 'valid'"
+    expires_at = _as_aware_utc(auth.expires_at)
+    if expires_at is not None and expires_at <= now:
+        return "authorization has expired"
+    if auth.patient_id != req.patient_id:
+        return "authorization does not cover this patient"
+    if auth.recipient != req.recipient:
+        return "authorization recipient does not match the request recipient"
+    if auth.scope_start and req.date_range_start and req.date_range_start < auth.scope_start:
+        return "request date range starts before the authorization's scope"
+    if auth.scope_end and req.date_range_end and req.date_range_end > auth.scope_end:
+        return "request date range extends beyond the authorization's scope"
+    return None
+
+
+def _active_restriction(db: Session, patient_id: int, recipient: str | None) -> RoiDisclosureRestriction | None:
+    return (
+        db.execute(
+            select(RoiDisclosureRestriction).where(
+                RoiDisclosureRestriction.patient_id == patient_id,
+                RoiDisclosureRestriction.active.is_(True),
+                or_(
+                    RoiDisclosureRestriction.recipient.is_(None),
+                    RoiDisclosureRestriction.recipient == recipient,
+                ),
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
 @app.post("/roi/requests/{request_id}/fulfill", response_model=FulfillResult, dependencies=[Depends(_verify_internal_token)])
-def fulfill_roi_request(request_id: int, authorization: FulfillAuthorization, db: Session = Depends(get_db)):
+def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = Depends(get_db)):
     """
     Fulfill an ROI request: mark it 'fulfilled', record a disclosures row, and
     return the patient's records.
 
     ==========================================================================
-    w8-planner-2 (closes two of DEBT D12's three legs):
-      * 45 CFR 164.508 — `authorization` is REQUIRED (Pydantic rejects a
-        missing/empty reference, signer, or signed-at with 422 before this
-        function body ever runs) — no authorization, no release.
-      * 45 CFR 164.528 — the disclosure row now carries its own
-        authorization_reference/purpose, independent of whatever the request
-        row says later. GET /roi/patients/{id}/accounting reads these back
-        directly, closing docs/handover/auditor-questionnaire.md's Q7 gap.
-      * STILL OPEN, unchanged: 45 CFR 164.522 (no restriction tracking or
-        enforcement exists). Do not describe this route as honoring one.
+    w8-planner-2 P4 (closes 164.508 for real; corrects an over-claim about
+    164.528 — see models.py::Disclosure):
+      * `payload` carries ONLY authorization_id — never a caller-supplied
+        signer/reference/timestamp (029's original, weaker design). The
+        referenced roi_authorizations row must exist, be human-reviewed
+        'valid', unexpired, unrevoked, and cover this patient/recipient/
+        scope — see _authorization_error. Anything else refuses with 422.
+      * An active roi_disclosure_restrictions row for this patient/recipient
+        (45 CFR 164.522) refuses fulfillment outright — see
+        _active_restriction.
+      * Authorization load+validation, restriction check, disclosure
+        creation, and the request's own status update all happen inside
+        this ONE transaction/session — a failure at any point rolls back
+        the whole thing, never a partial effect.
+      * Idempotent: an already-'fulfilled' request is refused (409), not
+        silently re-fulfilled into a second disclosure row.
     ==========================================================================
     """
     try:
         req = db.get(RoiRequest, request_id)
         if req is None:
             raise HTTPException(status_code=404, detail="roi request not found")
+        if req.status == "fulfilled":
+            raise HTTPException(status_code=409, detail="roi request has already been fulfilled")
+
+        auth = db.get(RoiAuthorization, payload.authorization_id)
+        if auth is None:
+            raise HTTPException(status_code=404, detail="authorization not found")
+
+        reason = _authorization_error(auth, req, datetime.now(timezone.utc))
+        if reason is not None:
+            raise HTTPException(status_code=422, detail=reason)
+
+        restriction = _active_restriction(db, req.patient_id, req.recipient)
+        if restriction is not None:
+            raise HTTPException(status_code=422, detail="an active disclosure restriction blocks this release")
 
         req.status = "fulfilled"
-        req.authorization_reference = authorization.authorization_reference
-        req.authorization_signed_at = authorization.authorization_signed_at
-        req.authorization_signed_by = authorization.authorization_signed_by
+        req.authorization_id = auth.id
+        req.authorization_reference = auth.signature_evidence_reference
+        req.authorization_signed_at = auth.signed_at
+        req.authorization_signed_by = auth.signed_by
 
         disclosure = Disclosure(
             patient_id=req.patient_id,
             roi_request_id=req.id,
+            authorization_id=auth.id,
             disclosed_to=req.recipient,
-            authorization_reference=authorization.authorization_reference,
-            purpose=authorization.purpose or req.purpose,
+            authorization_reference=auth.signature_evidence_reference,
+            purpose=auth.purpose or req.purpose,
         )
         db.add(disclosure)
 
@@ -195,6 +461,7 @@ def fulfill_roi_request(request_id: int, authorization: FulfillAuthorization, db
         db.commit()
         db.refresh(disclosure)
     except HTTPException:
+        db.rollback()
         raise
     except SQLAlchemyError:
         db.rollback()
@@ -217,15 +484,19 @@ def fulfill_roi_request(request_id: int, authorization: FulfillAuthorization, db
 )
 def disclosure_accounting(patient_id: int, db: Session = Depends(get_db)):
     """
-    45 CFR 164.528 accounting of disclosures for one patient — every
-    disclosure ever fulfilled through fulfill_roi_request, in the shape
-    docs/handover/auditor-questionnaire.md's Q7 asks for directly: to whom,
-    when, under what authorization, for what purpose.
+    Every disclosure this service has fulfilled for one patient — an
+    internal log, NOT a formal 45 CFR 164.528 accounting of disclosures.
+    164.528(a)(2) exempts disclosures made pursuant to a valid 164.508
+    authorization from that mandatory accounting requirement, which is
+    exactly what every row behind this endpoint is (fulfill_roi_request
+    refuses to create one any other way). See models.py::Disclosure for the
+    full explanation of what a true 164.528 accounting would still need
+    (the non-exempt disclosure categories this system does not model) and
+    why this endpoint is not a substitute for one.
 
     Deliberately does NOT read the legacy disclose() route below — that
-    route writes no disclosures row at all, so it has nothing to contribute
-    here, and its own docstring already flags why that is a separate,
-    still-open gap.
+    route is retired (410) and never wrote a disclosures row even before
+    retirement, so it has nothing to contribute here.
     """
     try:
         rows = (
@@ -247,35 +518,21 @@ def disclosure_accounting(patient_id: int, db: Session = Depends(get_db)):
     )
 
 
-@app.get("/disclosures/{patient_id}", response_model=DisclosureRecords, dependencies=[Depends(_verify_internal_token)])
-def disclose(patient_id: int, db: Session = Depends(get_db)):
+@app.get("/disclosures/{patient_id}", dependencies=[Depends(_verify_internal_token)])
+def disclose(patient_id: int):
     """
-    Legacy direct-disclosure surface (original D12).
-
-    DEBT D12 (preserved, now sharper): returns ALL of a patient's records
-    with NO check for a valid 45 CFR 164.508 authorization, NO honoring of
-    any 164.522 agreed restriction, and NO disclosure row written — so
-    anything released through THIS route is invisible to
-    disclosure_accounting() above and still cannot be accounted for, even
-    though fulfill_roi_request now closes that gap for the real release
-    path. Not proxied by the gateway (no legitimate caller reaches it
-    through the app); flagged as a follow-up, not fixed here.
+    RETIRED (w8-planner-2 P4). This was the original DEBT D12 shortcut:
+    returned ALL of a patient's records with no authorization check, no
+    restriction check, and no disclosure logged. "Not exposed through the
+    UI" was never a security boundary — a caller with a valid internal
+    service token could still reach it directly, same as any other route
+    on this service. Retired outright rather than routed through the new
+    authorization/restriction checks: nothing in this codebase calls it
+    (the gateway never proxied it), so there is no real caller to migrate,
+    and every legitimate release path goes through
+    POST /roi/requests/{id}/fulfill instead.
     """
-    try:
-        rows = (
-            db.execute(
-                select(Record)
-                .where(Record.patient_id == patient_id)
-                .order_by(Record.id)
-            )
-            .scalars()
-            .all()
-        )
-    except SQLAlchemyError:
-        log.exception("disclose: database error for patient_id=%s", patient_id)
-        raise HTTPException(status_code=503, detail="database unavailable")
-
-    return DisclosureRecords(
-        patient_id=patient_id,
-        records=[RecordOut.model_validate(r) for r in rows],
+    raise HTTPException(
+        status_code=410,
+        detail="this route is retired; use POST /roi/requests/{id}/fulfill",
     )
