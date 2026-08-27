@@ -24,9 +24,10 @@ function below emits at most the ONE stage its own transition corresponds to
 (`create_draft` -> `draft`, `record_validation` -> `validation`, `decide` ->
 `review`, `approved_draft` -> `display`).
 
-⚠️ `generated_text` is PERSISTED PHI and currently UNENCRYPTED (encryption is
-tracked separately and has not landed). Synthetic data only. Nothing here may
-pass draft text to a logger, a span, or a prompt — `libs.agent_provenance`
+`generated_text` is PERSISTED PHI and is AEAD-encrypted the instant a draft
+is created (adr/0012 follow-up, migration 032, `phi.encrypt_draft_text`) —
+`create_draft` below never writes plaintext, even transiently. Nothing here
+may pass draft text to a logger, a span, or a prompt — `libs.agent_provenance`
 raises if anything tries, and the log lines below carry ids and codes only.
 """
 from typing import Iterable, Optional
@@ -35,6 +36,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+import phi
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from logging_config import configure
 from models import AgentDraftCitation, AgentDraftProvenance
@@ -107,15 +109,24 @@ def create_draft(
 
     cite_list = list(citations)  # materialize once: used for both the DB rows and the trace
 
+    # adr/0012 follow-up (migration 032): encrypted the instant a draft is
+    # created — never persisted plaintext even transiently. AAD binds the
+    # ciphertext to (patient_id, version), the row's own immutable identity
+    # (agent_draft_provenance_guard_trigger), computed here so it can be
+    # used both for the encryption call and the row itself.
+    draft_version = next_version(db, patient_id)
+    envelope, key_version = phi.encrypt_draft_text(patient_id, draft_version, generated_text)
+
     draft = AgentDraftProvenance(
         patient_id=patient_id,
-        version=next_version(db, patient_id),
+        version=draft_version,
         status=DRAFT,
         provenance_label=provenance_label,
         correlation_id=correlation_id,
         model_id=model_id,
         prompt_version=prompt_version,
-        generated_text=generated_text,
+        generated_text=envelope,
+        generated_text_key_version=key_version,
     )
     db.add(draft)
     db.flush()  # assign draft.id before the citations reference it

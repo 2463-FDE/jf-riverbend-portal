@@ -11,6 +11,9 @@ here — those are database-level and were verified against live Postgres. What
 these cover is the application state machine, which is where a wrong transition
 would actually be written.
 """
+import base64
+import os
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -23,10 +26,25 @@ from conftest import load_module
 drafts = load_module("services/records-service/agent_drafts.py", "agent_drafts_mod")
 
 from libs.agent_provenance import ForbiddenPayload, ProvenanceLabel, Stage, TraceRecorder  # noqa: E402
+from libs.phi_crypto import EnvKeyProvider  # noqa: E402
 
 TEXT_V1 = "Your A1c is 6.2%, down from 7.5% in March."
 TEXT_V2 = "Your A1c is 6.2%, down 1.3 points since March."
 CORR = "corr-test-1"
+
+# adr/0012 follow-up (agent draft text encryption): create_draft now
+# encrypts generated_text — needs a configured PHI key provider.
+# agent_drafts.py's own `import phi` (drafts.phi) is the exact module
+# object it calls through — no sys.modules ambiguity here since this file
+# loads ONLY agent_drafts.py, not app.py (see test_agent_portal_path.py
+# for the case where both matter).
+drafts.phi._key_provider = EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
 
 
 @pytest.fixture
@@ -38,6 +56,17 @@ def db():
     session = sessionmaker(bind=engine)()
     yield session
     session.close()
+
+
+def _decrypted(draft):
+    # adr/0012 follow-up: draft.generated_text is now the ciphertext
+    # envelope — these tests are about the STATE MACHINE (exact text
+    # displayed verbatim, never regenerated), so assertions decrypt first
+    # rather than comparing ciphertext bytes. This is the same decrypt
+    # call _draft_out (app.py) makes at the real response boundary.
+    return drafts.phi.decrypt_draft_text(
+        draft.patient_id, draft.version, draft.generated_text, draft.generated_text_key_version
+    )
 
 
 def _create(db, text=TEXT_V1, label=drafts.LABEL_REAL, model_id="model-x", citations=()):
@@ -56,7 +85,7 @@ def test_versions_are_monotonic_per_patient(db):
     v2 = _create(db, text=TEXT_V2)
 
     assert (v1.version, v2.version) == (1, 2)
-    assert v1.generated_text == TEXT_V1, "version 1's text is untouched by a regeneration"
+    assert _decrypted(v1) == TEXT_V1, "version 1's text is untouched by a regeneration"
 
 
 def test_a_new_draft_is_not_displayable(db):
@@ -190,7 +219,7 @@ def test_the_patient_sees_the_exact_stored_text_of_the_approved_version(db):
                   approve=True, reviewed_by=13)
 
     shown = drafts.approved_draft(db, 1042)
-    assert shown.generated_text == TEXT_V1, "displayed verbatim, never regenerated"
+    assert _decrypted(shown) == TEXT_V1, "displayed verbatim, never regenerated"
     assert shown.version == 1
 
 
@@ -204,10 +233,10 @@ def test_approving_v2_supersedes_v1_so_the_approved_version_is_unambiguous(db):
 
     shown = drafts.approved_draft(db, 1042)
     assert shown.version == v2.version
-    assert shown.generated_text == TEXT_V2
+    assert _decrypted(shown) == TEXT_V2
     db.refresh(v1)
     assert v1.status == drafts.SUPERSEDED
-    assert v1.generated_text == TEXT_V1, "a superseded version keeps its text on the record"
+    assert _decrypted(v1) == TEXT_V1, "a superseded version keeps its text on the record"
 
 
 def test_a_pending_v2_does_not_replace_an_approved_v1(db):
@@ -218,7 +247,7 @@ def test_a_pending_v2_does_not_replace_an_approved_v1(db):
     _create(db, text=TEXT_V2)  # v2 created, not validated, not approved
 
     shown = drafts.approved_draft(db, 1042)
-    assert shown.version == 1 and shown.generated_text == TEXT_V1
+    assert shown.version == 1 and _decrypted(shown) == TEXT_V1
 
 
 def test_another_patient_sees_nothing(db):

@@ -181,9 +181,13 @@ class AgentDraftProvenance(Base):
     2. **A decided draft must name its decider**, and an undecided one must
        claim neither reviewer nor timestamp (CHECK constraint, mirroring 018).
 
-    ⚠️ `generated_text` is PERSISTED PHI and is currently UNENCRYPTED — it is in
-    scope for the encryption work but that has not landed. Synthetic data only.
-    It must never be copied into a trace, a log or a prompt; `libs.agent_provenance`
+    ⚠️ `generated_text` is PERSISTED PHI and is AEAD-encrypted (adr/0012
+    follow-up, migration 032, `libs/phi_crypto`) — `generated_text_key_version`
+    NULL alongside a non-NULL `generated_text` means this row predates that
+    migration and is still plaintext, awaiting
+    `db/migrations/scripts/encrypt_agent_draft_text.py`'s backfill; every
+    row created by current code always has both set together. It must never
+    be copied into a trace, a log or a prompt; `libs.agent_provenance`
     raises if anything tries.
     """
 
@@ -198,6 +202,7 @@ class AgentDraftProvenance(Base):
     model_id = Column(Text)
     validation_code = Column(Text)
     generated_text = Column(Text, nullable=False)
+    generated_text_key_version = Column(Text)  # migration 032; NULL = not yet migrated (still plaintext)
     prompt_version = Column(Text)
     reviewed_by = Column(Integer)
     approved_at = Column(TIMESTAMP(timezone=True))

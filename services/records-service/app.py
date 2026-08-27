@@ -64,7 +64,7 @@ from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from libs.phi_crypto import PhiCryptoError
 from libs.tracing.spans import new_correlation_id
 from patient_view_repository import SqlChartRepository
-from phi import decrypt_patient_field, get_key_provider
+from phi import decrypt_draft_text, decrypt_patient_field, get_key_provider
 from reconciliation import build_reconciliation_result
 from schemas import (
     AgentDraftCitationOut,
@@ -1362,6 +1362,16 @@ def decide_review(
 
 
 def _draft_out(db: Session, draft: AgentDraftProvenance) -> AgentDraftOut:
+    # adr/0012 follow-up (migration 032): the ONE place generated_text is
+    # decrypted — every route that returns draft text (clinician review,
+    # patient summary) goes through this function, and only after its own
+    # authorization check already passed (see each route below). Never
+    # mutates `draft` itself — same reasoning as _decrypted_patient_detail:
+    # a later session.commit() on this object must never risk writing
+    # plaintext back over the real ciphertext.
+    plaintext = decrypt_draft_text(
+        draft.patient_id, draft.version, draft.generated_text, draft.generated_text_key_version
+    )
     return AgentDraftOut(
         id=draft.id,
         patient_id=draft.patient_id,
@@ -1370,7 +1380,7 @@ def _draft_out(db: Session, draft: AgentDraftProvenance) -> AgentDraftOut:
         provenance_label=draft.provenance_label,
         model_id=draft.model_id,
         validation_code=draft.validation_code,
-        generated_text=draft.generated_text,
+        generated_text=plaintext,
         citations=[
             AgentDraftCitationOut(
                 source_id=c.source_id, source_version=c.source_version,

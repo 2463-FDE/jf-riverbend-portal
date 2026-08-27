@@ -32,8 +32,12 @@ seed:          ## load schema + demo data into an EMPTY db (fresh volumes self-s
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} < db/seed/seed.sql
 	@$(MAKE) phi-backfill
 
-phi-backfill:  ## encrypt any plaintext patients.ssn/dob/notes rows (idempotent — safe to run repeatedly)
+phi-backfill:  ## encrypt any plaintext patients.ssn/dob/notes and agent-draft rows (idempotent — safe to run repeatedly)
 	docker compose exec -T intake-service python3 db/migrations/scripts/encrypt_existing_phi.py
+	@# adr/0012 follow-up ("agent draft text encryption"): a no-op when there
+	@# are no plaintext agent_draft_provenance rows, same idempotent-by-
+	@# construction reasoning as the line above.
+	docker compose exec -T records-service python3 db/migrations/scripts/encrypt_agent_draft_text.py
 
 demo-reset:    ## return all four canonical demo patients (1042, 1737, 1738, 1739) to a clean pre-demo state
 	@# Review decisions are durable by design, so every rehearsal and every

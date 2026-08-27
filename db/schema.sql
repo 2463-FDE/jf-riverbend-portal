@@ -409,6 +409,11 @@ CREATE INDEX IF NOT EXISTS role_migration_log_outcome_idx ON role_migration_log 
 -- scoped to logs, traces, telemetry and prompts — libs/agent_provenance raises
 -- if draft text is put into a trace. Identity/evidence is immutable and status
 -- only advances along a fixed transition graph, both enforced by trigger below.
+--
+-- generated_text is AEAD-encrypted (adr/0012 follow-up, migration 032,
+-- libs/phi_crypto) — generated_text_key_version NULL alongside a non-NULL
+-- generated_text means the row predates that migration and is still
+-- plaintext, awaiting db/migrations/scripts/encrypt_agent_draft_text.py.
 CREATE TABLE IF NOT EXISTS agent_draft_provenance (
     id              SERIAL PRIMARY KEY,
     patient_id      INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
@@ -450,8 +455,16 @@ CREATE TABLE IF NOT EXISTS agent_draft_provenance (
 
     -- THE CLINICAL ARTIFACT. Immutable once written — see the trigger below.
     -- This is what the clinician reviews and what the patient is shown; it is
-    -- never regenerated at display time.
+    -- never regenerated at display time. AEAD-encrypted (libs/phi_crypto)
+    -- once generated_text_key_version is set on this row.
     generated_text  TEXT NOT NULL,
+
+    -- Which PHI_ENCRYPTION_KEY_V<n> encrypted generated_text. NULL = row
+    -- predates migration 032, generated_text is still plaintext. The one
+    -- field in this table's immutable-identity set a re-encryption
+    -- (backfill or future rotation) is allowed to change together with
+    -- generated_text — see the trigger below.
+    generated_text_key_version TEXT,
 
     -- Which prompt produced it. A version identifier, NOT the prompt itself:
     -- the prompt text stays out of the database exactly as it stays out of
@@ -558,10 +571,12 @@ CREATE INDEX IF NOT EXISTS agent_draft_citation_source_idx
     ON agent_draft_citation (source_id, source_version);
 
 -- IDENTITY, EVIDENCE AND LIFECYCLE GUARD. A CHECK constraint only sees one
--- row's final state; these four guarantees each compare OLD to NEW, or must
+-- row's final state; these guarantees each compare OLD to NEW, or must
 -- run on DELETE (which no CHECK ever sees), so they must be a trigger:
--- (1) patient_id, version, generated_text, provenance_label, correlation_id,
--- model_id and prompt_version never change after insert; (2) validation_code
+-- (1) patient_id, version, provenance_label, correlation_id, model_id and
+-- prompt_version never change after insert; (1b, migration 032)
+-- generated_text may change ONLY together with generated_text_key_version
+-- (a re-encryption, never a same-key content edit); (2) validation_code
 -- is set exactly once, when the row leaves 'draft'; (3) status only advances
 -- along the transition graph documented on the table above — every other
 -- move, including any move out of a terminal state, is rejected; (4) a row
@@ -584,7 +599,6 @@ BEGIN
     -- TG_OP = 'UPDATE' from here on.
     IF NEW.patient_id IS DISTINCT FROM OLD.patient_id
        OR NEW.version IS DISTINCT FROM OLD.version
-       OR NEW.generated_text IS DISTINCT FROM OLD.generated_text
        OR NEW.provenance_label IS DISTINCT FROM OLD.provenance_label
        OR NEW.correlation_id IS DISTINCT FROM OLD.correlation_id
        OR NEW.model_id IS DISTINCT FROM OLD.model_id
@@ -592,9 +606,24 @@ BEGIN
     THEN
         RAISE EXCEPTION
             'agent_draft_provenance identity/evidence is immutable once written '
-            '(draft id=%, version=%): patient_id, version, generated_text, '
-            'provenance_label, correlation_id, model_id and prompt_version never '
-            'change after insert. A corrected or regenerated draft is a NEW version.',
+            '(draft id=%, version=%): patient_id, version, provenance_label, '
+            'correlation_id, model_id and prompt_version never change after '
+            'insert. A corrected or regenerated draft is a NEW version.',
+            OLD.id, OLD.version;
+    END IF;
+
+    -- 032: generated_text is frozen UNLESS generated_text_key_version also
+    -- changes in the same statement — that pairing is a re-encryption
+    -- (initial backfill, NULL->v1, or a future rotation, v1->v2), not a
+    -- content edit. A change to generated_text with the SAME key version
+    -- is exactly the silent-content-edit case this guard exists to block.
+    IF NEW.generated_text_key_version IS NOT DISTINCT FROM OLD.generated_text_key_version
+       AND NEW.generated_text IS DISTINCT FROM OLD.generated_text
+    THEN
+        RAISE EXCEPTION
+            'agent_draft_provenance.generated_text cannot change without '
+            'generated_text_key_version also changing (draft id=%, version=%) '
+            '— that would be a silent content edit, not a re-encryption.',
             OLD.id, OLD.version;
     END IF;
 
