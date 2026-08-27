@@ -35,4 +35,15 @@ services/roi-service/
 
 # db/ is mounted into the Postgres container at runtime (docker-compose.yml);
 # it is not part of any Python service's build.
+#
+# w8-planner-2 P2 (adr/0012), review round 1 fix (B1): ONE exception —
+# intake-service's Dockerfile now COPYs the PHI backfill script
+# (db/migrations/scripts/encrypt_existing_phi.py) so `make up`/`make seed`
+# can run it via `docker compose exec`. The negation is listed at every
+# parent level; a bare `!db/migrations/scripts/encrypt_existing_phi.py`
+# alone does not re-include a file whose ancestor directory was already
+# excluded.
 db/
+!db/migrations/
+!db/migrations/scripts/
+!db/migrations/scripts/encrypt_existing_phi.py

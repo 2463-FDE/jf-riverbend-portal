@@ -27,6 +27,23 @@ script's first run) only processes what is still plaintext. Commits in
 batches, not one giant transaction, so a mid-run failure keeps whatever
 was already committed rather than losing all progress.
 
+Also the fix for a review finding on the PR that introduced this file
+(w8-planner-2 P2 round 1, B1): `db/seed/seed.sql` is loaded verbatim by
+Postgres's own docker-entrypoint-initdb.d on a fresh volume — plain SQL,
+no way to reach libs/phi_crypto from inside that init sequence — so a
+fresh `make up`/`make seed` leaves the seeded demo patients (including
+the canonical Maria Gonzalez duplicate cluster, adr/0004) plaintext with
+NULL key_versions and NULL ssn_digits, which breaks blind-index-based
+duplicate detection for every seeded row. `make up` and `make seed`
+(Makefile) now run this script — via `docker compose exec intake-service
+python3 db/migrations/scripts/encrypt_existing_phi.py`, since that
+container already has libs/phi_crypto, cryptography, DB connectivity,
+and (once configured) the PHI_* keys — right after the schema/seed load,
+using DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD (see
+_dsn_from_split_vars) rather than requiring a separate DATABASE_URL wired
+in just for this script. Idempotent, so running it on every `make up`
+(not just the first, fresh-volume one) is harmless — see below.
+
 Never prints a plaintext PHI value, a ciphertext envelope, a blind index,
 or key material — only patient ids and counts.
 """
@@ -75,6 +92,26 @@ def _encrypt_row(key_provider, row_id, ssn, dob, notes):
     return updates
 
 
+def _dsn_from_split_vars():
+    """Falls back to DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD — the same
+    split env vars every service's own config.py already reads (see e.g.
+    services/intake-service/config.py) — so this script runs unmodified
+    inside any of those containers (`docker compose exec intake-service
+    python3 db/migrations/scripts/encrypt_existing_phi.py`) without needing
+    a separate DATABASE_URL wired in just for it. Returns None (not a
+    DSN with an empty password) if DB_USER isn't set at all, so the
+    DATABASE_URL-required error above still fires with a clear message
+    instead of psycopg2 failing on a nonsense connection string."""
+    user = os.getenv("DB_USER")
+    if not user:
+        return None
+    host = os.getenv("DB_HOST", "postgres")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "riverbend")
+    password = os.getenv("DB_PASSWORD", "")
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+
+
 def _update_row(cur, row_id, updates):
     if not updates:
         return
@@ -89,9 +126,9 @@ def main(argv=None) -> int:
         print("psycopg2 is required.", file=sys.stderr)
         return 3
 
-    dsn = os.getenv("DATABASE_URL")
+    dsn = os.getenv("DATABASE_URL") or _dsn_from_split_vars()
     if not dsn:
-        print("DATABASE_URL must be set.", file=sys.stderr)
+        print("DATABASE_URL (or DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD) must be set.", file=sys.stderr)
         return 3
 
     try:

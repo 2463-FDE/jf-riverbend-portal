@@ -20,5 +20,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY services/intake-service/ .
 COPY libs/ ./libs/
 
+# w8-planner-2 P2 (adr/0012), review round 1 fix (B1): the seed-data PHI
+# backfill (db/migrations/scripts/encrypt_existing_phi.py) needs
+# libs.phi_crypto + psycopg2 + DB connectivity, which this image already
+# has — copied in here so `make up`/`make seed` can run it via
+# `docker compose exec intake-service python3 db/migrations/scripts/
+# encrypt_existing_phi.py` instead of standing up a separate runner.
+COPY db/migrations/scripts/encrypt_existing_phi.py ./db/migrations/scripts/encrypt_existing_phi.py
+
 EXPOSE 8071
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8071"]
