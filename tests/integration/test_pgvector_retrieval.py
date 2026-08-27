@@ -3,7 +3,7 @@ Integration test for Stage 2's pgvector persistence + retrieval path
 (libs/rag_corpus/vector_store.py::PgVectorStore) — requires the full stack up
 (`make up`, on a *fresh* volume so db/schema.sql's rag_embeddings table and
 `CREATE EXTENSION vector` are actually present; docker-compose.yml's postgres
-image is pgvector/pgvector:0.8.0-pg15 specifically so that extension exists).
+image is pgvector/pgvector:0.8.6-pg15 specifically so that extension exists).
 
 Connects to Postgres directly (not through a service, and not through the
 gateway/records IDOR path — this deliverable adds no HTTP route) to drive

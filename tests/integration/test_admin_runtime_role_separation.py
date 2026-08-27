@@ -457,7 +457,7 @@ def _disposable_container(name, postgres_user, postgres_password, extra_env, mou
         args += ["-e", f"{k}={v}"]
     for host_path, container_path in mounts.items():
         args += ["-v", f"{host_path}:{container_path}:ro"]
-    args.append("pgvector/pgvector:0.8.0-pg15")
+    args.append("pgvector/pgvector:0.8.6-pg15")
     try:
         _docker(*args)
         _wait_for_postgres(name, postgres_user, postgres_password)
