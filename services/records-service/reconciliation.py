@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from models import Encounter, Patient
 from patient_access_gate import authorized_patient_ids
+from phi import compute_ssn_blind_index, decrypt_patient_field
 from schemas import (
     IdentitySignal,
     ReconciliationDiscrepancy,
@@ -79,26 +80,35 @@ def _normalize_ssn(ssn: Optional[str]) -> Optional[str]:
 
 def find_ssn_match_ids(db: Session, patient_id: int, ssn: Optional[str]) -> list[int]:
     """Every OTHER patient id whose stored ssn_digits exactly matches the
-    requested patient's normalized ssn.
+    requested patient's (already-decrypted, plaintext) normalized ssn.
 
     Codex review (2026-08-08, PR #22 round 5 — medium): this used to read
     EVERY patient's ssn into Python and normalize+compare row by row on every
     reconciliation request — an unbounded scan of unauthorized patients' PHI
-    (their SSNs), and a timeout risk at real volume. Migration 015 adds
+    (their SSNs), and a timeout risk at real volume. Migration 015 added
     `patients.ssn_digits`, a database-computed, indexed, digit-only column;
-    the query now filters on it directly, so only rows whose stored digits
-    already equal the exact 9-digit key are ever read — at most a handful,
-    never a full-table scan.
+    the query filtered on it directly, so only rows whose stored digits
+    already equalled the exact 9-digit key were ever read — at most a
+    handful, never a full-table scan.
 
-    ssn_digits itself is unvalidated (pure digit extraction — a placeholder
-    like "000-00-0000" stores ssn_digits="000000000"), but that's safe:
-    `_normalize_ssn` rejects invalid-shaped SSNs for the QUERY key before this
-    runs (returns None, short-circuiting to `[]` below), so an invalid stored
-    value can never equal a validated key — see that function's docstring.
-    The `row.ssn_digits == normalized` recheck below is defense-in-depth
-    (never trust a query result to have actually honored its own WHERE
-    clause), not a second scan — `rows` is already the narrow, indexed match
-    set, not every patient.
+    w8-planner-2 P2 (adr/0012): migration 031 replaced ssn_digits with an
+    HMAC-SHA256 blind index (libs/phi_crypto), since ssn is now
+    application-encrypted and a plaintext digit column would defeat that.
+    The query below now compares against the blind index of the normalized
+    key instead of the raw digits — same indexed-equality shape, same "at
+    most a handful of rows read" property, just a different value on both
+    sides of the comparison.
+
+    ssn_digits itself is unvalidated (pure digit extraction, then blind-
+    indexed — a placeholder like "000-00-0000" indexes as
+    compute_ssn_blind_index("000000000")), but that's safe: `_normalize_ssn`
+    rejects invalid-shaped SSNs for the QUERY key before this runs (returns
+    None, short-circuiting to `[]` below), so an invalid stored value can
+    never equal a validated key's blind index either — see that function's
+    docstring. The `row.ssn_digits == blind_index` recheck below is
+    defense-in-depth (never trust a query result to have actually honored
+    its own WHERE clause), not a second scan — `rows` is already the
+    narrow, indexed match set, not every patient.
 
     Still selects only `id`/`ssn_digits` (never name, dob, or any clinical
     field) — an unauthorized candidate's demographic/clinical PHI is never
@@ -108,12 +118,13 @@ def find_ssn_match_ids(db: Session, patient_id: int, ssn: Optional[str]) -> list
     normalized = _normalize_ssn(ssn)
     if not normalized:
         return []
+    blind_index = compute_ssn_blind_index(normalized)
     rows = db.execute(
         select(Patient.id, Patient.ssn_digits).where(
-            Patient.ssn_digits == normalized, Patient.id != patient_id
+            Patient.ssn_digits == blind_index, Patient.id != patient_id
         )
     ).all()
-    return [row.id for row in rows if row.id != patient_id and row.ssn_digits == normalized]
+    return [row.id for row in rows if row.id != patient_id and row.ssn_digits == blind_index]
 
 
 def _fetch_patients_by_id(db: Session, patient_ids: set[int]) -> list[Patient]:
@@ -195,8 +206,17 @@ def build_reconciliation_result(
     fetched afterward for the authorized subset (_fetch_patients_by_id) —
     an unauthorized candidate's demographic PHI is never loaded into
     application memory at all, not just excluded from the response.
+
+    w8-planner-2 P2 (adr/0012): ssn/dob are application-encrypted now.
+    `requested.ssn` is decrypted once, up front, into a local — never by
+    mutating `requested` itself (see phi.py's docstring on why overwriting
+    an ORM object's encrypted-column attribute with plaintext is unsafe:
+    a later session.commit() on that object would write the plaintext back
+    over the real ciphertext). Each matched candidate's dob is decrypted
+    only when building its ReconciliationSourceRecord below, same reason.
     """
-    candidate_ids = find_ssn_match_ids(db, patient_id, requested.ssn)
+    requested_ssn = decrypt_patient_field(patient_id, "ssn", requested.ssn, requested.ssn_key_version)
+    candidate_ids = find_ssn_match_ids(db, patient_id, requested_ssn)
     authorized_ids = authorized_patient_ids(db, actor_id, candidate_ids) if candidate_ids else set()
     matches = _fetch_patients_by_id(db, authorized_ids)
     all_patients = [requested, *matches]
@@ -208,7 +228,7 @@ def build_reconciliation_result(
             is_requested_patient=(p.id == patient_id),
             source_label="Current chart" if p.id == patient_id else "Possible match",
             name_on_file=p.name,
-            dob=p.dob,
+            dob=decrypt_patient_field(p.id, "dob", p.dob, p.dob_key_version),
             allergies=[display for display, _ in fields_by_patient[p.id]["allergy"].values()],
             medications=[display for display, _ in fields_by_patient[p.id]["medication"].values()],
         )
@@ -248,7 +268,7 @@ def build_reconciliation_result(
 
     identity_signals: list[IdentitySignal] = []
     if matches:
-        normalized = _normalize_ssn(requested.ssn) or ""
+        normalized = _normalize_ssn(requested_ssn) or ""
         identity_signals.append(
             IdentitySignal(signal_type="ssn_exact_match", masked_value=f"•••-••-{normalized[-4:]}")
         )

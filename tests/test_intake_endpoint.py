@@ -9,7 +9,10 @@ direct-function-call style already used by test_intake_eligibility.py. This
 is the "latency bound" + "patient/coverage/consent persist independently of
 payer latency" acceptance test called for by the Stage 3 plan.
 """
+import base64
 import logging
+import os
+import sys
 import time
 
 import pytest
@@ -28,10 +31,27 @@ IntakeRequest = load_module("services/intake-service/schemas.py", "intake_schema
 # target that check pass their own x_internal_token explicitly.
 TEST_TOKEN = "test-internal-token-for-intake-well-over-32-chars"
 
+# w8-planner-2 P2 (adr/0012): _create_patient/_create_patient_with_links now
+# encrypt ssn/dob/notes, and _find_match_candidates computes an SSN blind
+# index — both need a configured PHI key provider. app.py's `from phi import
+# ...` resolves through sys.modules, so patching phi_mod (not app_mod) is
+# what actually affects those calls — see test_intake_healthz.py's identical
+# note. Set once, autouse, so every existing test keeps exercising business
+# logic rather than tripping over PHI key validation.
+phi_mod = sys.modules["phi"]
+_TEST_PHI_PROVIDER = phi_mod.EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
+
 
 @pytest.fixture(autouse=True)
 def _configured_internal_token(monkeypatch):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_TOKEN)
+    monkeypatch.setattr(phi_mod, "_key_provider", _TEST_PHI_PROVIDER)
 
 
 def _create_intake(req, *, db, x_request_id=None, x_internal_token=TEST_TOKEN, x_actor_id=None):
@@ -172,12 +192,23 @@ def _request(**overrides):
 
 class _FakePatientRow:
     """Stand-in for an existing patients row, as read by
-    _find_match_candidates (only .id/.ssn/.dob are touched)."""
+    _find_match_candidates (.id/.ssn_digits/.dob/.dob_key_version).
+
+    w8-planner-2 P2 (adr/0012): .dob is left as PLAINTEXT with
+    dob_key_version=None — decrypt_patient_field's contract treats a NULL
+    key_version as "this row predates migration 031's backfill, return the
+    value as-is" (see phi.py), which conveniently lets this fake row stay a
+    plain string instead of needing a real encrypted envelope. .ssn_digits
+    is computed the SAME way _find_match_candidates computes its own query
+    key (compute_ssn_match_key), so a fake row with a given `ssn` naturally
+    "matches" a request carrying the same (possibly differently formatted)
+    ssn, exactly like a real blind-index column would."""
 
     def __init__(self, id, ssn, dob):
         self.id = id
-        self.ssn = ssn
+        self.ssn_digits = app_mod.compute_ssn_match_key(ssn)
         self.dob = dob
+        self.dob_key_version = None
 
 
 # --- Grant-at-intake (PR #23 review round 2, finding 1) ---------------------
@@ -803,8 +834,15 @@ def test_partial_match_does_not_succeed_if_link_write_fails(monkeypatch):
 
 def test_exact_match_lock_is_scoped_to_normalized_ssn_not_raw_input(monkeypatch):
     # "412-55-9981" and "412559981" must serialize against each other —
-    # the lock key has to be the normalized form, same as the match lookup
-    # itself, or the two representations would race past each other.
+    # the lock key has to be derived from the normalized form, same as the
+    # match lookup itself, or the two representations would race past each
+    # other. w8-planner-2 P2 (adr/0012): the lock key is now the SSN's
+    # blind index (compute_ssn_match_key), not raw normalized digits — ssn
+    # is application-encrypted, so nothing here should ever put a plaintext
+    # SSN into a SQL statement (see _acquire_match_key_lock's docstring).
+    # Assert it equals compute_ssn_match_key's own output for the
+    # normalized digits, rather than a literal digit string, and that both
+    # SSN formats produce the identical lock key.
     _mock_eligibility_post(monkeypatch)
     db = _FakeSession()
 
@@ -813,7 +851,9 @@ def test_exact_match_lock_is_scoped_to_normalized_ssn_not_raw_input(monkeypatch)
         db=db, x_request_id=None,
     )
 
-    assert db.lock_calls[0] == {"key": "412559981"}
+    expected_key = app_mod.compute_ssn_match_key("412559981")
+    assert db.lock_calls[0] == {"key": expected_key}
+    assert db.lock_calls[0] == {"key": app_mod.compute_ssn_match_key("412-55-9981")}
 
 
 def test_db_failure_during_lock_or_match_select_returns_503_with_rollback(monkeypatch):
@@ -913,3 +953,77 @@ def test_grant_is_created_for_the_duplicate_link_path_too(monkeypatch):
     grants = [obj for obj in db.added if type(obj).__tablename__ == "patient_access_grants"]
     assert len(grants) == 1
     assert grants[0].patient_id == result.patient_id
+
+
+# --- w8-planner-2 P2 (adr/0012): ssn/dob/notes are encrypted at rest -------
+
+
+def _created_patient(db):
+    [patient] = [obj for obj in db.added if type(obj).__tablename__ == "patients"]
+    return patient
+
+
+def test_ssn_dob_and_notes_are_ciphertext_not_plaintext_after_intake(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    _create_intake(
+        _request(demographics={
+            "name": "Jane Roe", "ssn": "412-55-9981", "dob": "1990-01-01", "notes": "penicillin allergy",
+        }),
+        db=db, x_request_id=None,
+    )
+
+    patient = _created_patient(db)
+    assert patient.ssn != "412-55-9981"
+    assert "412-55-9981" not in patient.ssn
+    assert patient.dob != "1990-01-01"
+    assert patient.notes != "penicillin allergy"
+    assert "penicillin" not in patient.notes
+    assert patient.ssn_key_version == "v1"
+    assert patient.dob_key_version == "v1"
+    assert patient.notes_key_version == "v1"
+
+
+def test_ssn_digits_is_a_blind_index_not_raw_digits(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    _create_intake(
+        _request(demographics={"name": "Jane Roe", "ssn": "412-55-9981", "dob": "1990-01-01"}),
+        db=db, x_request_id=None,
+    )
+
+    patient = _created_patient(db)
+    assert patient.ssn_digits != "412559981"
+    assert patient.ssn_digits == app_mod.compute_ssn_match_key("412-55-9981")
+
+
+def test_a_patient_with_no_ssn_dob_or_notes_stores_no_ciphertext(monkeypatch):
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    _create_intake(_request(demographics={"name": "Jane Roe"}), db=db, x_request_id=None)
+
+    patient = _created_patient(db)
+    assert patient.ssn is None
+    assert patient.ssn_key_version is None
+    assert patient.notes is None
+    assert patient.notes_key_version is None
+    assert patient.ssn_digits is None
+
+
+def test_the_created_patients_own_dob_can_be_decrypted_back(monkeypatch):
+    # Round-trip through the real encrypt/decrypt pair, not just "not equal
+    # to the plaintext" — proves the ciphertext is actually recoverable
+    # under the same key/AAD convention decrypt_patient_field expects.
+    _mock_eligibility_post(monkeypatch)
+    db = _FakeSession()
+
+    _create_intake(
+        _request(demographics={"name": "Jane Roe", "dob": "1990-01-01"}),
+        db=db, x_request_id=None,
+    )
+
+    patient = _created_patient(db)
+    assert app_mod.decrypt_patient_field(patient.id, "dob", patient.dob, patient.dob_key_version) == "1990-01-01"

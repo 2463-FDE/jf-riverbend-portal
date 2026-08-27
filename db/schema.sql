@@ -1,10 +1,16 @@
 -- Riverbend Patient Portal — consolidated database schema (current state).
--- Postgres 15. PHI is NOT encrypted at rest. `dob`, `ssn` and `notes` below
--- are plain text, and `ssn_digits` is a generated, INDEXED copy of the SSN.
--- This line previously claimed disk-level protection from a managed-database
--- volume. No such deployment exists (docker compose, local `pgdata` volume),
--- and there is no encryption of any kind. See adr/0008 for the recorded risk
--- decision and its remediation plan.
+-- Postgres 15. `patients.ssn`, `dob`, and `notes` are application-layer
+-- AEAD-encrypted (libs/phi_crypto) by intake-service/records-service before
+-- every write — this schema stores ciphertext in those TEXT columns, not
+-- plaintext, once a row's own `*_key_version` column is set (NULL there
+-- means an existing row predates migration 031 and has not yet been
+-- backfilled — see db/migrations/scripts/encrypt_existing_phi.py).
+-- `ssn_digits` is an application-computed HMAC-SHA256 blind index, not raw
+-- digits — deterministic for exact-match lookup, not reversible without
+-- PHI_BLIND_INDEX_KEY_V<n>. There is still no disk/volume-level encryption
+-- claim: no managed-database deployment exists (docker compose, local
+-- `pgdata` volume). See adr/0008 for the original recorded risk decision
+-- and adr/0012 for the field-encryption design that closes it.
 --
 -- This file is the flattened "current" schema loaded by docker-entrypoint on a
 -- fresh volume. The incremental history lives in db/migrations/*.sql and is kept
@@ -58,10 +64,9 @@ CREATE TABLE IF NOT EXISTS patients (
     name        TEXT NOT NULL,                 -- legacy/composed; derived from first_name+last_name when structured input is used
     first_name  TEXT,                          -- structured (migration 011); NULL for legacy-only callers
     last_name   TEXT,                          -- structured (migration 011); NULL for legacy-only callers
-    dob         TEXT,                          -- stored as ISO string, not DATE
-    ssn         TEXT,                          -- plain text
-    ssn_digits  TEXT GENERATED ALWAYS AS (regexp_replace(ssn, '\D', '', 'g')) STORED,
-                                               -- migration 015: indexed digit-only match key for reconciliation
+    dob         TEXT,                          -- AEAD-encrypted (libs/phi_crypto) once dob_key_version is set; stored as an ISO-string envelope, not DATE
+    ssn         TEXT,                          -- AEAD-encrypted (libs/phi_crypto) once ssn_key_version is set
+    ssn_digits  TEXT,                          -- migration 031: HMAC-SHA256 blind index (libs/phi_crypto), NOT raw digits — indexed exact-match key for reconciliation, keyed by ssn_key_version's PHI_BLIND_INDEX_KEY_V<n>
     gender      TEXT,
     address     TEXT,                          -- legacy/composed full address; derived from address+city+state+zip_code when structured input is used
     city        TEXT,                          -- structured (migration 011); NULL for legacy-only callers
@@ -69,9 +74,12 @@ CREATE TABLE IF NOT EXISTS patients (
     zip_code    TEXT,                          -- structured (migration 011), TEXT to preserve leading zeros / ZIP+4
     phone       TEXT,
     email       TEXT,
-    notes       TEXT,                          -- free-text clinical notes, plain text
+    notes       TEXT,                          -- free-text clinical notes; AEAD-encrypted (libs/phi_crypto) once notes_key_version is set
     created_via TEXT,                          -- self_service | front_desk
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ssn_key_version   TEXT,                     -- migration 031: which PHI_ENCRYPTION_KEY_V<n>/PHI_BLIND_INDEX_KEY_V<n> pair; NULL = not yet migrated (still plaintext)
+    dob_key_version   TEXT,                     -- migration 031: which PHI_ENCRYPTION_KEY_V<n>; NULL = not yet migrated
+    notes_key_version TEXT                      -- migration 031: which PHI_ENCRYPTION_KEY_V<n>; NULL = not yet migrated
 );
 CREATE INDEX IF NOT EXISTS patients_ssn_digits_idx ON patients (ssn_digits);
 -- NOTE: still no UNIQUE constraint on (name, dob, ssn) — self-service intake

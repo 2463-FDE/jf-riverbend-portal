@@ -53,6 +53,13 @@ def _fake_patient(patient_id: int):
         notes=None,
         created_via=None,
         created_at=None,
+        # w8-planner-2 P2 (adr/0012): _decrypted_patient_detail reads these
+        # alongside dob/ssn/notes — NULL key_version alongside a NULL value
+        # decrypts to None unconditionally (phi.py), matching this fake's
+        # all-None shape.
+        ssn_key_version=None,
+        dob_key_version=None,
+        notes_key_version=None,
     )
 
 TEST_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
