@@ -1,51 +1,31 @@
-# Temporary, narrow vulnerability baseline (P5 follow-up).
+# Temporary, narrow vulnerability baseline (P5 follow-up, item 1 remediation).
 #
-# The frontend CONTAINER IMAGE has 9 findings beyond what
-# .trivyignore.deps.yaml already covers for the npm dependency-scan (source
-# tree fs scan vs. built node_modules resolve differently) -- kept in a
-# SEPARATE file on purpose, since it scopes a different scan target. Includes
-# CVE-2026-59873 (tar), CRITICAL severity -- flagged explicitly, not buried:
-# same pre-existing/fixable/temporary/expiring treatment as every other entry
-# here, not a lower bar for CRITICAL. Fixable (a fixed version exists per
-# Trivy's own scan output), temporary: remediation is the same frontend
-# dependency upgrade pass as .trivyignore.deps.yaml (P5 follow-up, item 1),
-# tracked to land and this file deleted before 2026-09-02.
+# All findings vendored inside node:22-slim's own bundled npm CLI (used for
+# npm's package integrity/provenance verification) - not this project's own
+# dependency tree. Item 1 already bumped the Dockerfile's npm to 12.0.2
+# (frontend/Dockerfile), which resolved sigstore and picomatch entirely and
+# reduced brace-expansion/ip-address/tar from 3/1/3 findings to 2/1/1. No
+# newer npm CLI release exists yet with fixes for these (very recently
+# disclosed relative to 12.0.2's own release, per Trivy's own scan output —
+# each still names a real fixed version, just not yet in a published npm).
+# Pre-existing, fixable once npm publishes a release with these fixes,
+# temporary: tracked to land and this file deleted before 2026-09-02.
 #
-# Malformed YAML here must fail CI -- see the validate-ignore-files job.
+# Malformed YAML here must fail CI - see the validate-ignore-files job.
 vulnerabilities:
-  - id: CVE-2026-13149
-    purls: ["pkg:npm/brace-expansion"]
-    statement: "pre-existing brace-expansion finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
-    expired_at: 2026-09-02
   - id: CVE-2026-14257
     purls: ["pkg:npm/brace-expansion"]
-    statement: "pre-existing brace-expansion finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
+    statement: "pre-existing brace-expansion finding vendored inside npm CLI itself (not this project's dependency tree); fixable once npm publishes a release with the fix; remediation required"
     expired_at: 2026-09-02
   - id: CVE-2026-69152
     purls: ["pkg:npm/brace-expansion"]
-    statement: "pre-existing brace-expansion finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
+    statement: "pre-existing brace-expansion finding vendored inside npm CLI itself (not this project's dependency tree); fixable once npm publishes a release with the fix; remediation required"
     expired_at: 2026-09-02
   - id: CVE-2026-69192
     purls: ["pkg:npm/ip-address"]
-    statement: "pre-existing ip-address finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
-    expired_at: 2026-09-02
-  - id: CVE-2026-33671
-    purls: ["pkg:npm/picomatch"]
-    statement: "pre-existing picomatch finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
-    expired_at: 2026-09-02
-  - id: CVE-2026-48815
-    purls: ["pkg:npm/sigstore"]
-    statement: "pre-existing sigstore finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
-    expired_at: 2026-09-02
-  - id: CVE-2026-59873
-    purls: ["pkg:npm/tar"]
-    statement: "pre-existing tar finding (CRITICAL), container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
-    expired_at: 2026-09-02
-  - id: CVE-2026-59874
-    purls: ["pkg:npm/tar"]
-    statement: "pre-existing tar finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
+    statement: "pre-existing ip-address finding vendored inside npm CLI itself (not this project's dependency tree); fixable once npm publishes a release with the fix; remediation required"
     expired_at: 2026-09-02
   - id: CVE-2026-73566
     purls: ["pkg:npm/tar"]
-    statement: "pre-existing tar finding, container-image-only, fixable via the same frontend dependency upgrade pass as .trivyignore.deps.yaml; remediation required"
+    statement: "pre-existing tar finding vendored inside npm CLI itself (not this project's dependency tree); fixable once npm publishes a release with the fix; remediation required"
     expired_at: 2026-09-02
