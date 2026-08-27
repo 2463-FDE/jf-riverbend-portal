@@ -73,18 +73,27 @@ deterministically by `db/seed/generate_seed.py` → `db/seed/seed.sql`
 (~250 patients, ~475 encounters, ~690 records, plus appointments, slots,
 insurance, ROI requests, and audit rows).
 
-**PHI columns are application-layer encrypted; nothing is encrypted at the
-storage layer.** `ssn`, `dob`, and `notes` (`patients`) are AEAD-encrypted
-(`libs/phi_crypto`) by intake-service on write and decrypted by
-records-service on read — see `adr/0012`. `ssn_digits` is an HMAC-SHA256
-blind index, not a raw digit copy, since that same change (migration 031).
-Nothing is encrypted at the storage layer — the deployment is docker compose
-with a local `pgdata` volume, and key custody is environment-variable-based
-(no KMS/secrets-manager integration exists) — and no hop uses TLS, including
-`/login`. This paragraph previously claimed storage-layer encryption and TLS
-in transit; both were false, and are still false. See `adr/0008` for the
-original recorded risk decision, `adr/0012` for the design that closed the
-field-encryption part of it, and `adr/0002` for the original data-and-
+**Selected PHI fields are application-layer encrypted; nothing is encrypted
+at the storage layer, and most PHI is still plaintext.**
+Exactly `patients.ssn`/`dob`/`notes` (`libs/phi_crypto`, `adr/0012`) —
+encrypted by intake-service on write, decrypted by records-service on
+read — and `agent_draft_provenance.generated_text` (`adr/0012` follow-up,
+migration 032, encrypted and decrypted entirely within records-service)
+are AEAD-encrypted. `ssn_digits` is an HMAC-SHA256 blind index, not a raw
+digit copy, since migration 031. Every OTHER PHI-bearing column —
+`records.title`/`body`/`reference_range`, `encounters.reason`/`allergies`/
+`medications`, `patients.address`/`phone`/`email`,
+`insurance_coverages.member_id`/`group_number`, secure-message bodies,
+among others — remains plaintext; this is field-by-field coverage, not a
+blanket claim. Nothing is encrypted at the storage layer — the deployment
+is docker compose with a local `pgdata` volume, and key custody for the
+fields that ARE encrypted is environment-variable-based, not KMS-backed
+(no KMS/secrets-manager integration exists) — and no hop uses TLS,
+including `/login`. This paragraph previously claimed storage-layer
+encryption and TLS in transit; both were false, and are still false. See
+`adr/0008` for the original recorded risk decision, `adr/0012` for the
+field-encryption design (and its own follow-up entry covering the agent
+draft text), and `adr/0002` for the original data-and-
 compliance discussion.
 
 ## 6. External integrations
@@ -103,8 +112,10 @@ catch-up work (cited inline below) — this list is corrected to match current
 code, not the original handoff snapshot. Each remaining item is marked open
 here; sequencing lives in the current delivery plan, not in this file.
 
-- **Compliance posture is self-asserted.** PHI columns are plaintext (`adr/0002`,
-  unchanged). ~~"audit" is still mutable request logging, not a tamper-evident
+- **Compliance posture is self-asserted.** Most PHI columns are plaintext
+  (`adr/0002`) — `patients.ssn`/`dob`/`notes` and
+  `agent_draft_provenance.generated_text` are the exceptions (`adr/0012`);
+  see §5 above for the full "what is / is not encrypted" list. ~~"audit" is still mutable request logging, not a tamper-evident
   access trail.~~ **Resolved against the threat model this control targets**
   (w8-planner-2 P3, closes AUD-B01). **Threat model:** a compromised or buggy
   runtime/application role (`riverbend_app`) — the credential every service
