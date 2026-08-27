@@ -74,3 +74,40 @@ export async function apiFetch(
   if (token) headers.set("Authorization", `Bearer ${token}`);
   return fetch(input, { ...init, headers });
 }
+
+// w8-planner-2 MFA rollout — a pending login challenge exists ONLY between
+// POST /login returning mfa.challenge_token (no session yet) and that
+// challenge being completed at /mfa/enroll or /login/mfa. It is not an
+// auth token itself (see services/gateway/security.py's own comment on
+// what a challenge does and does not prove) and carries no more privilege
+// than "the password check already passed" — sessionStorage is used for
+// the same shared-workstation reasoning as the real token above, and it is
+// cleared the moment enrollment/verification succeeds OR fails terminally.
+const MFA_CHALLENGE_KEY = "riverbend.mfa.challenge";
+const MFA_ENROLLMENT_REQUIRED_KEY = "riverbend.mfa.enrollmentRequired";
+
+export interface PendingMfaChallenge {
+  challengeToken: string;
+  enrollmentRequired: boolean;
+}
+
+export function setPendingMfaChallenge(challengeToken: string, enrollmentRequired: boolean): void {
+  const s = store();
+  if (!s) return;
+  s.setItem(MFA_CHALLENGE_KEY, challengeToken);
+  s.setItem(MFA_ENROLLMENT_REQUIRED_KEY, enrollmentRequired ? "1" : "0");
+}
+
+export function getPendingMfaChallenge(): PendingMfaChallenge | null {
+  const s = store();
+  const challengeToken = s?.getItem(MFA_CHALLENGE_KEY);
+  if (!challengeToken) return null;
+  return { challengeToken, enrollmentRequired: s?.getItem(MFA_ENROLLMENT_REQUIRED_KEY) === "1" };
+}
+
+export function clearPendingMfaChallenge(): void {
+  const s = store();
+  if (!s) return;
+  s.removeItem(MFA_CHALLENGE_KEY);
+  s.removeItem(MFA_ENROLLMENT_REQUIRED_KEY);
+}

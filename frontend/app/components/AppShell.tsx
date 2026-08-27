@@ -168,11 +168,23 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // running app. Every API-level test passed throughout, because none of them
   // went through a browser.
   //
+  // /login/mfa and /mfa/enroll are the same case for a different reason
+  // (w8-planner-2 MFA rollout): a forced first-time enrollment or a
+  // login-challenge completion happens BEFORE any session exists — the
+  // caller is holding only a short-lived, single-purpose challenge token
+  // (lib/session.ts's PendingMfaChallenge), never a real one. Bouncing
+  // either page to /login the same way a private route would defeat the
+  // whole flow: there would be nowhere to finish it.
+  //
   // This is not an authorization decision. Nothing sensitive is served on
   // these routes; /activate's own endpoint is public at the gateway and
   // returns one identical answer for every failure so it cannot be used to
   // discover valid codes.
-  const isPublicRoute = pathname === "/login" || pathname === "/activate";
+  const isPublicRoute =
+    pathname === "/login" ||
+    pathname === "/activate" ||
+    pathname === "/login/mfa" ||
+    pathname === "/mfa/enroll";
 
   // Hydrate the signed-in user from sessionStorage (see lib/session.ts for
   // why not localStorage). There is no real route guard here beyond "no token

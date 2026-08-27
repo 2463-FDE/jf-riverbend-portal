@@ -7,4 +7,13 @@ SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 
 # config/roles.yaml loader (roles_config.py) — the RBAC permission source.
+# Also used by mfa_config.py for config/mfa.yaml (the rollout mode/scope).
 PyYAML==6.0.2
+
+# MFA rollout (w8-planner-2). pyotp: RFC 6238 TOTP (mfa_totp.py). cryptography:
+# AEAD envelope encrypt/decrypt for TOTP secrets (mfa_crypto.py), reusing
+# libs/phi_crypto/envelope.py's encode/decode — matches
+# libs/phi_crypto/requirements.txt's pin, same as records-service/
+# intake-service already do for PHI field encryption (adr/0012).
+pyotp==2.10.0
+cryptography==50.0.1

@@ -35,7 +35,7 @@ the PR's "Open decisions" section.
 import json
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Tuple
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -46,13 +46,35 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
+import mfa_backup_codes
+import mfa_config
+import mfa_crypto
+import mfa_totp
 import patient_invitations
 import roles_config
 from config import settings
 from db import get_db
 from logging_config import configure
-from models import InsuranceCoverage, Patient, PatientAccessGrant, PatientInvitation, User
-from security import create_session, destroy_session, get_session, hash_password, verify_password
+from models import (
+    AuditLog,
+    InsuranceCoverage,
+    MfaBackupCode,
+    Patient,
+    PatientAccessGrant,
+    PatientInvitation,
+    User,
+)
+from security import (
+    create_mfa_challenge,
+    create_session,
+    destroy_mfa_challenge,
+    destroy_session,
+    get_mfa_challenge,
+    get_session,
+    hash_password,
+    rate_limit,
+    verify_password,
+)
 from visit_authorization import (
     find_authorized_appointment,
     has_active_grant,
@@ -66,6 +88,18 @@ _MIN_INTERNAL_TOKEN_LENGTH = 32
 # Patient-chosen, so it needs a floor. auth.yaml's password_min_length of 6 is
 # the legacy staff value and is too low for a credential to a medical record.
 _MIN_PATIENT_PASSWORD_LENGTH = 12  # matches intake-service/records-service's own floor
+
+# MFA rollout (w8-planner-2) rate limits — see security.rate_limit. Generous
+# enough for a real person misremembering a code twice, tight enough that a
+# 6-digit TOTP code (1,000,000 combinations) or a 10-char backup code cannot
+# be meaningfully brute-forced through this path.
+_LOGIN_RATE_LIMIT = 10
+_LOGIN_RATE_WINDOW_SECONDS = 300
+_MFA_CONFIRM_RATE_LIMIT = 5
+_MFA_CONFIRM_RATE_WINDOW_SECONDS = 300
+_MFA_VERIFY_RATE_LIMIT = 5
+_MFA_VERIFY_RATE_WINDOW_SECONDS = 300
+_BACKUP_CODE_COUNT = 10
 
 
 def _internal_token_is_configured() -> bool:
@@ -121,6 +155,36 @@ async def lifespan(_app: FastAPI):
             f"authorized route would fail. Check that config/roles.yaml is present "
             f"in the image (see services/gateway/Dockerfile) or set "
             f"ROLES_CONFIG_PATH to its location."
+        )
+
+    # MFA rollout (w8-planner-2). Same "fail as loudly and as early as
+    # possible" posture as the two checks above: config/mfa.yaml is
+    # re-read (mfa_config.reload()) so a stale in-process cache from a
+    # prior test/import can never leak into a real startup, and — only
+    # when the rollout is actually switched on — MFA_ACTIVE_KEY_VERSION /
+    # MFA_ENCRYPTION_KEY_V<n> are validated eagerly. A deploy with
+    # mode=off never needs that key material, so it is not required in
+    # that case; the moment mode becomes "prompt" or "enforce", a missing
+    # or malformed key must stop the process at startup, not surface as a
+    # 500 the first time someone tries to enroll.
+    try:
+        mfa_config.reload()
+        mode = mfa_config.effective_mode()
+        if mode != "off":
+            mfa_crypto.reset_key_provider()
+            mfa_crypto.get_key_provider()
+        if mfa_config.raw().get("rollback_override"):
+            log.warning(
+                "MFA emergency rollback_override is ACTIVE — every account's "
+                "effective mode is forced to 'prompt' (or 'off') regardless "
+                "of config/mfa.yaml's configured mode/cutover_at."
+            )
+    except Exception as e:
+        raise RuntimeError(
+            f"could not start with the configured MFA rollout ({type(e).__name__}: {e}) "
+            f"— refusing to start rather than accept logins config/mfa.yaml's mode "
+            f"cannot actually support. Check config/mfa.yaml and, if mode is not "
+            f"'off', MFA_ACTIVE_KEY_VERSION/MFA_ENCRYPTION_KEY_V<n> in .env."
         )
     yield
 
@@ -201,24 +265,68 @@ def healthz():
     return {"status": "ok", "service": settings.service_name}
 
 
+def _write_audit(db: Session, *, actor: str, message: str) -> None:
+    """Same append-only audit_logs table records-service writes to
+    (migrations 026/027; ADR 0001 mirror, see models.AuditLog) — MFA events
+    are a gateway concern (it owns login/session/challenge issuance), so the
+    gateway writes here directly rather than proxying through another
+    service. `message` is metadata only: identifiers and outcome, NEVER a
+    TOTP code, backup code, secret, or otpauth:// URI — every call site
+    below is reviewed against that invariant (see
+    tests/test_gateway_mfa_no_secrets_in_audit.py).
+
+    Fails closed, same as records-service's identical helper: an audit
+    write that doesn't commit turns into a 503 for the whole request rather
+    than letting an MFA event complete with zero durable trace of it.
+    """
+    try:
+        db.add(AuditLog(actor=actor, message=message))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("mfa: failed to write audit_logs entry")
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     """
-    Issue a session token. Password only — there is no second factor here.
+    Verify the password, then decide what happens next from
+    mfa_config.mfa_requirement_for(user):
 
-    A working TOTP implementation was built and tested on this branch and
-    then removed from it: the client's 2026-08-12 direction was to park MFA
-    for a later, complete rollout (backup codes, supervisor-verified reset,
-    reset logging, shared-login remediation, pilot clinic, grace period,
-    dated cutover) rather than ship the mechanism alone this cycle. The
-    prototype lives on `feat/mfa-totp-parked`, unmerged, with a planning
-    card — see that branch's PR. Do not re-add a partial second factor here.
+      'off'     — issue a full session directly, exactly like before MFA
+                  existed. This is the ONLY behavior for any account until
+                  config/mfa.yaml's mode is changed from its default.
+      'prompt'  — issue a full session directly (password-only behavior is
+                  preserved), but the response says mfa.prompt=true so the
+                  frontend can nudge an unenrolled account to set MFA up.
+      'enforce' — do NOT issue a session. Password success alone is no
+                  longer sufficient for an in-scope account: mint a
+                  short-lived, single-purpose Redis challenge (security.
+                  create_mfa_challenge) instead, and tell the caller whether
+                  it must complete enrollment (POST /mfa/enroll/start then
+                  /mfa/enroll/confirm) or a login challenge (POST
+                  /mfa/verify) to actually get a session.
+
+    A working TOTP prototype was built once, then parked (2026-08-12) until
+    a complete rollout — backup codes, supervisor-verified reset, shared-
+    login handling, pilot scope, grace period, dated cutover — could ship
+    together rather than a bare mechanism. This is that rollout; see
+    mfa_config.py, mfa_crypto.py, mfa_totp.py, mfa_backup_codes.py, and the
+    /mfa/* routes below.
 
     Login rejects inactive users up front; the token carries the stable
     users.id and both an idle and an absolute Redis TTL (see
     create_session). Per-request is_active revalidation for chart data is
     enforced at records-service's SqlPatientAccessGate (PR #23 round 2).
     """
+    # Rate limit BEFORE the DB round-trip, keyed on the submitted username
+    # verbatim (not a resolved account id) — the same limit applies whether
+    # or not that username exists, so this is not a new account-existence
+    # oracle on top of the one the credential check below already avoids.
+    if not rate_limit(f"login:{req.username}", limit=_LOGIN_RATE_LIMIT, window_seconds=_LOGIN_RATE_WINDOW_SECONDS):
+        raise HTTPException(status_code=429, detail="too many attempts; please wait and try again")
+
     try:
         user = db.execute(select(User).where(User.username == req.username)).scalar_one_or_none()
     except Exception as e:  # DB down in local dev without compose
@@ -269,13 +377,50 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         log.warning("login denied: role '%s' is not defined in roles.yaml user=%s", user.role, user.username)
         raise HTTPException(status_code=401, detail="invalid username or password")
 
+    requirement = mfa_config.mfa_requirement_for(user)
+
+    if requirement == "enforce":
+        challenge_token = create_mfa_challenge(user.id, purpose="login")
+        enrollment_required = user.mfa_enrolled_at is None
+        _write_audit(
+            db, actor=user.username,
+            message=f"mfa_challenge_issued user_id={user.id} enrollment_required={enrollment_required}",
+        )
+        log.info("login: password ok, mfa challenge issued user=%s enrollment_required=%s",
+                 user.username, enrollment_required)
+        return {
+            "mfa": {
+                "required": True,
+                "enrollment_required": enrollment_required,
+                "challenge_token": challenge_token,
+            }
+        }
+
+    # 'off' or 'prompt' — password alone is sufficient, exactly like every
+    # account behaves today. The one difference for 'prompt' is purely
+    # informational: the frontend may nudge enrollment, but nothing here
+    # blocks on it.
+    if user.mfa_shared_account and mfa_config.effective_mode() != "off" and user.mfa_pilot:
+        # Visible, not silent (see mfa_config.mfa_requirement_for's own
+        # comment and migration 033): a pilot-flagged account that is ALSO
+        # marked shared would otherwise pass through with no trace that MFA
+        # was skipped specifically because of the shared-account exemption.
+        _write_audit(
+            db, actor=user.username,
+            message=f"mfa_shared_account_exempt user_id={user.id} — pilot flag set but account is marked shared",
+        )
+
     user.last_login_at = func.now()
     db.commit()
     token = create_session(user.id, user.username, user.role)
-    log.info("login ok user=%s", user.username)
+    log.info("login ok user=%s mfa_requirement=%s", user.username, requirement)
     return {
         "token": token,
-        "mfa": False,
+        "mfa": {
+            "required": False,
+            "prompt": requirement == "prompt" and user.mfa_enrolled_at is None,
+            "enrolled": user.mfa_enrolled_at is not None,
+        },
         "user": {"username": user.username, "full_name": user.full_name, "role": user.role},
     }
 
@@ -632,6 +777,371 @@ def logout(authorization: Optional[str] = Header(default=None)):
 @app.get("/me")
 def me(session: dict = Depends(require_session)):
     return {"username": session.get("username"), "role": session.get("role")}
+
+
+# --------------------------------------------------------------------------- #
+# MFA (w8-planner-2) — enrollment, login-challenge completion, backup codes,
+# and supervisor-authorized reset.
+#
+# Two ways a caller can prove "I am this user_id" for the enrollment routes:
+#   - an ordinary Authorization: Bearer session — voluntary enrollment while
+#     already signed in (config/mfa.yaml mode=prompt's whole point), or
+#   - a pending login challenge_token from /login's 'enforce' branch — forced
+#     first-time enrollment before any session exists yet.
+# /mfa/verify (the login-CHALLENGE completion, for an already-enrolled
+# account) only ever accepts a challenge_token: there is no "voluntarily
+# re-prove MFA while already logged in" flow, so accepting a session there
+# would just be dead code with a bigger attack surface.
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_mfa_principal(
+    db: Session, authorization: Optional[str], challenge_token: Optional[str]
+) -> Tuple[User, bool]:
+    """An active User row from EITHER a valid session OR a valid pending
+    'login' challenge — never both required, either is sufficient. Returns
+    (user, via_challenge) so callers that only mint a session for the
+    challenge path (confirm_mfa_enrollment) don't have to re-derive which
+    one actually matched. Raises 401 if neither resolves. Session is tried
+    first: an existing session takes precedence if a caller somehow sends
+    both, and it never touches Redis a second time to find out.
+    """
+    if authorization:
+        sess = get_session(_bearer(authorization))
+        if sess:
+            user_id = parse_user_id(sess.get("user_id"))
+            if user_id is not None:
+                user = db.get(User, user_id)
+                if user is not None and user.is_active:
+                    return user, False
+    if challenge_token:
+        challenge = get_mfa_challenge(challenge_token)
+        if challenge and challenge.get("purpose") == "login":
+            user = db.get(User, challenge["user_id"])
+            if user is not None and user.is_active:
+                return user, True
+    raise HTTPException(status_code=401, detail="not authenticated")
+
+
+def _generate_and_store_backup_codes(db: Session, user: User) -> list:
+    """Invalidate every currently-active code for `user`, generate a fresh
+    batch of ten, store only their hashes, and return the plaintext — the
+    ONLY point in this codebase the plaintext ever exists, and the caller
+    must return it to the client in this same response and never persist or
+    log it. Does not commit; the caller's own transaction does."""
+    db.execute(
+        update(MfaBackupCode)
+        .where(
+            MfaBackupCode.user_id == user.id,
+            MfaBackupCode.used_at.is_(None),
+            MfaBackupCode.invalidated_at.is_(None),
+        )
+        .values(invalidated_at=func.now())
+    )
+    codes = mfa_backup_codes.generate_codes(_BACKUP_CODE_COUNT)
+    for code in codes:
+        db.add(MfaBackupCode(user_id=user.id, code_hash=hash_password(code)))
+    return codes
+
+
+class MfaEnrollStartRequest(BaseModel):
+    challenge_token: Optional[str] = None
+
+
+@app.post("/mfa/enroll/start")
+def start_mfa_enrollment(
+    req: MfaEnrollStartRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Mint a fresh TOTP secret and return the otpauth:// URI a QR scanner
+    reads (plus the raw base32 secret, for manual entry) — enrollment is
+    PENDING until /mfa/enroll/confirm verifies a code against it.
+    Overwrites any previously-started, never-confirmed secret: each call is
+    a fresh start, not an accumulation.
+
+    Refuses (403) for an account this rollout has not reached
+    (mfa_requirement_for == 'off' — covers both mode=off and the shared-
+    account/pilot-scope exemptions) and for one already confirmed-enrolled
+    (409 — re-enrollment goes through a supervisor reset, not this route).
+    """
+    user, _via_challenge = _resolve_mfa_principal(db, authorization, req.challenge_token)
+
+    if mfa_config.mfa_requirement_for(user) == "off":
+        raise HTTPException(status_code=403, detail="mfa is not available for this account")
+    if user.mfa_enrolled_at is not None:
+        raise HTTPException(status_code=409, detail="mfa is already enrolled for this account")
+
+    secret = mfa_totp.generate_secret()
+    envelope, key_version = mfa_crypto.encrypt_totp_secret(user.id, secret)
+    user.mfa_secret_ciphertext = envelope
+    user.mfa_secret_key_version = key_version
+    db.commit()
+
+    _write_audit(db, actor=user.username, message=f"mfa_enrollment_started user_id={user.id}")
+    log.info("mfa: enrollment started user=%s", user.username)
+
+    return {
+        "otpauth_uri": mfa_totp.otpauth_uri(secret, user.username),
+        "manual_entry_key": secret,
+    }
+
+
+class MfaEnrollConfirmRequest(BaseModel):
+    challenge_token: Optional[str] = None
+    code: str
+
+
+@app.post("/mfa/enroll/confirm")
+def confirm_mfa_enrollment(
+    req: MfaEnrollConfirmRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Prove possession of the secret /mfa/enroll/start minted. On success:
+    stamps mfa_enrolled_at (enrollment is ACTIVE from this point), generates
+    the ten backup codes, and — if this call came via a login challenge_token
+    rather than an existing session — destroys that challenge and mints a
+    real session, so forced first-time enrollment completes login in one
+    step rather than requiring a second round-trip through /login."""
+    user, via_challenge = _resolve_mfa_principal(db, authorization, req.challenge_token)
+
+    if not rate_limit(
+        f"mfa-confirm:{user.id}", limit=_MFA_CONFIRM_RATE_LIMIT, window_seconds=_MFA_CONFIRM_RATE_WINDOW_SECONDS
+    ):
+        raise HTTPException(status_code=429, detail="too many attempts; please wait and try again")
+
+    if user.mfa_enrolled_at is not None:
+        raise HTTPException(status_code=409, detail="mfa is already enrolled for this account")
+    if not user.mfa_secret_ciphertext or not user.mfa_secret_key_version:
+        raise HTTPException(status_code=409, detail="no enrollment in progress — call /mfa/enroll/start first")
+
+    secret = mfa_crypto.decrypt_totp_secret(user.id, user.mfa_secret_ciphertext, user.mfa_secret_key_version)
+    step = mfa_totp.verify_code(secret, req.code)
+    if step is None:
+        _write_audit(db, actor=user.username, message=f"mfa_enrollment_confirm_failed user_id={user.id}")
+        raise HTTPException(status_code=401, detail="invalid code")
+
+    user.mfa_enrolled_at = func.now()
+    user.mfa_last_totp_step = step
+    codes = _generate_and_store_backup_codes(db, user)
+
+    session_out = None
+    if via_challenge:
+        destroy_mfa_challenge(req.challenge_token)
+        user.last_login_at = func.now()
+        session_out = create_session(user.id, user.username, user.role)
+
+    db.commit()
+    _write_audit(db, actor=user.username, message=f"mfa_enrollment_confirmed user_id={user.id}")
+    _write_audit(
+        db, actor=user.username, message=f"mfa_backup_codes_generated user_id={user.id} reason=enrollment"
+    )
+    log.info("mfa: enrollment confirmed user=%s", user.username)
+
+    out = {"status": "enrolled", "backup_codes": codes}
+    if session_out:
+        out["token"] = session_out
+        out["user"] = {"username": user.username, "full_name": user.full_name, "role": user.role}
+    return out
+
+
+class MfaVerifyRequest(BaseModel):
+    challenge_token: str
+    code: Optional[str] = None
+    backup_code: Optional[str] = None
+
+
+@app.post("/mfa/verify")
+def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
+    """Complete a pending login challenge for an ALREADY-enrolled account —
+    the login-challenge screen, not enrollment. Exactly one of `code`
+    (TOTP) or `backup_code` must be supplied. On success the challenge is
+    consumed and a real session is minted; on failure the challenge stays
+    alive (retryable within its own TTL, subject to the rate limit below)."""
+    if bool(req.code) == bool(req.backup_code):
+        raise HTTPException(status_code=400, detail="supply exactly one of code or backup_code")
+
+    challenge = get_mfa_challenge(req.challenge_token)
+    if not challenge or challenge.get("purpose") != "login":
+        raise HTTPException(status_code=401, detail="mfa challenge expired or invalid")
+
+    user = db.get(User, challenge["user_id"])
+    if user is None or not user.is_active or user.mfa_enrolled_at is None:
+        # Not a wrong-code case — this account cannot complete an MFA
+        # challenge at all right now (deactivated mid-flow, or never
+        # actually finished enrollment). The challenge is spent either way.
+        destroy_mfa_challenge(req.challenge_token)
+        raise HTTPException(status_code=401, detail="mfa is not available for this account")
+
+    if not rate_limit(
+        f"mfa-verify:{user.id}", limit=_MFA_VERIFY_RATE_LIMIT, window_seconds=_MFA_VERIFY_RATE_WINDOW_SECONDS
+    ):
+        raise HTTPException(status_code=429, detail="too many attempts; please wait and try again")
+
+    method = "totp" if req.code else "backup_code"
+    backup_codes_remaining = None
+
+    if req.code:
+        secret = mfa_crypto.decrypt_totp_secret(user.id, user.mfa_secret_ciphertext, user.mfa_secret_key_version)
+        step = mfa_totp.verify_code(secret, req.code, last_accepted_step=user.mfa_last_totp_step)
+        if step is None:
+            _write_audit(db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=totp")
+            raise HTTPException(status_code=401, detail="invalid code")
+        user.mfa_last_totp_step = step
+    else:
+        candidate = mfa_backup_codes.normalize(req.backup_code)
+        active_codes = db.execute(
+            select(MfaBackupCode).where(
+                MfaBackupCode.user_id == user.id,
+                MfaBackupCode.used_at.is_(None),
+                MfaBackupCode.invalidated_at.is_(None),
+            )
+        ).scalars().all()
+        matched_id = None
+        for row in active_codes:
+            if verify_password(candidate, row.code_hash):
+                matched_id = row.id
+                break
+        if matched_id is None:
+            _write_audit(
+                db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=backup_code"
+            )
+            raise HTTPException(status_code=401, detail="invalid backup code")
+        # Atomic claim (mirrors _activate_invitation's UPDATE ... RETURNING
+        # pattern above): a concurrent redemption of the same code cannot
+        # also succeed, since only the first UPDATE finds used_at still NULL.
+        claimed = db.execute(
+            update(MfaBackupCode)
+            .where(MfaBackupCode.id == matched_id, MfaBackupCode.used_at.is_(None))
+            .values(used_at=func.now())
+            .returning(MfaBackupCode.id)
+        ).scalar_one_or_none()
+        if claimed is None:
+            _write_audit(
+                db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=backup_code"
+            )
+            raise HTTPException(status_code=401, detail="invalid backup code")
+        backup_codes_remaining = db.execute(
+            select(func.count()).select_from(MfaBackupCode).where(
+                MfaBackupCode.user_id == user.id,
+                MfaBackupCode.used_at.is_(None),
+                MfaBackupCode.invalidated_at.is_(None),
+            )
+        ).scalar_one()
+
+    destroy_mfa_challenge(req.challenge_token)
+    user.last_login_at = func.now()
+    db.commit()
+    token = create_session(user.id, user.username, user.role)
+    _write_audit(db, actor=user.username, message=f"mfa_verified user_id={user.id} method={method}")
+    log.info("mfa: verified user=%s method=%s", user.username, method)
+
+    out = {
+        "token": token,
+        "user": {"username": user.username, "full_name": user.full_name, "role": user.role},
+    }
+    if backup_codes_remaining is not None:
+        out["backup_codes_remaining"] = backup_codes_remaining
+    return out
+
+
+@app.post("/mfa/backup-codes/regenerate")
+def regenerate_backup_codes(session: dict = Depends(require_session), db: Session = Depends(get_db)):
+    """Self-service — requires an existing full session. Invalidates every
+    previously-issued unused code before returning the new batch: a caller
+    who lost a printed sheet must not leave the old one still redeemable."""
+    user_id = parse_user_id(session.get("user_id"))
+    user = db.get(User, user_id) if user_id is not None else None
+    if user is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+    if user.mfa_enrolled_at is None:
+        raise HTTPException(status_code=409, detail="mfa is not enrolled for this account")
+
+    codes = _generate_and_store_backup_codes(db, user)
+    db.commit()
+    _write_audit(
+        db, actor=user.username, message=f"mfa_backup_codes_generated user_id={user.id} reason=regeneration"
+    )
+    log.info("mfa: backup codes regenerated user=%s", user.username)
+    return {"backup_codes": codes}
+
+
+@app.get("/mfa/status")
+def mfa_status(session: dict = Depends(require_session), db: Session = Depends(get_db)):
+    user_id = parse_user_id(session.get("user_id"))
+    user = db.get(User, user_id) if user_id is not None else None
+    if user is None:
+        raise HTTPException(status_code=403, detail="not authorized")
+
+    backup_codes_remaining = None
+    if user.mfa_enrolled_at is not None:
+        backup_codes_remaining = db.execute(
+            select(func.count()).select_from(MfaBackupCode).where(
+                MfaBackupCode.user_id == user.id,
+                MfaBackupCode.used_at.is_(None),
+                MfaBackupCode.invalidated_at.is_(None),
+            )
+        ).scalar_one()
+
+    return {
+        "requirement": mfa_config.mfa_requirement_for(user),
+        "enrolled": user.mfa_enrolled_at is not None,
+        "pilot": user.mfa_pilot,
+        "shared_account": user.mfa_shared_account,
+        "backup_codes_remaining": backup_codes_remaining,
+    }
+
+
+class MfaResetRequest(BaseModel):
+    username: str
+
+
+@app.post("/mfa/reset")
+def reset_mfa(
+    req: MfaResetRequest,
+    session: dict = Depends(require_permission("accounts.write")),
+    db: Session = Depends(get_db),
+):
+    """Supervisor-authorized reset: clears MFA enrollment for `username` so
+    they can re-enroll from scratch (a lost device, a compromised secret).
+    Gated on accounts.write (config/roles.yaml — it_admin today; the same
+    permission that already governs staff account administration) rather
+    than a new permission invented for this one action.
+
+    Self-approval is refused regardless of role: an it_admin cannot reset
+    their own MFA through this route, full stop — see the explicit id
+    comparison below. Everything the reset touches (secret, enrollment
+    timestamp, outstanding backup codes) clears in ONE transaction with the
+    audit row describing it, so there is no window where the account is
+    partially reset.
+    """
+    actor_id = parse_user_id(session.get("user_id"))
+    target = db.execute(select(User).where(User.username == req.username)).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="no such account")
+    if actor_id is not None and target.id == actor_id:
+        raise HTTPException(status_code=403, detail="cannot reset your own mfa enrollment")
+
+    target.mfa_secret_ciphertext = None
+    target.mfa_secret_key_version = None
+    target.mfa_enrolled_at = None
+    target.mfa_last_totp_step = None
+    db.execute(
+        update(MfaBackupCode)
+        .where(
+            MfaBackupCode.user_id == target.id,
+            MfaBackupCode.used_at.is_(None),
+            MfaBackupCode.invalidated_at.is_(None),
+        )
+        .values(invalidated_at=func.now())
+    )
+    actor_label = session.get("username") or f"user_id={actor_id}"
+    db.add(AuditLog(actor=actor_label, message=f"mfa_reset target_user_id={target.id} target_username={target.username}"))
+    db.commit()
+
+    log.info("mfa: reset for user=%s by=%s", target.username, actor_label)
+    return {"status": "reset", "username": target.username}
 
 
 # --------------------------------------------------------------------------- #

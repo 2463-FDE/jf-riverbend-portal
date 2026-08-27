@@ -1,0 +1,66 @@
+# MFA rollout configuration — services/gateway/mfa_config.py is the only
+# reader. Hot-reloadable the same way config/roles.yaml is (reload() is
+# used by tests and by the gateway's own startup check); a normal deploy
+# changes this file and restarts the gateway, no migration involved.
+#
+# mode: off | prompt | enforce
+#   off     — MFA is completely inactive. /login is password-only for
+#             everyone, period. Enrollment routes refuse with 404-shaped
+#             "mfa is not enabled" rather than quietly accepting a secret
+#             nobody asked for.
+#   prompt  — Enrollment is available and the frontend nudges in-scope
+#             accounts to set it up, but password success ALWAYS mints a
+#             full session — this mode never blocks login. This is the
+#             "two-week prompt-only grace period" the 2026-08-12 park
+#             decision named.
+#   enforce — For in-scope accounts (see `scope` below), password success
+#             does not mint a session by itself. An unenrolled in-scope
+#             account is walked through forced enrollment; an enrolled one
+#             must complete a TOTP or backup-code challenge first.
+#
+# Starting value is `off` on purpose — flipping this to `prompt` or
+# `enforce` in a real deployment is a deliberate, reviewed config change,
+# not something that ships silently true.
+#
+# QUOTED deliberately: YAML 1.1 parses a bare `off` (also on/yes/no) as the
+# boolean False, not the string "off" — services/gateway/mfa_config.py
+# coerces that one specific case defensively, but write it quoted here
+# regardless so the file means what it looks like it means.
+mode: "off"
+
+# scope: pilot | all
+#   pilot — only accounts with users.mfa_pilot = true are ever prompted or
+#           enforced, regardless of `mode`. This is how a pilot clinic is
+#           scoped: per-account, explicitly, never a guessed username list
+#           or role name baked into this file.
+#   all   — every account is in scope EXCEPT one explicit exception below:
+#           users.mfa_shared_account = true accounts are never in scope no
+#           matter what `scope` says (see that column's comment in
+#           migration 033) — a shared login cannot safely hold an
+#           individual TOTP secret, and that exclusion is not something
+#           `scope: all` overrides.
+scope: pilot
+
+# Dated cutover for the prompt-only grace period: once now() >= cutover_at,
+# an in-scope account under mode=prompt is treated as enforce automatically
+# — no second deploy needed at the exact hour the grace period ends. Only
+# consulted when mode is exactly "prompt". null = no cutover scheduled
+# (prompt stays prompt indefinitely until mode is changed by hand).
+#
+# ISO 8601, e.g. "2026-09-10T00:00:00Z".
+cutover_at: null
+
+# Emergency rollback switch. When true, the EFFECTIVE mode for every
+# account is forced back to "prompt" (or "off", if mode is literally "off")
+# regardless of `mode`/`cutover_at` — a single field to flip during an
+# incident, rather than having to reason about unwinding cutover_at and
+# mode together under pressure. Every reload where this is true is logged
+# at gateway startup so a forgotten rollback is visible, not silent.
+rollback_override: false
+
+# Challenge TTL, rate limits, and key material are env-driven, not here —
+# see services/gateway/config.py (MFA_CHALLENGE_TIMEOUT_SECONDS and friends)
+# and .env.example, matching how session_timeout_seconds already works.
+# This file holds only the rollout DECISION (mode/scope/cutover/rollback),
+# which is what a deploy needs to change on its own schedule, independent
+# of any secret or timing constant.

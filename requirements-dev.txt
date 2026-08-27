@@ -22,3 +22,8 @@ langchain-core==1.6.0
 # eagerly (not lazy like libs/tracing) — needs this importable at collection
 # time. Matches libs/phi_crypto/requirements.txt's pin.
 cryptography==50.0.1
+
+# w8-planner-2 MFA rollout: tests/test_gateway_mfa_totp.py and the gateway's
+# own mfa_totp.py need pyotp importable. Matches services/gateway/
+# requirements.txt's pin.
+pyotp==2.10.0
