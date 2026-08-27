@@ -222,6 +222,85 @@ plaintext PHI (Postgres's own init sequence has no way to reach
 keys are in `.env` at that moment. Idempotent — safe to run again by hand
 (`make phi-backfill`) if you ever need to.
 
+## Required setup before enabling MFA: MFA_ACTIVE_KEY_VERSION, MFA_ENCRYPTION_KEY_V1
+
+w8-planner-2 (PR #101): the gateway can AEAD-encrypt TOTP secrets
+(`services/gateway/mfa_crypto.py`) under key material that is deliberately
+**separate** from `PHI_ACTIVE_KEY_VERSION`/`PHI_ENCRYPTION_KEY_V1` above — a
+TOTP secret and PHI are different data classes, and this repo does not
+couple their rotation.
+
+Unlike the PHI keys, these are **not** required for every `make up`:
+`config/mfa.yaml` ships `mode: "off"`, and the gateway only refuses to
+start over missing/malformed MFA key material when that mode is
+`prompt` or `enforce` (`app.py`'s startup check, mirroring the PHI one).
+Leave `.env`'s `MFA_ACTIVE_KEY_VERSION`/`MFA_ENCRYPTION_KEY_V1` blank and
+everything behaves exactly as it did before MFA existed.
+
+```bash
+openssl rand -base64 32   # -> MFA_ENCRYPTION_KEY_V1
+```
+
+Put it in `.env` alongside `MFA_ACTIVE_KEY_VERSION=v1` (see `.env.example`)
+**before** flipping `config/mfa.yaml`'s `mode` away from `"off"` — see
+"Enabling MFA" below for the full sequence. Same posture as the PHI keys:
+environment-variable-provided secret injection, not KMS-backed custody.
+
+## Enabling MFA (pilot rollout)
+
+MFA ships implemented but inert — `config/mfa.yaml`'s `mode: "off"` and
+every existing/seeded account's `mfa_shared_account = TRUE` /
+`mfa_pilot = FALSE` (migration 033) mean merging PR #101 enrolled and
+enforces nothing on its own. Turning it on for a real deployment is a
+sequence of deliberate, reviewed steps — not a single flag:
+
+1. **Set MFA-specific encryption key material** — see the setup section
+   above. Required before mode leaves `"off"`.
+2. **Classify an account as individually owned** — set
+   `users.mfa_shared_account = false` for that specific account. This repo
+   has no staff-directory data to do this in bulk or automatically; it is
+   an explicit, per-account operational decision the client makes, account
+   by account, the same way role migration off the legacy `staff` role
+   already is (see "No MFA" in `CLAUDE.md`'s Known Risks section). Never
+   set this for a login multiple people actually share — an individual
+   TOTP secret on a shared login locks out everyone else who uses it.
+3. **Add the account to the pilot scope** — set `users.mfa_pilot = true`
+   for that same account. `config/mfa.yaml`'s default `scope: pilot` means
+   nothing outside this explicit set is ever prompted or enforced,
+   regardless of `mode`.
+4. **Start in `prompt` mode** — set `config/mfa.yaml`'s `mode: prompt` and
+   restart the gateway (this file is baked into the image; a mode change
+   needs a rebuild + redeploy, not a live edit). Prompt mode never blocks
+   login — it only makes enrollment available and nudges the pilot
+   account toward it.
+5. **Validate enrollment, backup codes, supervisor reset, and
+   shared-workstation behavior** with the pilot account(s) before touching
+   `mode` again: complete enrollment end to end, confirm the ten backup
+   codes work and regenerate correctly, exercise a supervisor reset
+   (`POST /mfa/reset`, `accounts.write`-gated, self-approval refused) and
+   confirm the reset account can re-enroll cleanly, and confirm signing
+   out actually ends the session on a shared workstation the way it did
+   before MFA existed.
+6. **Configure the grace/cutover date** — `config/mfa.yaml`'s `cutover_at`
+   (ISO 8601), if a dated, automatic prompt-to-enforce transition is
+   wanted instead of a manual mode flip. Optional; `null` (the default)
+   means prompt stays prompt until `mode` is changed by hand.
+7. **Move to `enforce` mode** — set `mode: enforce` (or let `cutover_at`
+   do it automatically) once every account meant to be in scope has been
+   through steps 2–5. From this point, a pilot-scoped, non-shared account
+   cannot obtain a session with password alone.
+8. **Use the documented rollback override if needed** — `config/mfa.yaml`'s
+   `rollback_override: true` forces every account's effective mode back to
+   `prompt` (or `off`, if `mode` is literally `off`) regardless of
+   `mode`/`cutover_at` — a single field for an incident, without having to
+   reason about unwinding `cutover_at` and `mode` together under pressure.
+
+**What this repo cannot do for you:** classify the real staff roster
+(which accounts are individually owned vs. shared), select real pilot
+users, or decide rollout dates. Those are client/deployment decisions —
+steps 2, 3, and 6 above are where they land, not something guessed in
+code or seed data.
+
 ## Start / stop
 
 ```bash

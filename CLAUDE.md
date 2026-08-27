@@ -150,15 +150,27 @@ open here as open until the code says otherwise.
   (`absolute_session_timeout_seconds`, default 24h, checked at every lookup
   regardless of activity) — `auth.yaml`'s `SESSION_TIMEOUT: never` was stale
   text even before this cap existed.
-- **No MFA. Still open, deliberately deferred to next cycle.** A working TOTP
-  second factor was built and tested, then parked at the client's 2026-08-12
-  direction: they want it as one complete rollout (backup codes,
-  supervisor-verified reset, reset logging, shared-front-desk-login
-  remediation, pilot clinic, two-week prompt-only grace period, dated
-  cutover, shared-workstation validation) rather than a mechanism shipped
-  alone. The prototype lives on `feat/mfa-totp-parked`, **unmerged**, with a
-  planning card; it is incomplete against those requirements. Nothing in the
-  merged tree provides a second factor — `/login` is password-only.
+- ~~No MFA. Deliberately deferred to next cycle at the client's 2026-08-12
+  direction; a bare TOTP prototype sat parked, unmerged, on
+  `feat/mfa-totp-parked`.~~ **Resolved as the complete rollout the client
+  asked for** (w8-planner-2, PR #101, migration 033,
+  `services/gateway/mfa_*.py`, `config/mfa.yaml`): TOTP enrollment (pending
+  until proven), AEAD-encrypted secrets under MFA-specific key material
+  (never the PHI keys), a Redis login challenge gating session issuance for
+  enforced accounts (with a per-account challenge epoch so a supervisor
+  reset invalidates any pre-reset challenge), ten hashed one-time backup
+  codes, a supervisor-only reset that refuses self-approval, reset/
+  enrollment/verify auditing that never records secret material, rate
+  limiting, and config-driven `off`/`prompt`/`enforce` rollout with pilot
+  scope, a dated cutover, and an emergency rollback. **Ships `off`** — this
+  landing does not enroll or enforce anything for any account. Every
+  existing/seeded account defaults to `mfa_shared_account = TRUE` and
+  `mfa_pilot = FALSE` (fail closed: nothing is prompted/enforced until an
+  account is explicitly reclassified) — this repo still has no real
+  staff-directory data to say which accounts are individually owned versus
+  a shared login, so that classification, pilot-account selection, and
+  rollout dates remain the client's call, not guessed here. See
+  `docs/runbook.md` for the operator activation sequence.
 - ~~Every account has a single flat `staff` role — no per-action
   authorization~~ **Partially resolved.** `config/roles.yaml` now defines
   four real, enforced least-privilege roles (`front_desk`, `clinician`,

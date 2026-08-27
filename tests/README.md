@@ -59,5 +59,9 @@ work — corrected below to match current tests, not the handoff snapshot.
   at the data-query boundary, because that enforcement doesn't exist yet —
   `records-service` consults no role at all today. That is this cycle's
   primary RBAC work, and it is where the enforcement test must live.
-- No MFA tests: the TOTP prototype and its tests are parked, unmerged, on
-  `feat/mfa-totp-parked`.
+- ~~No MFA tests: the TOTP prototype and its tests are parked, unmerged, on
+  `feat/mfa-totp-parked`.~~ **Resolved** (w8-planner-2, PR #101):
+  `test_gateway_mfa_*.py`, `test_gateway_login_route.py`, and
+  `test_gateway_security_mfa.py` cover enrollment, the login challenge,
+  backup codes, supervisor reset, rollout-mode/pilot-scope behavior, and
+  that no secret material reaches logs or `audit_logs`.

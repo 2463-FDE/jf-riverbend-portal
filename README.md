@@ -105,6 +105,20 @@ What is implemented and tested:
   - `agent_draft_provenance.generated_text` (`adr/0012` follow-up, migration 032)
   - Key custody is environment-variable-based (no KMS/secrets-manager
     integration exists), a documented, accepted limitation, not an oversight.
+- **TOTP multi-factor authentication is implemented** (w8-planner-2,
+  migration 033, `services/gateway/mfa_*.py`): enrollment gated on proving
+  possession of the secret, encrypted TOTP secrets (MFA-specific key
+  material, not the PHI keys above), ten hashed one-time backup codes,
+  supervisor-only reset (self-approval refused, with a per-account
+  challenge epoch that fails closed on anything issued before a reset),
+  reset auditing, rate limiting, and config-driven `off`/`prompt`/`enforce`
+  rollout with pilot scope, a dated grace/cutover window, and an emergency
+  rollback. **MFA ships OFF by default** (`config/mfa.yaml`) and every
+  existing account defaults to `mfa_shared_account = TRUE` /
+  `mfa_pilot = FALSE` — this code existing does not mean any real account
+  is enrolled or enforced; see `docs/runbook.md` for what turning it on
+  actually requires and the roster/pilot-selection dependency that remains
+  outside this repository.
 
 What is not:
 
@@ -119,7 +133,6 @@ What is not:
   for the recorded risk decision this doesn't change
 - **no KMS-backed key custody** for the fields that ARE encrypted (see above)
 - no TLS on any hop
-- no MFA outside a pilot-clinic scope
 - **`audit_logs` is append-only and tamper-evident against a compromised
   runtime/application role** — a trigger rejects `UPDATE`/`DELETE` regardless
   of caller (026), the runtime role cannot disable that trigger or rewrite the
