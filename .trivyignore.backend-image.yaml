@@ -1,0 +1,47 @@
+# Temporary, narrow vulnerability baseline (P5 follow-up).
+#
+# Pre-existing findings shared identically by all 7 backend service images
+# (eligibility-service, gateway, intake-service, interop-service,
+# records-service, roi-service, scheduling-service), all built FROM the same
+# unpinned python:3.12-slim base. One entry per unique CVE, scoped by exact
+# package PURL (purls: applies across every image scanned with this file --
+# no per-image duplication needed). Fixable (a fixed version exists per
+# Trivy's own scan output), temporary: remediation is pinning python:3.12-slim
+# to an explicit digest (P5 follow-up, item 3), tracked to land and this file
+# deleted before 2026-09-02. CRITICAL/HIGH findings NOT listed here still fail
+# the build.
+#
+# Malformed YAML here must fail CI -- see the validate-ignore-files job.
+vulnerabilities:
+  - id: CVE-2026-53612
+    purls: ["pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2", "pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1", "pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux"]
+    statement: "pre-existing util-linux/bsdutils-family finding in python:3.12-slim's Debian base layer, shared by all 7 backend images; remediation is pinning the base image (P5 follow-up)"
+    expired_at: 2026-09-02
+  - id: CVE-2026-53613
+    purls: ["pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2", "pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1", "pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux"]
+    statement: "pre-existing util-linux/bsdutils-family finding in python:3.12-slim's Debian base layer, shared by all 7 backend images; remediation is pinning the base image (P5 follow-up)"
+    expired_at: 2026-09-02
+  - id: CVE-2026-53614
+    purls: ["pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2", "pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1", "pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux"]
+    statement: "pre-existing util-linux/bsdutils-family finding in python:3.12-slim's Debian base layer, shared by all 7 backend images; remediation is pinning the base image (P5 follow-up)"
+    expired_at: 2026-09-02
+  - id: CVE-2026-53615
+    purls: ["pkg:deb/debian/bsdutils", "pkg:deb/debian/libblkid1", "pkg:deb/debian/liblastlog2-2", "pkg:deb/debian/libmount1", "pkg:deb/debian/libsmartcols1", "pkg:deb/debian/libuuid1", "pkg:deb/debian/login", "pkg:deb/debian/mount", "pkg:deb/debian/util-linux"]
+    statement: "pre-existing util-linux/bsdutils-family finding in python:3.12-slim's Debian base layer, shared by all 7 backend images; remediation is pinning the base image (P5 follow-up)"
+    expired_at: 2026-09-02
+  - id: CVE-2026-14456
+    purls: ["pkg:deb/debian/libssl3t64", "pkg:deb/debian/openssl", "pkg:deb/debian/openssl-provider-legacy"]
+    statement: "pre-existing OpenSSL finding in python:3.12-slim's Debian base layer, shared by all 7 backend images; remediation is pinning the base image (P5 follow-up)"
+    expired_at: 2026-09-02
+  - id: CVE-2025-62727
+    purls: ["pkg:pypi/starlette"]
+    statement: "pre-existing starlette finding, fixable via a compatible fastapi/starlette upgrade (P5 follow-up); remediation required"
+    expired_at: 2026-09-02
+  - id: CVE-2026-48818
+    purls: ["pkg:pypi/starlette"]
+    statement: "pre-existing starlette finding, fixable via a compatible fastapi/starlette upgrade (P5 follow-up); remediation required"
+    expired_at: 2026-09-02
+  - id: CVE-2026-54283
+    purls: ["pkg:pypi/starlette"]
+    statement: "pre-existing starlette finding, fixable via a compatible fastapi/starlette upgrade (P5 follow-up); remediation required"
+    expired_at: 2026-09-02
