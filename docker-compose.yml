@@ -1,9 +1,16 @@
 services:
   postgres:
-    # pgvector/pgvector:0.8.0-pg15 is a drop-in postgres:15 build with the
+    # pgvector/pgvector:0.8.6-pg15 is a drop-in postgres:15 build with the
     # pgvector extension pre-installed (see db/migrations/010_pgvector_embeddings.sql,
-    # adr/0006) — no other change to how Postgres runs here.
-    image: pgvector/pgvector:0.8.0-pg15
+    # adr/0006) — no other change to how Postgres runs here. Bumped from
+    # 0.8.0-pg15 (P5 follow-up, item 4): a patch-level pgvector bump, same
+    # HNSW/vector_cosine_ops API this schema already uses (stable since
+    # pgvector 0.5.0) — verified via a fresh install + the rag_corpus/
+    # pgvector integration tests. Trivy: 131 findings -> 22, all remaining
+    # in usr/local/bin/gosu (pgvector's own vendored binary, unrelated to
+    # Postgres/pgvector itself) — report-only third-party scan, tracked
+    # upstream, not this repo's to fix directly.
+    image: pgvector/pgvector:0.8.6-pg15
     environment:
       POSTGRES_DB: ${DB_NAME:-riverbend}
       # Admin/runtime role separation (P3 AUD-B01, w8-planner-2): the
