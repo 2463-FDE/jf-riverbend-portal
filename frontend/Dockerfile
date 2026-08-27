@@ -1,5 +1,13 @@
 FROM node:22-slim
 
+# node:22-slim bundles its own npm CLI, which vendors its OWN copies of
+# tar/sigstore/ip-address/brace-expansion/picomatch (used for npm's package
+# integrity/provenance verification) - entirely separate from anything in
+# this project's own package-lock.json, and invisible to `npm ls`/`npm
+# audit` run against this project. Upgrading npm itself is the only fix
+# (P5 follow-up, container-image findings).
+RUN npm install -g npm@12.0.2
+
 WORKDIR /app
 
 COPY package.json package-lock.json* ./

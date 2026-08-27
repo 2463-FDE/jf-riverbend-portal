@@ -101,7 +101,6 @@ jobs:
           python3 -c "
           import sys, yaml
           files = (
-              '.trivyignore.deps.yaml',
               '.trivyignore.backend-image.yaml',
               '.trivyignore.frontend-image.yaml',
           )
@@ -131,10 +130,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependency vulnerability scan (fails on CRITICAL/HIGH)
+        # No ignorefile: the frontend npm findings this once carried
+        # (.trivyignore.deps.yaml) were fully remediated (P5 follow-up,
+        # item 1 — next/postcss/nanoid/sharp upgrades) and the file
+        # deleted, not left empty or expired-out.
         run: |
           docker run --rm -v "$PWD:/repo" ghcr.io/aquasecurity/trivy:0.74.0 \
-            fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
-            --ignorefile /repo/.trivyignore.deps.yaml --exit-code 1 /repo
+            fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 /repo
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -243,45 +245,28 @@ jobs:
           print('built:', built)
           print('third-party:', thirdparty)
           "
-      - name: Merge frontend ignore baselines
-        # .trivyignore.deps.yaml (dependency-scan) and
-        # .trivyignore.frontend-image.yaml (container-only findings) are
-        # kept as separate source files on purpose, but Trivy's own
-        # `--ignorefile` only honors the LAST occurrence when passed more
-        # than once (confirmed empirically) — it does not merge. Both need
-        # to apply to the frontend image scan, so they're combined into one
-        # file here at scan time; the two source files stay the ones
-        # developers edit and delete entries from during remediation.
-        run: |
-          python3 -c "
-          import yaml
-          merged = {'vulnerabilities': []}
-          for path in ('.trivyignore.deps.yaml', '.trivyignore.frontend-image.yaml'):
-              with open(path) as f:
-                  merged['vulnerabilities'].extend(yaml.safe_load(f)['vulnerabilities'])
-          with open('/tmp/frontend-merged-ignore.yaml', 'w') as f:
-              yaml.safe_dump(merged, f)
-          "
       - name: Container image scan — repo-built images (fails on CRITICAL/HIGH)
         # Blocking, per Option 2: this repo can actually fix a finding here
         # (a dependency bump, a base-image pin), unlike a vendor's own base
-        # image. frontend uses the merged ignore file (both frontend
-        # baselines apply); every other built image is Python-based and
-        # shares one baseline (.trivyignore.backend-image.yaml — the same
-        # python:3.12-slim base, so the same findings, on all seven).
+        # image. frontend uses .trivyignore.frontend-image.yaml (P5
+        # follow-up, item 1 fully resolved .trivyignore.deps.yaml's
+        # findings, so no merge is needed anymore — frontend-image.yaml
+        # alone covers what's left); every other built image is
+        # Python-based and shares one baseline
+        # (.trivyignore.backend-image.yaml — the same python:3.12-slim
+        # base, so the same findings, on all seven).
         run: |
           set -euo pipefail
           while IFS= read -r image; do
             echo "Scanning (blocking) $image ..."
             case "$image" in
-              *-frontend) ignorefile=/tmp/frontend-merged-ignore.yaml ;;
+              *-frontend) ignorefile=/repo/.trivyignore.frontend-image.yaml ;;
               *) ignorefile=/repo/.trivyignore.backend-image.yaml ;;
             esac
             docker run --rm \
               -v /var/run/docker.sock:/var/run/docker.sock \
               -v trivy-cache:/root/.cache/ \
               -v "$PWD:/repo" \
-              -v /tmp/frontend-merged-ignore.yaml:/tmp/frontend-merged-ignore.yaml \
               ghcr.io/aquasecurity/trivy:0.74.0 image \
               --severity CRITICAL,HIGH --ignore-unfixed \
               --ignorefile "$ignorefile" --exit-code 1 "$image"
