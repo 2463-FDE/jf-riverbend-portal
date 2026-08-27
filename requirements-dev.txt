@@ -17,3 +17,8 @@ PyYAML==6.0.2
 # langchain-aws is NOT here: only the service itself builds ChatBedrockConverse.
 langchain==1.3.16
 langchain-core==1.6.0
+
+# w8-planner-2 P2 (adr/0012): tests/test_phi_crypto.py imports libs/phi_crypto
+# eagerly (not lazy like libs/tracing) — needs this importable at collection
+# time. Matches libs/phi_crypto/requirements.txt's pin.
+cryptography==50.0.1
