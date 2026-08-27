@@ -85,9 +85,10 @@ jobs:
   # pre-existing findings — see each file's own header for what it covers,
   # why, and its expiry (2026-09-02 for all of them). Every entry is scoped
   # to an exact id + purls/paths; nothing outside that exact scope is
-  # suppressed. All four are validated before use so a malformed baseline
-  # fails the build rather than silently ignoring nothing (or, worse,
-  # erroring past `--ignorefile` in a way that skips the flag). `paths` is
+  # suppressed. The remaining frontend-image baseline is validated before
+  # use so a malformed file fails the build rather than silently ignoring
+  # nothing (or, worse, erroring past `--ignorefile` in a way that skips the
+  # flag). `paths` is
   # optional here (not every entry uses it — OS-package findings are scoped
   # by `purls` instead, since Trivy has no file path for a dpkg entry), but
   # `id`, a nonempty `purls` or `paths`, `statement`, and `expired_at` are
@@ -96,6 +97,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install YAML parser
+        run: python -m pip install PyYAML==6.0.2
       - name: Validate .trivyignore.*.yaml are well-formed
         run: |
           python3 -c "
