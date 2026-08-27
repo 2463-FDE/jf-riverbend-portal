@@ -29,3 +29,7 @@ botocore==1.43.78
 # Policy navigator (w-9-2-planner P3): pgvector client for
 # libs/policy_corpus's retrieval query. Matches libs/rag_corpus/requirements.txt's pin.
 pgvector==0.4.2
+
+# w8-planner-2 P2 (adr/0012): AEAD field decryption (libs/phi_crypto) for
+# ssn/dob/notes reads. See libs/phi_crypto/requirements.txt.
+cryptography==50.0.1

@@ -59,3 +59,40 @@ def load_module(relpath: str, name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_PHI_NAMES = (
+    "get_key_provider",
+    "decrypt_patient_field",
+    "encrypt_patient_field",
+    "compute_ssn_match_key",
+    "compute_ssn_blind_index",
+)
+
+
+def phi_globals_of(module):
+    """The __globals__ dict of whichever phi.py module `module` actually
+    calls through — NOT the same thing as sys.modules["phi"].
+
+    intake-service and records-service each have their own same-named
+    phi.py (adr/0012, ADR 0001 no-shared-lib), and `load_module`'s sibling
+    eviction (above) only guarantees the module CURRENTLY exec'd for a
+    given load_module() call gets a correctly-matching "phi" at THAT
+    moment. If some OTHER already-loaded sibling (e.g. records-service's
+    reconciliation.py, imported earlier and never re-evicted because its
+    own cache entry already matched) still holds a reference to an OLDER
+    phi module instance, `sys.modules["phi"]` right now can silently
+    diverge from the phi module that sibling's functions actually close
+    over — patching sys.modules["phi"]._key_provider then does nothing for
+    calls made through that sibling. Every phi-imported name in the SAME
+    module shares one __globals__ dict (they're attributes of the same
+    module object), so grabbing it from any one of them and writing
+    `_key_provider` directly into it is unambiguous regardless of
+    sys.modules bookkeeping."""
+    for name in _PHI_NAMES:
+        fn = getattr(module, name, None)
+        if fn is not None and hasattr(fn, "__globals__"):
+            return fn.__globals__
+    raise AssertionError(
+        f"{module!r} does not import any of {_PHI_NAMES} from phi.py — nothing to patch"
+    )

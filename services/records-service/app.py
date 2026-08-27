@@ -61,8 +61,10 @@ import policy_navigator_path
 import review_queue
 import summary_agent_path
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
+from libs.phi_crypto import PhiCryptoError
 from libs.tracing.spans import new_correlation_id
 from patient_view_repository import SqlChartRepository
+from phi import decrypt_patient_field, get_key_provider
 from reconciliation import build_reconciliation_result
 from schemas import (
     AgentDraftCitationOut,
@@ -224,6 +226,14 @@ async def lifespan(_app: FastAPI):
             f"in the image (see this service's Dockerfile) or set ROLES_CONFIG_PATH."
         )
     _check_patient_grant_coverage()
+    # w8-planner-2 P2 (adr/0012): this service decrypts ssn/dob/notes on
+    # every patient read. Same fail-at-startup discipline as
+    # INTERNAL_SERVICE_TOKEN/roles.yaml above, not a per-request check —
+    # see services/intake-service/app.py's identical lifespan addition.
+    try:
+        get_key_provider()
+    except PhiCryptoError as e:
+        raise RuntimeError(f"PHI key configuration is invalid — refusing to start: {e}")
     yield
 
 
@@ -310,11 +320,22 @@ def list_patients(
         message=f"list_patients returned {len(rows)} patient(s): {sorted(p.id for p in rows)}",
     )
     return PatientPage(
-        items=[PatientSummary.model_validate(p) for p in rows],
+        items=[_decrypted_patient_summary(p) for p in rows],
         total=total,
         limit=limit,
         offset=offset,
     )
+
+
+def _decrypted_patient_summary(p: Patient) -> PatientSummary:
+    """w8-planner-2 P2 (adr/0012): PatientSummary.model_validate(p) alone
+    would put dob's ciphertext envelope straight into the response — dob is
+    decrypted here and overlaid via model_copy, never by mutating `p`
+    itself (mutating an ORM attribute with plaintext risks a later
+    session.commit() on this object writing plaintext back over the real
+    encrypted column — see phi.py's docstring)."""
+    summary = PatientSummary.model_validate(p)
+    return summary.model_copy(update={"dob": decrypt_patient_field(p.id, "dob", p.dob, p.dob_key_version)})
 
 
 def _actor_label(x_actor_name: Optional[str], x_actor_id: Optional[str]) -> str:
@@ -536,8 +557,22 @@ def get_patient(
         actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
-    detail = PatientDetail.model_validate(patient)
+    detail = _decrypted_patient_detail(patient)
     return _redact_clinical_fields(db, detail, x_actor_id=x_actor_id)
+
+
+def _decrypted_patient_detail(p: Patient) -> PatientDetail:
+    """w8-planner-2 P2 (adr/0012): same reasoning as _decrypted_patient_summary
+    — decrypt dob/ssn/notes and overlay via model_copy, never by mutating
+    the ORM object `p` itself."""
+    detail = PatientDetail.model_validate(p)
+    return detail.model_copy(
+        update={
+            "dob": decrypt_patient_field(p.id, "dob", p.dob, p.dob_key_version),
+            "ssn": decrypt_patient_field(p.id, "ssn", p.ssn, p.ssn_key_version),
+            "notes": decrypt_patient_field(p.id, "notes", p.notes, p.notes_key_version),
+        }
+    )
 
 
 @app.get("/patients/{patient_id}/records", response_model=PatientChart)

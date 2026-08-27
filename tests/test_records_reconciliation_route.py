@@ -23,15 +23,44 @@ regression coverage for the cross-patient disclosure fix; everything above
 them is the pre-existing matching/discrepancy/audit coverage, updated only
 where the new authorization boundary changes what a test needs to set up.
 """
+import base64
+import os
 import re
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
-from conftest import load_module
+from conftest import load_module, phi_globals_of
+from libs.phi_crypto import EnvKeyProvider, compute_blind_index
 
 app_mod = load_module("services/records-service/app.py", "records_app_reconciliation")
+
+# w8-planner-2 P2 (adr/0012): build_reconciliation_result (reconciliation.py)
+# now decrypts the requested patient's ssn and each candidate's dob — needs
+# a configured PHI key provider. See conftest.phi_globals_of's docstring for
+# why patching sys.modules["phi"] directly is NOT reliable here.
+# app_mod.build_reconciliation_result.__globals__ IS reconciliation.py's
+# real module dict — the exact one get_patient_reconciliation's route
+# handler actually calls into, regardless of what "reconciliation" or "phi"
+# currently sit in sys.modules. Set directly (not via a per-test monkeypatch
+# fixture) because the _MARIA_*/_UNRELATED fake patients below are built
+# ONCE at module-import time, before any pytest fixture would run.
+_TEST_ENCRYPTION_KEY = os.urandom(32)
+_TEST_BLIND_INDEX_KEY = os.urandom(32)
+_TEST_PHI_PROVIDER = EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(_TEST_ENCRYPTION_KEY).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(_TEST_BLIND_INDEX_KEY).decode(),
+    }
+)
+phi_globals_of(app_mod)["_key_provider"] = _TEST_PHI_PROVIDER
+# reconciliation.py's OWN view of phi.py — build_reconciliation_result's
+# __globals__ is reconciliation.py's real module dict; the
+# decrypt_patient_field NAME bound inside it points to the exact phi.py
+# module instance reconciliation.py actually calls through.
+app_mod.build_reconciliation_result.__globals__["decrypt_patient_field"].__globals__["_key_provider"] = _TEST_PHI_PROVIDER
 
 
 TEST_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
@@ -79,12 +108,25 @@ class _FakePatient:
     def __init__(self, id, name, dob, ssn):
         self.id = id
         self.name = name
+        # w8-planner-2 P2 (adr/0012): .dob/.ssn stay PLAINTEXT here, with
+        # *_key_version=None — decrypt_patient_field's contract treats a
+        # NULL key_version as "this row predates migration 031's backfill,
+        # return the value as-is" (see phi.py), which lets these fakes stay
+        # plain strings instead of needing real encrypted envelopes.
         self.dob = dob
+        self.dob_key_version = None
         self.ssn = ssn
-        # Mirrors migration 015's generated column (services/records-service/
+        self.ssn_key_version = None
+        # Mirrors migration 031's blind index (services/records-service/
         # reconciliation.py::find_ssn_match_ids now selects/filters on this,
-        # not raw .ssn).
-        self.ssn_digits = re.sub(r"\D", "", ssn) if ssn else None
+        # not raw digits) — computed directly against the same test key
+        # bytes _TEST_PHI_PROVIDER was built from (libs.phi_crypto directly,
+        # not through phi.py's get_key_provider() singleton — see the
+        # module-level comment above on why that singleton is unreliable to
+        # depend on at collection time). A fake row "matches" a query the
+        # same way a real blind-indexed column would.
+        digits = re.sub(r"\D", "", ssn) if ssn else None
+        self.ssn_digits = compute_blind_index(digits, _TEST_BLIND_INDEX_KEY) if digits else None
 
 
 class _FakeEncounter:

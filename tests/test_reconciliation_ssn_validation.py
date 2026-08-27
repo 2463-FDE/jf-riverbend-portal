@@ -9,7 +9,12 @@ this is pure function behavior — services/records-service/app.py::
 get_patient_reconciliation and tests/test_records_reconciliation_route.py
 exercise the end-to-end route/authorization path.
 """
+import base64
+import os
 import re
+import sys
+
+import pytest
 
 from conftest import load_module
 
@@ -17,15 +22,38 @@ reconciliation = load_module("services/records-service/reconciliation.py", "reco
 
 _normalize_ssn = reconciliation._normalize_ssn
 
+# w8-planner-2 P2 (adr/0012): find_ssn_match_ids now blind-indexes the query
+# key (compute_ssn_blind_index) instead of comparing raw digits — needs a
+# configured PHI key provider. reconciliation.py's `from phi import ...`
+# resolves through sys.modules, so patching that module (not reconciliation
+# itself) is what actually affects it — see test_intake_healthz.py's
+# identical note.
+phi_mod = sys.modules["phi"]
+_TEST_PHI_PROVIDER = phi_mod.EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _configured_phi_key_provider(monkeypatch):
+    monkeypatch.setattr(phi_mod, "_key_provider", _TEST_PHI_PROVIDER)
+
 
 class _FakePatient:
     def __init__(self, id, ssn):
         self.id = id
-        self.ssn = ssn
-        # Mirrors migration 015's generated column: pure digit extraction, no
-        # SSA-invalid-pattern validation (that stays in _normalize_ssn, applied
-        # to the query key — see find_ssn_match_ids).
-        self.ssn_digits = re.sub(r"\D", "", ssn) if ssn else None
+        # w8-planner-2 P2 (adr/0012): migration 031 replaced the raw-digit
+        # generated column with an HMAC-SHA256 blind index — mirror that
+        # here (still pure digit extraction first, no SSA-invalid-pattern
+        # validation; that stays in _normalize_ssn, applied to the query
+        # key — see find_ssn_match_ids) so a fake row "matches" a query the
+        # same way a real blind-indexed column would.
+        digits = re.sub(r"\D", "", ssn) if ssn else None
+        self.ssn_digits = reconciliation.compute_ssn_blind_index(digits) if digits else None
 
 
 class _FakeExecResult:

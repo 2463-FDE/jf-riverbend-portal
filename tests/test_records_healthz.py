@@ -5,6 +5,9 @@ letting the container report healthy while every gateway-forwarded call
 401s.
 """
 import asyncio
+import base64
+import os
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,8 +15,31 @@ from fastapi.testclient import TestClient
 from conftest import load_module
 
 app_mod = load_module("services/records-service/app.py", "records_app_healthz")
+# app.py's `from phi import ...` resolves through sys.modules — this is the
+# SAME module object app_mod's decrypt/get_key_provider calls use. See
+# tests/test_intake_healthz.py's identical note for why patching this
+# module directly (not app_mod) is what actually affects lifespan.
+phi_mod = sys.modules["phi"]
 
 VALID_TOKEN = "valid-internal-token-well-over-the-32-char-floor"
+
+_VALID_PHI_PROVIDER = phi_mod.EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
+
+
+def _set_valid_phi_provider(monkeypatch):
+    monkeypatch.setattr(phi_mod, "_key_provider", _VALID_PHI_PROVIDER)
+
+
+def _clear_phi_provider_and_env(monkeypatch):
+    monkeypatch.setattr(phi_mod, "_key_provider", None)
+    for var in ("PHI_ACTIVE_KEY_VERSION", "PHI_ENCRYPTION_KEY_V1", "PHI_BLIND_INDEX_KEY_V1"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def _client():
@@ -64,9 +90,27 @@ def test_lifespan_raises_when_internal_token_missing(monkeypatch):
 
 def test_lifespan_succeeds_when_internal_token_configured(monkeypatch):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", VALID_TOKEN)
+    _set_valid_phi_provider(monkeypatch)
 
     async def _run():
         async with app_mod.lifespan(app_mod.app):
             pass
 
     asyncio.run(_run())  # must not raise
+
+
+# --- w8-planner-2 P2 (adr/0012): lifespan also refuses to start on invalid
+# PHI key configuration — same "process startup, not just /healthz" reasoning
+# as the INTERNAL_SERVICE_TOKEN checks above.
+
+
+def test_lifespan_raises_when_phi_keys_missing(monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", VALID_TOKEN)
+    _clear_phi_provider_and_env(monkeypatch)
+
+    async def _run():
+        async with app_mod.lifespan(app_mod.app):
+            pass
+
+    with pytest.raises(RuntimeError, match="PHI key configuration"):
+        asyncio.run(_run())

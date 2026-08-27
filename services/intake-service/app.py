@@ -169,9 +169,11 @@ from config import settings
 from db import get_db
 from instructions_wiring import get_llm_client
 from libs.intake_instructions import compose as compose_intake_instructions
+from libs.phi_crypto import PhiCryptoError
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
 from models import Consent, InsuranceCoverage, Patient, PatientAccessGrant, PatientLink
+from phi import compute_ssn_match_key, decrypt_patient_field, encrypt_patient_field, get_key_provider
 from schemas import (
     Demographics,
     Insurance,
@@ -215,6 +217,17 @@ async def lifespan(_app: FastAPI):
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
+    # w8-planner-2 P2 (adr/0012): this service encrypts ssn/dob/notes on
+    # every patient write. get_key_provider() constructs EnvKeyProvider on
+    # first call and raises KeyConfigurationError if PHI_ACTIVE_KEY_VERSION/
+    # PHI_ENCRYPTION_KEY_V*/PHI_BLIND_INDEX_KEY_V* are missing, malformed, or
+    # (encryption key == blind-index key) for any configured version — same
+    # fail-at-startup discipline as the INTERNAL_SERVICE_TOKEN check just
+    # above, not a per-request check.
+    try:
+        get_key_provider()
+    except PhiCryptoError as e:
+        raise RuntimeError(f"PHI key configuration is invalid — refusing to start: {e}")
     yield
 
 
@@ -488,24 +501,21 @@ def _intake_log_summary(req: IntakeRequest, correlation_id: str) -> dict[str, An
     }
 
 
-def _normalize_ssn(ssn: Optional[str]) -> Optional[str]:
-    """Digits only, so "412-55-9981" and "412559981" compare equal. Returns
-    None for a blank/missing SSN — never an empty string, so callers can
-    treat falsy as "no reliable key"."""
-    if not ssn:
-        return None
-    digits = re.sub(r"\D", "", ssn)
-    return digits or None
-
-
 def _acquire_match_key_lock(db: Session, demo: Demographics) -> None:
-    """Serialize concurrent /intake calls for the same normalized ssn (PR #20
-    round-8 review): without this, two simultaneous requests for a brand-new
-    ssn can both run _find_match_candidates before either commits a
-    _create_patient, both see zero candidates, and both create a patient row
-    — the exact silent-duplicate failure mode this feature exists to catch,
-    now happening unrecorded (no patient_links row either, since each
-    request believed it was the first).
+    """Serialize concurrent /intake calls for the same ssn (PR #20 round-8
+    review): without this, two simultaneous requests for a brand-new ssn can
+    both run _find_match_candidates before either commits a _create_patient,
+    both see zero candidates, and both create a patient row — the exact
+    silent-duplicate failure mode this feature exists to catch, now
+    happening unrecorded (no patient_links row either, since each request
+    believed it was the first).
+
+    w8-planner-2 P2 (adr/0012): keys the lock on the SSN's blind index
+    rather than its raw normalized digits — ssn is application-encrypted
+    now, and there is no reason to ever put the plaintext SSN into a SQL
+    statement here when the blind index (needed by _find_match_candidates
+    right after this call anyway) already provides the same deterministic
+    per-SSN correlation for locking purposes.
 
     pg_advisory_xact_lock is held for the rest of the current transaction —
     released automatically at the next commit/rollback on this connection.
@@ -516,10 +526,10 @@ def _acquire_match_key_lock(db: Session, demo: Demographics) -> None:
     match-then-create check, and it does). A no-op when there's no ssn to
     key on, same as _find_match_candidates.
     """
-    normalized_ssn = _normalize_ssn(demo.ssn)
-    if not normalized_ssn:
+    match_key = compute_ssn_match_key(demo.ssn)
+    if not match_key:
         return
-    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key)::bigint)"), {"key": normalized_ssn})
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key)::bigint)"), {"key": match_key})
 
 
 def _find_match_candidates(db: Session, demo: Demographics) -> tuple[list[int], list[int]]:
@@ -539,25 +549,31 @@ def _find_match_candidates(db: Session, demo: Demographics) -> tuple[list[int], 
     (name variation is exactly what makes this fixture hard: "Maria
     Gonzalez" / "Maria Gonzales" / "M. Gonzalez").
 
-    Scans every patient row with a non-null ssn and compares in Python
-    rather than adding a normalized/indexed ssn column — acceptable at this
-    system's current seed-data scale (~hundreds of rows), the same
-    "deliberate simplicity" character as records-service's existing
-    full-scan search debt (D8). This does NOT scale to a real production
-    patient volume without a normalized, indexed column — flagged here
-    rather than silently assumed away.
+    w8-planner-2 P2 (adr/0012): this used to scan every patient row with a
+    non-null ssn and compare in Python — "flagged here rather than silently
+    assumed away" as not scaling to real production volume. ssn is now
+    application-encrypted, which forces the comparison off Postgres entirely
+    UNLESS it goes through the blind index — patients.ssn_digits is an
+    HMAC-SHA256 blind index (libs/phi_crypto), so this is now an indexed SQL
+    equality lookup, not a full scan; dob is decrypted only for the (small)
+    set of rows the blind index actually matches, to distinguish exact vs.
+    partial. The `row.ssn_digits == match_key` recheck below is defense-in-
+    depth (never trust a query result to have actually honored its own
+    WHERE clause), mirroring records-service/reconciliation.py's identical
+    pattern — not a second scan, `rows` is already the narrow match set.
     """
-    normalized_ssn = _normalize_ssn(demo.ssn)
-    if not normalized_ssn:
+    match_key = compute_ssn_match_key(demo.ssn)
+    if not match_key:
         return [], []
 
     exact_ids: list[int] = []
     partial_ids: list[int] = []
-    rows = db.execute(select(Patient).where(Patient.ssn.isnot(None))).scalars().all()
+    rows = db.execute(select(Patient).where(Patient.ssn_digits == match_key)).scalars().all()
     for row in rows:
-        if _normalize_ssn(row.ssn) != normalized_ssn:
+        if row.ssn_digits != match_key:
             continue
-        if demo.dob and row.dob and demo.dob == row.dob:
+        row_dob = decrypt_patient_field(row.id, "dob", row.dob, row.dob_key_version)
+        if demo.dob and row_dob and demo.dob == row_dob:
             exact_ids.append(row.id)
         else:
             partial_ids.append(row.id)
@@ -591,6 +607,20 @@ def _build_partial_patient_link(patient_id: int, linked_patient_id: int) -> "Pat
     )
 
 
+def _apply_encrypted_phi_fields(patient: Patient, demo: Demographics) -> None:
+    """w8-planner-2 P2 (adr/0012): encrypts ssn/dob/notes and computes the
+    ssn blind index, then assigns them onto an ALREADY-FLUSHED `patient`
+    row. Must run after the first db.flush() that assigns patient.id, not
+    before — encrypt_patient_field's AAD binds ciphertext to the specific
+    row it belongs to (patients.<column>.<patient_id>), and there is no
+    patient_id to bind to before the row exists. Callers flush a second
+    time after calling this to persist the encrypted values."""
+    patient.ssn, patient.ssn_key_version = encrypt_patient_field(patient.id, "ssn", demo.ssn)
+    patient.dob, patient.dob_key_version = encrypt_patient_field(patient.id, "dob", demo.dob)
+    patient.notes, patient.notes_key_version = encrypt_patient_field(patient.id, "notes", demo.notes)
+    patient.ssn_digits = compute_ssn_match_key(demo.ssn)
+
+
 def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: list[int]) -> int:
     """Round-3 review fix (2026-08-05): the new patient row and its adr/0004/
     RIV-160 match-key link audit rows must commit or fail TOGETHER. A prior
@@ -614,14 +644,16 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
     Only ever called for partial matches now (round-10 review) — an exact
     match always blocks with 409 before this function is reached, so no
     caller here can create a "confirmed" link at all.
+
+    w8-planner-2 P2 (adr/0012): ssn/dob/notes are encrypted via
+    _apply_encrypted_phi_fields AFTER the first flush assigns patient.id
+    (encryption's AAD is bound to that id) — see that function's docstring.
     """
     try:
         patient = Patient(
             name=demo.name,
             first_name=demo.first_name,
             last_name=demo.last_name,
-            dob=demo.dob,
-            ssn=demo.ssn,
             gender=demo.gender,
             address=demo.address,
             city=demo.city,
@@ -629,19 +661,21 @@ def _create_patient_with_links(db: Session, demo: Demographics, partial_ids: lis
             zip_code=demo.zip_code,
             phone=demo.phone,
             email=demo.email,
-            notes=demo.notes,
             created_via=demo.created_via,
         )
         db.add(patient)
         db.flush()  # assigns patient.id without ending the transaction
+        _apply_encrypted_phi_fields(patient, demo)
         for candidate_id in partial_ids:
             db.add(_build_partial_patient_link(patient.id, candidate_id))
         db.flush()
         return patient.id
-    except SQLAlchemyError as e:
+    except (SQLAlchemyError, PhiCryptoError) as e:
         db.rollback()
         # Same reasoning as _create_patient: never log str(e) — it can embed
         # the failed statement's bound parameters (name/dob/ssn/address/...).
+        # PhiCryptoError messages never carry PHI or keys by contract, but
+        # error TYPE only stays the convention here too, for consistency.
         log.error("intake: failed to create patient with link audit rows (error_type=%s)", type(e).__name__)
         raise HTTPException(status_code=503, detail="patient store unavailable")
 
@@ -671,13 +705,16 @@ def _create_patient(db: Session, demo: Demographics) -> int:
     # Round-13 review (2026-08-06): flushes only — see create_intake's single
     # commit and the module docstring's round-13 entry for why this no
     # longer commits on its own.
+    #
+    # w8-planner-2 P2 (adr/0012): ssn/dob/notes are encrypted via
+    # _apply_encrypted_phi_fields AFTER the first flush assigns patient.id
+    # (encryption's AAD is bound to that id) — see that function's
+    # docstring for why the ordering matters.
     try:
         patient = Patient(
             name=demo.name,
             first_name=demo.first_name,
             last_name=demo.last_name,
-            dob=demo.dob,
-            ssn=demo.ssn,
             gender=demo.gender,
             address=demo.address,
             city=demo.city,
@@ -685,19 +722,22 @@ def _create_patient(db: Session, demo: Demographics) -> int:
             zip_code=demo.zip_code,
             phone=demo.phone,
             email=demo.email,
-            notes=demo.notes,
             created_via=demo.created_via,
         )
         db.add(patient)
         db.flush()  # assigns patient.id without ending the transaction
+        _apply_encrypted_phi_fields(patient, demo)
+        db.flush()
         return patient.id
-    except SQLAlchemyError as e:
+    except (SQLAlchemyError, PhiCryptoError) as e:
         db.rollback()
         # PR #20 review (round 6): never log str(e) here — SQLAlchemy embeds
         # the failed statement's bound parameters (name/dob/ssn/address/...)
         # in a DBAPIError's string form, so this would otherwise dump PHI to
         # logs/intake-service.log on every insert failure. Error TYPE only,
         # same pattern already used by _start_eligibility_check.
+        # PhiCryptoError messages never carry PHI or keys by contract, but
+        # error TYPE only stays the convention here too, for consistency.
         log.error("intake: failed to create patient (error_type=%s)", type(e).__name__)
         raise HTTPException(status_code=503, detail="patient store unavailable")
 

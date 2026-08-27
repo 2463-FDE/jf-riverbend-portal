@@ -4,6 +4,9 @@ placeholder INTERNAL_SERVICE_TOKEN must fail the healthcheck instead of
 letting the container report healthy while every /intake call 401s.
 """
 import asyncio
+import base64
+import os
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,8 +14,43 @@ from fastapi.testclient import TestClient
 from conftest import load_module
 
 app_mod = load_module("services/intake-service/app.py", "intake_app_healthz")
+# app.py's `from phi import ...` resolves through sys.modules — this is the
+# SAME module object app_mod's encrypt/decrypt/get_key_provider calls use,
+# not a separate copy. Patching attributes on it (not on app_mod) is what
+# actually affects lifespan's PHI key validation.
+phi_mod = sys.modules["phi"]
 
 VALID_TOKEN = "valid-internal-token-well-over-the-32-char-floor"
+
+# w8-planner-2 P2 (adr/0012): lifespan now also validates PHI keys (see the
+# "Round-17 review" section below). get_key_provider() caches its
+# EnvKeyProvider at the phi module level — that cache can persist across
+# test FILES within one pytest process (conftest.load_module only evicts a
+# stale sys.modules["phi"] pointing at a DIFFERENT service's phi.py, not a
+# same-service one loaded by an earlier test file). Every test here
+# explicitly overrides phi_mod._key_provider via monkeypatch rather than
+# relying on env vars alone, so each test's intent holds regardless of
+# what an earlier test (in this file or another) already constructed.
+_VALID_PHI_PROVIDER = phi_mod.EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
+
+
+def _set_valid_phi_provider(monkeypatch):
+    monkeypatch.setattr(phi_mod, "_key_provider", _VALID_PHI_PROVIDER)
+
+
+def _clear_phi_provider_and_env(monkeypatch):
+    """Forces the NEXT get_key_provider() call to reconstruct from
+    whatever env vars the test itself sets — used by the failure tests
+    below, which need EnvKeyProvider's own validation to actually run."""
+    monkeypatch.setattr(phi_mod, "_key_provider", None)
+    for var in ("PHI_ACTIVE_KEY_VERSION", "PHI_ENCRYPTION_KEY_V1", "PHI_BLIND_INDEX_KEY_V1"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def _client():
@@ -63,9 +101,43 @@ def test_lifespan_raises_when_internal_token_missing(monkeypatch):
 
 def test_lifespan_succeeds_when_internal_token_configured(monkeypatch):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", VALID_TOKEN)
+    _set_valid_phi_provider(monkeypatch)
 
     async def _run():
         async with app_mod.lifespan(app_mod.app):
             pass
 
     asyncio.run(_run())  # must not raise
+
+
+# --- w8-planner-2 P2 (adr/0012): lifespan also refuses to start on invalid
+# PHI key configuration — same "process startup, not just /healthz" reasoning
+# as the INTERNAL_SERVICE_TOKEN checks above.
+
+
+def test_lifespan_raises_when_phi_keys_missing(monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", VALID_TOKEN)
+    _clear_phi_provider_and_env(monkeypatch)
+
+    async def _run():
+        async with app_mod.lifespan(app_mod.app):
+            pass
+
+    with pytest.raises(RuntimeError, match="PHI key configuration"):
+        asyncio.run(_run())
+
+
+def test_lifespan_raises_when_phi_encryption_and_blind_index_keys_are_identical(monkeypatch):
+    monkeypatch.setattr(app_mod.settings, "internal_service_token", VALID_TOKEN)
+    _clear_phi_provider_and_env(monkeypatch)
+    same_key = base64.b64encode(os.urandom(32)).decode()
+    monkeypatch.setenv("PHI_ACTIVE_KEY_VERSION", "v1")
+    monkeypatch.setenv("PHI_ENCRYPTION_KEY_V1", same_key)
+    monkeypatch.setenv("PHI_BLIND_INDEX_KEY_V1", same_key)
+
+    async def _run():
+        async with app_mod.lifespan(app_mod.app):
+            pass
+
+    with pytest.raises(RuntimeError, match="PHI key configuration"):
+        asyncio.run(_run())

@@ -14,9 +14,9 @@ class Patient(Base):
     name = Column(Text, nullable=False)  # legacy/composed; see intake-service/schemas.py Demographics
     first_name = Column(Text)            # structured (migration 011); NULL for legacy-only patients
     last_name = Column(Text)             # structured (migration 011); NULL for legacy-only patients
-    dob = Column(Text)               # stored as ISO string, not DATE (legacy)
-    ssn = Column(Text)               # plain text (legacy)
-    ssn_digits = Column(Text)        # DB-computed generated column (migration 015); read-only
+    dob = Column(Text)               # AEAD-encrypted (libs/phi_crypto) once dob_key_version is set; ISO-string envelope, not DATE
+    ssn = Column(Text)               # AEAD-encrypted (libs/phi_crypto) once ssn_key_version is set
+    ssn_digits = Column(Text)        # migration 031: HMAC-SHA256 blind index (libs/phi_crypto), NOT raw digits; read-only here (intake-service writes it)
     gender = Column(Text)
     address = Column(Text)           # legacy/composed; see intake-service/schemas.py Demographics
     city = Column(Text)                  # structured (migration 011); NULL for legacy-only patients
@@ -24,9 +24,12 @@ class Patient(Base):
     zip_code = Column(Text)              # structured (migration 011); NULL for legacy-only patients
     phone = Column(Text)
     email = Column(Text)
-    notes = Column(Text)
+    notes = Column(Text)             # AEAD-encrypted (libs/phi_crypto) once notes_key_version is set
     created_via = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    ssn_key_version = Column(Text)   # migration 031; NULL = not yet migrated (still plaintext); read-only here
+    dob_key_version = Column(Text)   # migration 031; NULL = not yet migrated; read-only here
+    notes_key_version = Column(Text)  # migration 031; NULL = not yet migrated; read-only here
 
 
 class Encounter(Base):
