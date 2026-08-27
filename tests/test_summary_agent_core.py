@@ -5,7 +5,9 @@ The MODEL is scripted; the LOOP is not — `create_agent`, its tool binding, its
 tool-execution node and the `wrap_model_call` middleware all really run. The
 real Bedrock call is a separate sanitized acceptance run, not a unit test.
 """
+import base64
 import json
+import os
 
 import pytest
 from sqlalchemy import create_engine
@@ -15,12 +17,33 @@ from sqlalchemy.pool import StaticPool
 from conftest import load_module
 
 from libs.agent_provenance import ProvenanceLabel, Stage, TraceRecorder, assert_safe
+from libs.phi_crypto import EnvKeyProvider
 from libs.summary_agent import RetrievalLedger, RetrievalLimits, load_corpus, retrieve
 from libs.summary_agent import validation as V
 from libs.summary_agent.runtime import SYSTEM_PROMPT
 
 drafts = load_module("services/records-service/agent_drafts.py", "agent_drafts_mod")
 path = load_module("services/records-service/summary_agent_path.py", "summary_agent_path_mod")
+
+# adr/0012 follow-up (agent draft text encryption): `path.generate_draft`
+# creates rows through path's OWN `agent_drafts` reference
+# (`import agent_drafts` inside summary_agent_path.py) — a SEPARATE module
+# object from this file's own `drafts` (each load_module() call execs a
+# fresh copy; conftest.load_module does not register either under
+# sys.modules, so plain `import agent_drafts` inside summary_agent_path.py
+# does its own independent fresh import). Rows created via path.agent_drafts
+# are then read back via THIS file's own `drafts.approved_draft(...)`, so
+# both module instances' phi bindings must share the SAME key material —
+# one EnvKeyProvider instance, assigned to both.
+_TEST_PHI_PROVIDER = EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
+drafts.phi._key_provider = _TEST_PHI_PROVIDER
+path.agent_drafts.phi._key_provider = _TEST_PHI_PROVIDER
 
 POL = "POL-001@2026-08-01"
 TRN = "TRN-014@2026-07-15"
@@ -142,7 +165,10 @@ def test_grounded_run_is_accepted_and_produces_a_complete_acceptable_trace(db):
     drafts.decide(db, outcome.draft, approve=True, reviewed_by=99, trace=trace)
     shown = drafts.approved_draft(db, PATIENT, trace=trace)
 
-    assert shown.generated_text == GROUNDED_SUMMARY, "the patient sees the exact stored text"
+    shown_text = drafts.phi.decrypt_draft_text(
+        shown.patient_id, shown.version, shown.generated_text, shown.generated_text_key_version
+    )
+    assert shown_text == GROUNDED_SUMMARY, "the patient sees the exact stored text"
     assert trace.is_acceptable(), f"missing={trace.missing_stages()} ordered={trace.is_ordered()}"
     assert trace.is_grounded() and Stage.RETRIEVAL in trace.stages_covered()
 

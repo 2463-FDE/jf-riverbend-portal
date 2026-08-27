@@ -60,7 +60,32 @@ phi_globals_of(app_mod)["_key_provider"] = _TEST_PHI_PROVIDER
 # __globals__ is reconciliation.py's real module dict; the
 # decrypt_patient_field NAME bound inside it points to the exact phi.py
 # module instance reconciliation.py actually calls through.
-app_mod.build_reconciliation_result.__globals__["decrypt_patient_field"].__globals__["_key_provider"] = _TEST_PHI_PROVIDER
+_RECONCILIATION_PHI_GLOBALS = app_mod.build_reconciliation_result.__globals__["decrypt_patient_field"].__globals__
+_RECONCILIATION_PHI_GLOBALS["_key_provider"] = _TEST_PHI_PROVIDER
+
+
+@pytest.fixture(autouse=True)
+def _reasserted_phi_key_provider(monkeypatch):
+    # The two dicts patched above are records-service's OWN phi module —
+    # correctly cached and REUSED (not re-evicted) by every OTHER test
+    # file in this session that also loads services/records-service/app.py
+    # or reconciliation.py, since conftest.load_module only evicts a
+    # sys.modules["phi"] entry that points at a DIFFERENT service's
+    # phi.py, not an already-correct records-service one. That means this
+    # is a genuinely SHARED slot across files, not a private one — the
+    # bare module-level assignment above only wins the race until some
+    # OTHER test file's own bare module-level assignment (collected
+    # later, alphabetically) overwrites it with a DIFFERENT key, which
+    # would silently break _MARIA_1042/1330/1588's blind indices (computed
+    # from the fixed _TEST_BLIND_INDEX_KEY bytes above, independent of
+    # whatever the shared dict currently holds) against whatever
+    # find_ssn_match_ids actually looks up at request time. Re-asserting
+    # here, in an autouse fixture, runs immediately before EVERY test in
+    # THIS file and is auto-reverted by monkeypatch after each one — so
+    # this file's own tests are correct regardless of collection order
+    # or what any other file did to the same shared dicts in between.
+    monkeypatch.setitem(phi_globals_of(app_mod), "_key_provider", _TEST_PHI_PROVIDER)
+    monkeypatch.setitem(_RECONCILIATION_PHI_GLOBALS, "_key_provider", _TEST_PHI_PROVIDER)
 
 
 TEST_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"

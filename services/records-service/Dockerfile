@@ -21,6 +21,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY services/records-service/ .
 COPY libs/ ./libs/
 
+# adr/0012 follow-up ("agent draft text encryption"), mirroring
+# services/intake-service/Dockerfile's identical copy of
+# encrypt_existing_phi.py: records-service owns
+# agent_draft_provenance.generated_text end to end (it already has
+# libs/phi_crypto, cryptography, and DB connectivity), so `make
+# phi-backfill` can run this script via `docker compose exec
+# records-service ...` instead of standing up a separate runner.
+COPY db/migrations/scripts/encrypt_agent_draft_text.py ./db/migrations/scripts/encrypt_agent_draft_text.py
+
 # roles_config.py resolves <module dir>/../../config/roles.yaml, so the signed
 # permission matrix must sit two levels above /app/roles_config.py — i.e.
 # /config/roles.yaml. Without it every authorized route would fail at request

@@ -8,6 +8,8 @@ The model is never involved: drafts are created through the merged write path
 with a `fixture` label, because what is under test here is who may see which
 version, not what the agent writes.
 """
+import base64
+import os
 import sys
 
 import pytest
@@ -16,13 +18,34 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from conftest import load_module
+from conftest import load_module, phi_globals_of
+from libs.phi_crypto import EnvKeyProvider
 
 app_mod = load_module("services/records-service/app.py", "records_app_agent_portal")
 drafts = app_mod.agent_drafts
 # PatientAccessGrant is not imported into app.py; reach it through the models
 # module app.py itself bound, so this fixture builds rows in the same metadata.
 models = sys.modules[app_mod.AgentDraftProvenance.__module__]
+
+# adr/0012 follow-up (agent draft text encryption): app.py's _draft_out
+# decrypts, and agent_drafts.py's create_draft encrypts — needs a
+# configured PHI key provider on BOTH sides. See
+# conftest.phi_globals_of's docstring for why patching sys.modules["phi"]
+# directly is not reliable when two loaded siblings (app.py's own phi
+# binding and agent_drafts.py's, reached via app_mod.agent_drafts.phi) can
+# each end up bound to a different phi.py module instance. drafts.phi is
+# unambiguous on its own (agent_drafts.py's plain `import phi` binds the
+# module object directly), patched alongside app_mod's own binding to be
+# safe regardless of which one(s) any given call actually goes through.
+_TEST_PHI_PROVIDER = EnvKeyProvider(
+    {
+        "PHI_ACTIVE_KEY_VERSION": "v1",
+        "PHI_ENCRYPTION_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+        "PHI_BLIND_INDEX_KEY_V1": base64.b64encode(os.urandom(32)).decode(),
+    }
+)
+phi_globals_of(app_mod)["_key_provider"] = _TEST_PHI_PROVIDER
+drafts.phi._key_provider = _TEST_PHI_PROVIDER
 
 TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 PATIENT = 1737
