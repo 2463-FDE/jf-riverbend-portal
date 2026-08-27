@@ -17,7 +17,10 @@ from db import get_db
 from logging_config import configure
 from models import Disclosure, Patient, Record, RoiRequest
 from schemas import (
+    DisclosureAccounting,
+    DisclosureAccountingEntry,
     DisclosureRecords,
+    FulfillAuthorization,
     FulfillResult,
     RecordOut,
     RoiRequestCreate,
@@ -142,19 +145,22 @@ def create_roi_request(payload: RoiRequestCreate, db: Session = Depends(get_db))
 
 
 @app.post("/roi/requests/{request_id}/fulfill", response_model=FulfillResult, dependencies=[Depends(_verify_internal_token)])
-def fulfill_roi_request(request_id: int, db: Session = Depends(get_db)):
+def fulfill_roi_request(request_id: int, authorization: FulfillAuthorization, db: Session = Depends(get_db)):
     """
     Fulfill an ROI request: mark it 'fulfilled', record a disclosures row, and
     return the patient's records.
 
     ==========================================================================
-    DEBT D12 — HIPAA Privacy Rule shortcuts (deliberate, do NOT "fix"):
-      * NO check for a signed 45 CFR 164.508 authorization before releasing PHI.
-      * NO honoring of any 45 CFR 164.522 agreed restriction on the patient.
-      * NO accounting-of-disclosures audit_logs entry is written. The only trace
-        is the bare disclosures row below, which itself has no authorization_id,
-        no purpose, and no restriction tracking — so a true 164.528 accounting
-        of disclosures cannot be produced.
+    w8-planner-2 (closes two of DEBT D12's three legs):
+      * 45 CFR 164.508 — `authorization` is REQUIRED (Pydantic rejects a
+        missing/empty reference, signer, or signed-at with 422 before this
+        function body ever runs) — no authorization, no release.
+      * 45 CFR 164.528 — the disclosure row now carries its own
+        authorization_reference/purpose, independent of whatever the request
+        row says later. GET /roi/patients/{id}/accounting reads these back
+        directly, closing docs/handover/auditor-questionnaire.md's Q7 gap.
+      * STILL OPEN, unchanged: 45 CFR 164.522 (no restriction tracking or
+        enforcement exists). Do not describe this route as honoring one.
     ==========================================================================
     """
     try:
@@ -162,14 +168,17 @@ def fulfill_roi_request(request_id: int, db: Session = Depends(get_db)):
         if req is None:
             raise HTTPException(status_code=404, detail="roi request not found")
 
-        # D12: release happens with no authorization / restriction enforcement.
         req.status = "fulfilled"
+        req.authorization_reference = authorization.authorization_reference
+        req.authorization_signed_at = authorization.authorization_signed_at
+        req.authorization_signed_by = authorization.authorization_signed_by
 
         disclosure = Disclosure(
             patient_id=req.patient_id,
             roi_request_id=req.id,
             disclosed_to=req.recipient,
-            # no authorization_id, no purpose, no restriction tracking
+            authorization_reference=authorization.authorization_reference,
+            purpose=authorization.purpose or req.purpose,
         )
         db.add(disclosure)
 
@@ -201,15 +210,56 @@ def fulfill_roi_request(request_id: int, db: Session = Depends(get_db)):
     )
 
 
+@app.get(
+    "/roi/patients/{patient_id}/accounting",
+    response_model=DisclosureAccounting,
+    dependencies=[Depends(_verify_internal_token)],
+)
+def disclosure_accounting(patient_id: int, db: Session = Depends(get_db)):
+    """
+    45 CFR 164.528 accounting of disclosures for one patient — every
+    disclosure ever fulfilled through fulfill_roi_request, in the shape
+    docs/handover/auditor-questionnaire.md's Q7 asks for directly: to whom,
+    when, under what authorization, for what purpose.
+
+    Deliberately does NOT read the legacy disclose() route below — that
+    route writes no disclosures row at all, so it has nothing to contribute
+    here, and its own docstring already flags why that is a separate,
+    still-open gap.
+    """
+    try:
+        rows = (
+            db.execute(
+                select(Disclosure)
+                .where(Disclosure.patient_id == patient_id)
+                .order_by(Disclosure.disclosed_at)
+            )
+            .scalars()
+            .all()
+        )
+    except SQLAlchemyError:
+        log.exception("disclosure_accounting: database error for patient_id=%s", patient_id)
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    return DisclosureAccounting(
+        patient_id=patient_id,
+        disclosures=[DisclosureAccountingEntry.model_validate(d) for d in rows],
+    )
+
+
 @app.get("/disclosures/{patient_id}", response_model=DisclosureRecords, dependencies=[Depends(_verify_internal_token)])
 def disclose(patient_id: int, db: Session = Depends(get_db)):
     """
     Legacy direct-disclosure surface (original D12).
 
-    DEBT D12 (preserved): returns ALL of a patient's records with NO check for a
-    valid 45 CFR 164.508 authorization, NO honoring of any 164.522 agreed
-    restriction, and NO disclosure logged (who got what, when, under what
-    authorization) — so an accounting-of-disclosures is impossible.
+    DEBT D12 (preserved, now sharper): returns ALL of a patient's records
+    with NO check for a valid 45 CFR 164.508 authorization, NO honoring of
+    any 164.522 agreed restriction, and NO disclosure row written — so
+    anything released through THIS route is invisible to
+    disclosure_accounting() above and still cannot be accounted for, even
+    though fulfill_roi_request now closes that gap for the real release
+    path. Not proxied by the gateway (no legitimate caller reaches it
+    through the app); flagged as a follow-up, not fixed here.
     """
     try:
         rows = (

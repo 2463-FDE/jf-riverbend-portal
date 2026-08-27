@@ -221,11 +221,23 @@ open here as open until the code says otherwise.
   `services/scheduling-service/book.py`'s single-transaction check-and-insert;
   see `tests/integration/test_scheduling_concurrency.py`.
 - HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped. Still open.
-- **ROI has no authorization/accounting-trail enforcement (45 CFR 164.508 gap).
-  Still open** — unrelated to and not addressed by the audit-integrity work
-  below; `docs/handover/auditor-questionnaire.md` shows staff were unable to
-  answer a real auditor's request for a disclosure accounting / per-patient
-  access log, and nothing in this cycle gives ROI a disclosure ledger.
+- ~~ROI has no authorization/accounting-trail enforcement (45 CFR 164.508
+  gap)~~ **Partially resolved** (w8-planner-2, migration 029):
+  `POST /roi/requests/{id}/fulfill` (`services/roi-service/app.py`) now
+  REQUIRES a signed-authorization reference/signer/timestamp before
+  releasing PHI — closes 164.508 for the real release path. Every
+  fulfillment writes a disclosure row carrying its own
+  authorization_reference/purpose (independent of the request row, so a
+  later edit can't rewrite what the accounting already recorded), read back
+  via `GET /roi/patients/{id}/accounting` — this is the exact shape
+  `docs/handover/auditor-questionnaire.md`'s Q7 asks for and staff couldn't
+  previously answer. **Still open:** 45 CFR 164.522 (no restriction
+  tracking or enforcement exists — not attempted here); the legacy
+  `GET /disclosures/{patient_id}` route (`app.py`, "original D12") still
+  releases records with no authorization check and writes no disclosure
+  row, so it stays invisible to the new accounting — not proxied by the
+  gateway, so no legitimate caller reaches it, but it is a real gap in the
+  gap and is flagged, not fixed, here.
 - ~~`audit_logs` is mutable request-dump logging, not a tamper-evident access
   trail~~ **Resolved against the threat model this control targets**
   (w8-planner-2 P3, closes AUD-B01). **Threat model: a compromised or buggy

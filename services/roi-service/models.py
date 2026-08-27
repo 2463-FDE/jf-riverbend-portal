@@ -43,8 +43,14 @@ class RoiRequest(Base):
     date_range_start = Column(Text)
     date_range_end = Column(Text)
     status = Column(Text, nullable=False, default="pending")  # pending | fulfilled | denied
+    # Set at fulfillment (029, w8-planner-2) — see app.py::fulfill_roi_request.
+    # Required non-empty before a fulfillment is accepted; closes the 164.508
+    # leg of the module's own DEBT D12 marker.
+    authorization_reference = Column(Text)
+    authorization_signed_at = Column(TIMESTAMP(timezone=True))
+    authorization_signed_by = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    # NOTE: no authorization_id, no signed-authorization reference, no restriction tracking
+    # NOTE: no restriction tracking (164.522) — deliberately still out of scope
 
 
 class Disclosure(Base):
@@ -55,4 +61,9 @@ class Disclosure(Base):
     roi_request_id = Column(Integer)
     disclosed_to = Column(Text)
     disclosed_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    # NOTE: no authorization_id, no purpose, no restriction tracking
+    # Own copy, not just a roi_request_id join — see schema.sql's comment on
+    # why (029, w8-planner-2): a 164.528 accounting must describe what was
+    # true at the moment of disclosure, not whatever the request row says now.
+    authorization_reference = Column(Text)
+    purpose = Column(Text)
+    # NOTE: no restriction tracking (164.522) — deliberately still out of scope

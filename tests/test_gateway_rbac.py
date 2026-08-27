@@ -323,6 +323,52 @@ def test_roi_clerk_can_reach_roi_requests(client, monkeypatch):
     assert resp.status_code == 200
 
 
+# --- w8-planner-2: 164.528 accounting of disclosures — same disclosures.read
+# gate as /roi/requests above; roi_clerk and management already hold it.
+
+
+def test_scheduler_is_denied_disclosure_accounting(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("scheduler") if t == VALID_TOKEN else None)
+
+    resp = client.get("/roi/patients/1042/accounting", headers=_auth())
+
+    assert resp.status_code == 403
+    assert "disclosures.read" in resp.json()["detail"]
+
+
+def test_roi_clerk_can_reach_disclosure_accounting(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
+    _stub_downstream(monkeypatch, payload={"patient_id": 1042, "disclosures": []})
+
+    resp = client.get("/roi/patients/1042/accounting", headers=_auth())
+
+    assert resp.status_code == 200
+
+
+def test_roi_fulfill_forwards_the_authorization_payload_downstream(client, monkeypatch):
+    # Round 1: proxy_roi_fulfill hardcoded {} regardless of what the caller
+    # sent, silently discarding the authorization roi-service now requires.
+    # This pins that the real payload actually reaches the downstream call.
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
+    captured = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured["json"] = json
+        return _FakeResponse(200, {"request_id": 1, "patient_id": 1042, "status": "fulfilled", "disclosure_id": 1, "records": []})
+
+    monkeypatch.setattr(app_mod.httpx, "post", fake_post)
+
+    body = {
+        "authorization_reference": "doc-123",
+        "authorization_signed_at": "2026-08-27T00:00:00Z",
+        "authorization_signed_by": "Priya Khan",
+    }
+    resp = client.post("/roi/requests/1/fulfill", json=body, headers=_auth())
+
+    assert resp.status_code == 200
+    assert captured["json"] == body
+
+
 def test_scheduler_can_book_an_appointment(client, monkeypatch):
     monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("scheduler") if t == VALID_TOKEN else None)
     _stub_downstream(monkeypatch, payload={"appointment_id": 1}, status_code=201)

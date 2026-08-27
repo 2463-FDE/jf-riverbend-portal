@@ -1408,8 +1408,25 @@ def proxy_roi_create(payload: dict, session: dict = Depends(require_permission("
 
 
 @app.post("/roi/requests/{request_id}/fulfill")
-def proxy_roi_fulfill(request_id: int, session: dict = Depends(require_permission("roi.write"))):
-    return _post("roi", f"/roi/requests/{request_id}/fulfill", {})
+def proxy_roi_fulfill(
+    request_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
+):
+    # w8-planner-2: `payload` used to be hardcoded to {} here, discarding
+    # whatever the caller sent — roi-service now REQUIRES an authorization
+    # payload (reference/signed_at/signed_by) to fulfill at all, so it has
+    # to actually reach the service.
+    return _post("roi", f"/roi/requests/{request_id}/fulfill", payload)
+
+
+@app.get("/roi/patients/{patient_id}/accounting")
+def proxy_roi_accounting(
+    patient_id: int, session: dict = Depends(require_permission("disclosures.read"))
+):
+    # 45 CFR 164.528 accounting of disclosures (w8-planner-2) — same
+    # disclosures.read permission proxy_roi_list already requires; no new
+    # RBAC entry needed (config/roles.yaml already grants this to roi_clerk
+    # and management).
+    return _get("roi", f"/roi/patients/{patient_id}/accounting")
 
 
 # --------------------------------------------------------------------------- #

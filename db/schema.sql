@@ -686,32 +686,43 @@ CREATE TRIGGER agent_draft_citation_guard_trigger
 -- ---------------------------------------------------------------------------
 -- Release of Information (ROI)
 -- ---------------------------------------------------------------------------
--- A request to release records to a third party. There is no column for a
--- signed 45 CFR 164.508 authorization and no enforcement that one exists, and
--- no place to record 164.522 agreed restrictions.
+-- A request to release records to a third party. Migration 029 (w8-planner-2)
+-- added authorization_reference/signed_at/signed_by, and roi-service now
+-- refuses to fulfill a request unless all three are supplied — closing the
+-- 45 CFR 164.508 leg of the DEBT D12 gap services/roi-service/app.py's
+-- module comment used to name in full. There is still no place to record a
+-- 164.522 agreed restriction — that leg remains open, unchanged.
 CREATE TABLE IF NOT EXISTS roi_requests (
-    id               SERIAL PRIMARY KEY,
-    patient_id       INTEGER NOT NULL REFERENCES patients(id),
-    requested_by     TEXT,
-    recipient        TEXT,
-    recipient_type   TEXT,                     -- self | provider | attorney | payer
-    purpose          TEXT,
-    date_range_start TEXT,
-    date_range_end   TEXT,
-    status           TEXT NOT NULL DEFAULT 'pending',  -- pending | fulfilled | denied
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-    -- no authorization_id, no signed-authorization reference, no restriction tracking
+    id                       SERIAL PRIMARY KEY,
+    patient_id               INTEGER NOT NULL REFERENCES patients(id),
+    requested_by             TEXT,
+    recipient                TEXT,
+    recipient_type           TEXT,                     -- self | provider | attorney | payer
+    purpose                  TEXT,
+    date_range_start         TEXT,
+    date_range_end           TEXT,
+    status                   TEXT NOT NULL DEFAULT 'pending',  -- pending | fulfilled | denied
+    authorization_reference  TEXT,  -- set at fulfillment; see roi-service's fulfill route
+    authorization_signed_at  TIMESTAMPTZ,
+    authorization_signed_by  TEXT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- no restriction tracking (164.522) — deliberately still out of scope
 );
 
--- Disclosures (what actually went out). Still missing the authorization linkage
--- and purpose, so an accounting-of-disclosures cannot be produced.
+-- Disclosures (what actually went out). Carries its OWN copy of
+-- authorization_reference/purpose (not just a roi_request_id FK) so a
+-- 164.528 accounting of disclosures describes what was true AT THE TIME OF
+-- DISCLOSURE, unaffected by any later edit to the request row — read back via
+-- GET /roi/patients/{id}/accounting.
 CREATE TABLE IF NOT EXISTS disclosures (
-    id              SERIAL PRIMARY KEY,
-    patient_id      INTEGER NOT NULL REFERENCES patients(id),
-    roi_request_id  INTEGER REFERENCES roi_requests(id),
-    disclosed_to    TEXT,
-    disclosed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-    -- no authorization_id, no purpose, no restriction tracking
+    id                       SERIAL PRIMARY KEY,
+    patient_id               INTEGER NOT NULL REFERENCES patients(id),
+    roi_request_id           INTEGER REFERENCES roi_requests(id),
+    disclosed_to             TEXT,
+    disclosed_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    authorization_reference  TEXT,
+    purpose                  TEXT
+    -- no restriction tracking (164.522) — deliberately still out of scope
 );
 
 -- ---------------------------------------------------------------------------
