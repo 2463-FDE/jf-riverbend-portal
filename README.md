@@ -1,4 +1,4 @@
-PHI in this system is **not** encrypted at rest, and the system is **not** HIPAA compliant. See Compliance below and `adr/0008`.
+`ssn`/`dob`/`notes` are encrypted at rest at the application layer (`libs/phi_crypto`, `adr/0012`); there is still **no** disk/volume-level encryption, and the system is **not** HIPAA compliant overall. See Compliance below, `adr/0008`, and `adr/0012`.
 
 # Riverbend Patient Portal
 
@@ -84,8 +84,9 @@ are not. See `tests/README.md`.
 
 Riverbend Community Health is a HIPAA covered entity. **This application does
 not currently meet the Security Rule.** The claim previously on this line —
-that patient data was encrypted and the system was compliant — was false:
-`dob`, `ssn` and clinical `notes` are stored in plain text (`db/schema.sql`).
+that patient data was encrypted and the system was compliant — was false at
+the time; `dob`, `ssn`, and clinical `notes` are now encrypted, but the
+system is still not compliant overall (see the remaining gaps below).
 
 What is implemented and tested:
 
@@ -96,10 +97,17 @@ What is implemented and tested:
 - caller verification between every service, refusing untokened in-network calls
 - PHI-safe logging with redaction (`libs/safe_logging`)
 - a default-deny clinician review gate over withheld patient-facing content
+- `ssn`/`dob`/`notes` are AEAD-encrypted at the application layer
+  (`libs/phi_crypto`), with an HMAC-SHA256 blind index replacing the old
+  plaintext-derived match key — see `adr/0012`. Key custody is environment-
+  variable-based (no KMS/secrets-manager integration exists), which is a
+  documented, accepted limitation, not an oversight.
 
 What is not:
 
-- **no encryption at rest** — see `adr/0008` for the recorded risk decision
+- **no disk/volume-level encryption** — no managed-database deployment
+  exists behind this stack (docker compose, local volume); see `adr/0008`
+  for the recorded risk decision this doesn't change
 - no TLS on any hop
 - no MFA outside a pilot-clinic scope
 - **`audit_logs` is append-only and tamper-evident against a compromised

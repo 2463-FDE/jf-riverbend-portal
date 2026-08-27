@@ -1,10 +1,29 @@
 # ADR 0008 — PHI encryption at rest: recorded risk decision
 
 **Date:** 2026-08-20
-**Status:** Accepted
+**Status:** Superseded in part — see 2026-08-26 update below
 **Context:** 2026-08-28 HIPAA-readiness closure, item C3
 **Supersedes:** the encryption claims previously in `README.md` and
 `db/schema.sql`, both of which were false and are corrected in this change.
+
+**Update, 2026-08-26 (w8-planner-2 P2):** the "owner: unassigned" /
+"blocked on the deployment target being named" state below no longer
+holds. The client made the layer-1 call this ADR flagged as theirs to
+make — application-level field encryption, an HMAC blind index replacing
+`ssn_digits`, environment-provided keys (no KMS integration exists to
+target). The remediation plan's steps 1–4 are implemented in
+`adr/0012-phi-field-encryption-shared-crypto-library.md` and
+`db/migrations/031_phi_field_encryption.sql`: `ssn`, `dob`, and `notes` on
+`patients` are AEAD-encrypted at the application layer before every write,
+and `ssn_digits` is replaced by an HMAC-SHA256 blind index computed under a
+key independent of the encryption key. Step 5 (the RAG/policy corpus) is confirmed out of scope for this specific
+migration: `libs/rag_corpus` reads `patient_id` as a plain integer FK and
+never touches `ssn`/`dob`/`notes`, and its corpus source is checked-in
+fixture CSVs, not a live `patients` read — but it does still embed
+`records.title`/`records.body` text, which is a separate PHI surface this
+ADR does not evaluate and does not claim is handled. The rest of this document is
+left as-written below: it is the accurate history of why the gap existed
+and for how long, which the correction above does not erase.
 
 ## Context
 

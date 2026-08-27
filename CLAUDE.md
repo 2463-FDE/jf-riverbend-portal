@@ -177,23 +177,41 @@ open here as open until the code says otherwise.
   `tests/integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`
   (a real, passing 403 assertion, not an xfail) and
   `docs/analysis/RIV-201-patient-records-IDOR.md`.
-- PHI columns (`ssn`, `dob`, `notes`) are still stored as plaintext `TEXT`
-  (`adr/0002`) — unchanged. The full-request-body PHI logging this section used
-  to cite (`services/intake-service/app.py:65`) no longer exists at that
-  location or in that form: **resolved** (Week 1 catch-up, DEBT D1) —
+- ~~PHI columns (`ssn`, `dob`, `notes`) are still stored as plaintext
+  `TEXT`~~ **Resolved** (w8-planner-2 P2, `adr/0012`): `ssn`, `dob`, and
+  `notes` are now AEAD-encrypted (`libs/phi_crypto`, AES-256-GCM) by
+  `intake-service` on write and decrypted by `records-service` on read.
+  `patients.ssn_digits` (migration 015's generated column) was replaced
+  (migration 031) with an HMAC-SHA256 blind index computed under a key
+  independent of the encryption key — deterministic for the existing
+  exact-match duplicate-detection lookup
+  (`intake-service/app.py::_find_match_candidates`,
+  `records-service/reconciliation.py::find_ssn_match_ids`), not reversible
+  without that second key. Keys are environment-provided
+  (`PHI_ACTIVE_KEY_VERSION`/`PHI_ENCRYPTION_KEY_V<n>`/
+  `PHI_BLIND_INDEX_KEY_V<n>`), validated fail-closed at service startup —
+  see `adr/0012` for why this is explicitly *not* KMS-backed key custody,
+  and for the deploy-order requirement (migration → one-time backfill
+  script → new service code; see
+  `db/migrations/scripts/encrypt_existing_phi.py`). The full-request-body
+  PHI logging this section used to cite
+  (`services/intake-service/app.py:65`) no longer exists at that location
+  or in that form: **resolved separately** (Week 1 catch-up, DEBT D1) —
   `app.py`'s `_intake_log_summary` now logs only an allowlist
-  (`correlation_id`, `created_via`), never the request body; see that file's
-  module docstring for the full review history.
-  `services/intake-service/logging_config.py`'s docstring still described the
-  old, unremediated behavior and has been corrected in this pass.
-- **Corrected 2026-08-20 (AUD-12):** `README.md` line 1 and its Compliance
-  section asserted blanket PHI encryption and HIPAA compliance from the initial
-  scaffold. Both were false — `dob`, `ssn` and `notes` are plain text — and both
-  are now replaced with the actual posture. `db/schema.sql`'s separate
-  disk-encryption claim went the same way; there is no managed-database
-  deployment behind it. The recorded risk decision is `adr/0008`, and
-  `tests/test_compliance_claims.py` fails if either claim returns. **PHI is not
-  encrypted at rest: do not describe it as protected.**
+  (`correlation_id`, `created_via`), never the request body; see that
+  file's module docstring for the full review history.
+- **Corrected 2026-08-20 (AUD-12), updated 2026-08-26 (P2):** `README.md`
+  line 1 and its Compliance section asserted blanket PHI encryption and
+  HIPAA compliance from the initial scaffold. Both were false at the
+  time — both are now replaced with the current, accurate posture:
+  `ssn`/`dob`/`notes` ARE application-layer encrypted (see above), but
+  there is still **no disk/volume-level encryption** (`db/schema.sql`'s
+  separate disk-encryption claim was also false — there is no
+  managed-database deployment behind it) and the system is still not
+  HIPAA compliant overall. The recorded risk decision is `adr/0008`
+  (updated to record P2's remediation), the field-encryption design is
+  `adr/0012`, and `tests/test_compliance_claims.py` fails if an
+  unqualified/overreaching claim in either direction returns.
 - Gateway-to-service authentication is now **partial**: `intake-service` and
   `records-service` verify a shared `INTERNAL_SERVICE_TOKEN` (fails closed if
   unset — see `services/gateway/config.py`, `services/records-service/app.py`,
