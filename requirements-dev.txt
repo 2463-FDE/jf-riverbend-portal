@@ -10,7 +10,7 @@ psycopg2-binary==2.9.10
 # not a lazy-import library module) — tests/test_policy_corpus_ingest_script.py
 # needs it importable. Matches libs/rag_corpus/requirements.txt's pin.
 pgvector==0.4.2
-fastapi==0.115.6
+fastapi==0.141.1
 PyYAML==6.0.2
 
 # The Week-8 summary agent's loop, so its tests run the real create_agent graph.

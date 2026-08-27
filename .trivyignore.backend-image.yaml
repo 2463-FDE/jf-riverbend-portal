@@ -33,15 +33,3 @@ vulnerabilities:
     purls: ["pkg:deb/debian/libssl3t64", "pkg:deb/debian/openssl", "pkg:deb/debian/openssl-provider-legacy"]
     statement: "pre-existing OpenSSL finding in python:3.12-slim's Debian base layer, shared by all 7 backend images; remediation is pinning the base image (P5 follow-up)"
     expired_at: 2026-09-02
-  - id: CVE-2025-62727
-    purls: ["pkg:pypi/starlette"]
-    statement: "pre-existing starlette finding, fixable via a compatible fastapi/starlette upgrade (P5 follow-up); remediation required"
-    expired_at: 2026-09-02
-  - id: CVE-2026-48818
-    purls: ["pkg:pypi/starlette"]
-    statement: "pre-existing starlette finding, fixable via a compatible fastapi/starlette upgrade (P5 follow-up); remediation required"
-    expired_at: 2026-09-02
-  - id: CVE-2026-54283
-    purls: ["pkg:pypi/starlette"]
-    statement: "pre-existing starlette finding, fixable via a compatible fastapi/starlette upgrade (P5 follow-up); remediation required"
-    expired_at: 2026-09-02
