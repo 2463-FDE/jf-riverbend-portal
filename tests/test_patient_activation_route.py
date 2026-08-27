@@ -290,6 +290,17 @@ def test_the_activated_account_can_sign_in(env, monkeypatch):
     # test_gateway_security.py; what matters here is that the account created
     # by activation is a real, sign-in-able credential.
     monkeypatch.setattr(app_mod, "create_session", lambda uid, uname, role: f"session-{uid}")
+    # w8-planner-2 MFA rollout: /login now rate-limits (security.rate_limit)
+    # before anything else, which needs a Redis client — this test predates
+    # that and never wired one up.
+    class _FakeRedis:
+        def incr(self, key):
+            return 1
+
+        def expire(self, key, ttl):
+            pass
+
+    monkeypatch.setitem(app_mod.create_mfa_challenge.__globals__, "_redis", lambda: _FakeRedis())
     client, _ = env
     code = client.post("/patients/1042/invitation", headers=_auth()).json()["code"]
     client.post("/patient/activate", json={"code": code, "password": "a-long-passphrase"})

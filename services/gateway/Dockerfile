@@ -22,10 +22,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/gateway/ .
 
+# w8-planner-2 MFA rollout: mfa_crypto.py imports libs/phi_crypto/envelope.py
+# (the generic AEAD encode/decode routine, not the PHI key material — see
+# that module's own docstring) — same libs/ copy pattern intake-service,
+# eligibility-service and records-service already use.
+COPY libs/ ./libs/
+
 # roles_config.py resolves this as <module dir>/../../config/roles.yaml, so it
 # must sit two levels above /app/roles_config.py — i.e. /config/roles.yaml.
 # ROLES_CONFIG_PATH overrides the location if a deployment needs it elsewhere.
 COPY config/roles.yaml /config/roles.yaml
+
+# mfa_config.py resolves this the same way, two levels above /app/
+# mfa_config.py — i.e. /config/mfa.yaml. MFA_CONFIG_PATH overrides it.
+COPY config/mfa.yaml /config/mfa.yaml
 
 EXPOSE 8070
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8070"]

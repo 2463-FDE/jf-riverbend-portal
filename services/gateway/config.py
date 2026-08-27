@@ -59,6 +59,20 @@ class Settings:
     # unbounded lifetime. 8h is simply the more conservative of the two.
     absolute_session_timeout_seconds = int(os.getenv("ABSOLUTE_SESSION_TIMEOUT_SECONDS", "28800"))
 
+    # MFA rollout (w8-planner-2). How long a password-verified, not-yet-
+    # completed challenge (security.create_mfa_challenge) stays valid — short
+    # and single-purpose, unlike the session TTLs above. 5 minutes is enough
+    # to read a code off an authenticator app without being long enough to
+    # matter if a caller never returns to finish it.
+    # `or "300"`, not the bare os.getenv default: docker-compose's env_file
+    # passes a blank .env line through as an empty string, not "unset" —
+    # int(os.getenv(..., "300")) would crash on int("") since the env var
+    # IS set, just to nothing. Caught by bringing this service up against a
+    # real compose stack; .env.example now ships a real default for this
+    # var too, but this is the fix that actually closes the bug, not just
+    # the template.
+    mfa_challenge_timeout_seconds = int(os.getenv("MFA_CHALLENGE_TIMEOUT_SECONDS") or "300")
+
     # W9.3 — the same variable eligibility-service's own config.py reads
     # (shared via docker-compose's env_file: .env on every service). Blank
     # here means the same thing it means there: no real payer key exists in

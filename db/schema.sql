@@ -21,9 +21,18 @@
 -- ---------------------------------------------------------------------------
 -- Portal + staff logins. Passwords are PBKDF2 (django-style string).
 -- Sessions now carry both an idle and an absolute Redis TTL (see
--- services/gateway/security.py) — they no longer live forever. There is no
--- second factor: TOTP was built, tested, and parked for a complete
--- next-cycle rollout (see config/roles.yaml).
+-- services/gateway/security.py) — they no longer live forever.
+--
+-- MFA (w8-planner-2, migration 033): a TOTP second factor, rolled out under
+-- config/mfa.yaml's mode (off/prompt/enforce) and scope — see
+-- services/gateway/mfa_config.py. mfa_secret_ciphertext is AEAD-encrypted
+-- under MFA-specific key material (services/gateway/mfa_crypto.py), never
+-- the PHI keys. mfa_shared_account defaults TRUE (fail closed — nothing is
+-- ever prompted/enforced for an account not explicitly marked
+-- individually-owned; see that column's comment below for why) and
+-- mfa_pilot defaults FALSE (nobody is in the pilot scope until explicitly
+-- opted in). `/login` is password-only for any account this rollout has not
+-- reached yet.
 -- `role` still holds 'staff' for every existing account; the real
 -- least-privilege roles live in config/roles.yaml and no account has been
 -- migrated onto one yet (that migration is gated on the client's roster).
@@ -52,8 +61,52 @@ CREATE TABLE IF NOT EXISTS users (
     -- so the client's specified copy can be shown for an unmapped account.
     disabled_reason TEXT,
     last_login_at TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- AEAD envelope (libs/phi_crypto encode/decode, MFA-specific key — see
+    -- services/gateway/mfa_crypto.py). NULL means never enrolled.
+    mfa_secret_ciphertext TEXT,
+    -- Which MFA_ENCRYPTION_KEY_V<n> encrypted mfa_secret_ciphertext. Never
+    -- falls back to another key on read (fail closed).
+    mfa_secret_key_version TEXT,
+    -- Set only once a submitted code against mfa_secret_ciphertext has
+    -- verified. NULL alongside a non-null mfa_secret_ciphertext means
+    -- enrollment is pending, not active — treat it as unenrolled.
+    mfa_enrolled_at TIMESTAMPTZ,
+    -- The TOTP time-step last accepted, so the identical code cannot be
+    -- replayed a second time inside its own valid window.
+    mfa_last_totp_step BIGINT,
+    -- Monotonic revocation version copied into each Redis login challenge.
+    -- Supervisor reset increments it, invalidating all pre-reset challenges.
+    mfa_challenge_epoch BIGINT NOT NULL DEFAULT 0,
+    -- TRUE (default) = not known to be an individually-owned login; never
+    -- prompted or enforced for MFA regardless of rollout mode — a shared
+    -- login holding one person's TOTP secret locks out everyone else who
+    -- signs into it, which is worse than not having MFA. Must be explicitly
+    -- set FALSE per account before that account can be brought into scope;
+    -- this repo has no staff-directory data to do that migration itself
+    -- (docs/runbook.md tracks it as an operational dependency).
+    mfa_shared_account BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Explicit pilot-scope opt-in. FALSE (default) = out of scope while
+    -- config/mfa.yaml scope=pilot. Never inferred from role or username.
+    mfa_pilot BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+-- One-time MFA recovery codes — see migration 033 for the full column
+-- rationale. Only a salted hash is ever stored; the plaintext code is
+-- returned exactly once, in the enrollment-confirmation or regeneration
+-- response, and never logged.
+CREATE TABLE IF NOT EXISTS mfa_backup_codes (
+    id             SERIAL PRIMARY KEY,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash      TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    used_at        TIMESTAMPTZ,       -- NULL = unused; set atomically on redemption
+    invalidated_at TIMESTAMPTZ        -- set by regeneration or a supervisor reset
+);
+
+CREATE INDEX IF NOT EXISTS mfa_backup_codes_user_id_idx ON mfa_backup_codes (user_id);
+CREATE INDEX IF NOT EXISTS mfa_backup_codes_active_idx ON mfa_backup_codes (user_id)
+    WHERE used_at IS NULL AND invalidated_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- Patients

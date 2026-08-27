@@ -6,9 +6,59 @@ export interface PortalUser {
   role: string;
 }
 
+// w8-planner-2 MFA rollout. POST /login returns ONE of two shapes,
+// distinguished by whether `token` is present:
+//   - mode off/prompt, or an out-of-scope account: a full session, exactly
+//     as before MFA existed. `mfa.prompt` is an informational nudge only —
+//     it never blocks anything.
+//   - mode enforce, in-scope account: no session. `mfa.challenge_token`
+//     must be completed via either the enrollment flow
+//     (mfa.enrollment_required = true, /mfa/enroll/start + /mfa/enroll/confirm)
+//     or the login-challenge flow (/mfa/verify) before a session exists.
+export interface MfaLoginInfo {
+  required: boolean;
+  prompt?: boolean;
+  enrolled?: boolean;
+  enrollment_required?: boolean;
+  challenge_token?: string;
+}
+
 export interface LoginResponse {
+  token?: string;
+  user?: PortalUser;
+  mfa: MfaLoginInfo;
+}
+
+export interface MfaEnrollStartResponse {
+  otpauth_uri: string;
+  manual_entry_key: string;
+}
+
+export interface MfaEnrollConfirmResponse {
+  status: "enrolled";
+  backup_codes: string[];
+  // Present only when confirmation completed a forced (challenge-token)
+  // enrollment — a voluntary, already-signed-in enrollment gets neither.
+  token?: string;
+  user?: PortalUser;
+}
+
+export interface MfaVerifyResponse {
   token: string;
   user: PortalUser;
+  backup_codes_remaining?: number;
+}
+
+export interface MfaBackupCodesResponse {
+  backup_codes: string[];
+}
+
+export interface MfaStatusResponse {
+  requirement: "off" | "prompt" | "enforce";
+  enrolled: boolean;
+  pilot: boolean;
+  shared_account: boolean;
+  backup_codes_remaining: number | null;
 }
 
 export interface PatientSummary {

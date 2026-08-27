@@ -43,6 +43,20 @@ def env(monkeypatch):
     monkeypatch.setattr(app_mod, "verify_password", lambda raw, _hash: raw == PASSWORD)
     monkeypatch.setattr(app_mod, "create_session", lambda *a, **k: "tok")
 
+    # w8-planner-2 MFA rollout: /login now rate-limits (security.rate_limit)
+    # before anything else, which touches Redis on every call — these tests
+    # predate that and never wired one up. A trivial always-under-the-limit
+    # fake is all rate_limit needs; Redis mechanics themselves are covered
+    # in test_gateway_security.py / test_gateway_security_mfa.py.
+    class _FakeRedis:
+        def incr(self, key):
+            return 1
+
+        def expire(self, key, ttl):
+            pass
+
+    monkeypatch.setitem(app_mod.create_mfa_challenge.__globals__, "_redis", lambda: _FakeRedis())
+
     with Session() as s:
         s.add(app_mod.User(id=1, username="active_user", password_hash="h",
                            role="front_desk", is_active=True))

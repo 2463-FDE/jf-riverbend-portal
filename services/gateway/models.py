@@ -1,5 +1,5 @@
 """ORM models the gateway touches. (Copy-paste per service — no shared lib yet.)"""
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, Text
 from sqlalchemy.sql import func
 
 from db import Base
@@ -33,6 +33,17 @@ class User(Base):
     disabled_reason = Column(Text)
     last_login_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # --- MFA (migration 033) — see that migration's comment for the full
+    # rationale on every column here, in particular why mfa_shared_account
+    # defaults True and mfa_pilot defaults False. ---
+    mfa_secret_ciphertext = Column(Text)
+    mfa_secret_key_version = Column(Text)
+    mfa_enrolled_at = Column(DateTime(timezone=True))
+    mfa_last_totp_step = Column(BigInteger)
+    mfa_challenge_epoch = Column(BigInteger, nullable=False, default=0)
+    mfa_shared_account = Column(Boolean, nullable=False, default=True)
+    mfa_pilot = Column(Boolean, nullable=False, default=False)
 
 
 class Patient(Base):
@@ -123,3 +134,44 @@ class InsuranceCoverage(Base):
     # response — a job id is not something the browser needs or may use as
     # a lookup key (see those routes' own docstrings).
     verification_job_id = Column(Text)
+
+
+class MfaBackupCode(Base):
+    """See migration 033 for the full column rationale. code_hash is
+    security.hash_password's PBKDF2-SHA256 output — never queried by
+    equality (no index would help; a per-code random salt makes that
+    impossible by design), always by scanning a user's active rows and
+    calling verify_password against each (at most ten, cheap)."""
+
+    __tablename__ = "mfa_backup_codes"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    code_hash = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    used_at = Column(DateTime(timezone=True))          # NULL = unused
+    invalidated_at = Column(DateTime(timezone=True))   # set by regeneration or a reset
+
+
+class AuditLog(Base):
+    """Mirror of records-service's identical table (ADR 0001 — no shared
+    service library; every service that needs a table defines its own
+    matching columns). audit_logs itself is append-only and hash-chained at
+    the database boundary since migrations 026/027 — this service only ever
+    INSERTs, which its runtime credential is granted regardless of which
+    service the row's actor came from (migration 028's ALTER DEFAULT
+    PRIVILEGES). chain_position/prev_chain_hash/chain_hash are computed by
+    a BEFORE INSERT trigger; this model does not set them.
+
+    Gateway is the natural writer for MFA events (enrollment, challenge
+    outcomes, backup-code use, regeneration, reset) — it owns login and the
+    session/challenge flow those events describe. `message` is metadata
+    only, same invariant records-service's own writer already holds:
+    identifiers and outcome, never a secret, code, or QR payload."""
+
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    actor = Column(Text)
+    message = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

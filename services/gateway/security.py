@@ -123,6 +123,80 @@ def get_session(token: str) -> dict | None:
     return data
 
 
+def _delete(key: str) -> None:
+    _redis().delete(key)
+
+
+# --- MFA login challenge -----------------------------------------------------
+#
+# Issued after password verification succeeds but the account's rollout
+# requirement is "enforce" — it proves "this caller already knows the
+# password for this user_id," nothing more. Unlike a session, get_session
+# never accepts one: a challenge cannot reach any authenticated route. Short,
+# fixed TTL, never refreshed (settings.mfa_challenge_timeout_seconds).
+#
+# A challenge carries the user's MFA challenge epoch from the instant the
+# password was verified. Supervisor reset increments the database epoch in
+# the same transaction that clears MFA state, so every outstanding challenge
+# becomes stale without needing a Redis reverse index. Challenges created by
+# an older build without an epoch fail closed in get_mfa_challenge().
+
+
+def create_mfa_challenge(user_id: int, *, purpose: str = "login", mfa_epoch: int) -> str:
+    token = uuid.uuid4().hex
+    key = f"mfa_challenge:{token}"
+    _redis().hset(
+        key,
+        mapping={"user_id": str(user_id), "purpose": purpose, "mfa_epoch": str(mfa_epoch)},
+    )
+    _redis().expire(key, settings.mfa_challenge_timeout_seconds)
+    return token
+
+
+def get_mfa_challenge(token: str) -> dict | None:
+    if not token:
+        return None
+    data = _redis().hgetall(f"mfa_challenge:{token}")
+    if not data or not data.get("user_id") or data.get("mfa_epoch") is None:
+        return None
+    try:
+        return {
+            "user_id": int(data["user_id"]),
+            "purpose": data.get("purpose", "login"),
+            "mfa_epoch": int(data["mfa_epoch"]),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def destroy_mfa_challenge(token: str) -> None:
+    if token:
+        _delete(f"mfa_challenge:{token}")
+
+
+# --- rate limiting ------------------------------------------------------------
+#
+# Fixed-window counter via Redis INCR + a TTL set only on the first hit in
+# each window (so the window itself doesn't get pushed out by every
+# subsequent attempt — a classic "EXPIRE on every INCR" bug that would let a
+# steady drip of attempts keep the window alive forever). Used for password
+# attempts, MFA-enrollment confirmation, and MFA verification — see app.py's
+# call sites for the actual limits.
+
+
+def rate_limit(key: str, *, limit: int, window_seconds: int) -> bool:
+    """Returns True and counts this call toward the window if the caller is
+    still under `limit`; returns False (and still counts it — an attempt
+    that gets rejected for being over the limit is still an attempt) once
+    `limit` has been reached within `window_seconds`."""
+    r = _redis()
+    full_key = f"ratelimit:{key}"
+    count = r.incr(full_key)
+    if count == 1:
+        r.expire(full_key, window_seconds)
+    return count <= limit
+
+
 def destroy_session(token: str) -> bool:
     """Delete the session and report whether no live session remains.
 
