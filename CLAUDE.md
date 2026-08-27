@@ -222,22 +222,35 @@ open here as open until the code says otherwise.
   see `tests/integration/test_scheduling_concurrency.py`.
 - HL7 mapping only handles PID/PV1; allergy (AL1) and medication (RXA) segments are silently dropped. Still open.
 - ~~ROI has no authorization/accounting-trail enforcement (45 CFR 164.508
-  gap)~~ **Partially resolved** (w8-planner-2, migration 029):
-  `POST /roi/requests/{id}/fulfill` (`services/roi-service/app.py`) now
-  REQUIRES a signed-authorization reference/signer/timestamp before
-  releasing PHI — closes 164.508 for the real release path. Every
-  fulfillment writes a disclosure row carrying its own
-  authorization_reference/purpose (independent of the request row, so a
-  later edit can't rewrite what the accounting already recorded), read back
-  via `GET /roi/patients/{id}/accounting` — this is the exact shape
-  `docs/handover/auditor-questionnaire.md`'s Q7 asks for and staff couldn't
-  previously answer. **Still open:** 45 CFR 164.522 (no restriction
-  tracking or enforcement exists — not attempted here); the legacy
-  `GET /disclosures/{patient_id}` route (`app.py`, "original D12") still
-  releases records with no authorization check and writes no disclosure
-  row, so it stays invisible to the new accounting — not proxied by the
-  gateway, so no legitimate caller reaches it, but it is a real gap in the
-  gap and is flagged, not fixed, here.
+  gap)~~ **Resolved for 164.508 and 164.522; 164.528 corrected, not closed**
+  (w8-planner-2, migrations 029+030): `POST /roi/requests/{id}/fulfill`
+  (`services/roi-service/app.py`) now requires a reference to a
+  **persisted, human-reviewed** `roi_authorizations` record (migration 030)
+  — status must be `valid` (set only via `POST
+  /roi/authorizations/{id}/review`), unrevoked, unexpired, and must match
+  the request's patient/recipient/date scope; a caller can no longer assert
+  its own signer/reference/timestamp at fulfillment time the way the
+  original migration-029 design allowed. A narrowly scoped
+  `roi_disclosure_restrictions` record (45 CFR 164.522, not a general
+  consent-management platform) is rechecked inside the same fulfillment
+  transaction and blocks release outright when active. Authorization load,
+  restriction check, disclosure creation, and request status update all
+  happen in one transaction; repeated fulfillment of an already-fulfilled
+  request is refused (409), not silently re-executed into a second
+  disclosure row. The legacy `GET /disclosures/{patient_id}` route is
+  **retired** — it now unconditionally returns 410, including for a caller
+  presenting a valid internal service token, closing the "not exposed
+  through the UI is not a security boundary" gap the prior version of this
+  entry flagged but didn't fix. **164.528 correction:** every fulfillment
+  still writes a disclosure row (`GET /roi/patients/{id}/accounting`,
+  answering the shape of `docs/handover/auditor-questionnaire.md`'s Q7),
+  but this is an **internal log, not a substitute for a formal 164.528
+  accounting of disclosures** — 164.528(a)(2) exempts disclosures made
+  under a valid 164.508 authorization (every row this table can ever
+  contain) from that mandatory accounting requirement. A true 164.528
+  accounting would still need to track the non-exempt categories this
+  system does not model at all (public health, law enforcement,
+  judicial/administrative proceedings, etc.) — not attempted here.
 - ~~`audit_logs` is mutable request-dump logging, not a tamper-evident access
   trail~~ **Resolved against the threat model this control targets**
   (w8-planner-2 P3, closes AUD-B01). **Threat model: a compromised or buggy

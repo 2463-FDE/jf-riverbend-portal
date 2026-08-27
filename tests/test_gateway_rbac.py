@@ -349,6 +349,10 @@ def test_roi_fulfill_forwards_the_authorization_payload_downstream(client, monke
     # Round 1: proxy_roi_fulfill hardcoded {} regardless of what the caller
     # sent, silently discarding the authorization roi-service now requires.
     # This pins that the real payload actually reaches the downstream call.
+    # w8-planner-2 P4 (030): the payload shape changed again — it's now just
+    # a reference to a persisted, human-reviewed roi_authorizations row, not
+    # a caller-asserted signer/reference/timestamp; the gateway still just
+    # forwards whatever it's given.
     monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
     captured = {}
 
@@ -358,15 +362,50 @@ def test_roi_fulfill_forwards_the_authorization_payload_downstream(client, monke
 
     monkeypatch.setattr(app_mod.httpx, "post", fake_post)
 
-    body = {
-        "authorization_reference": "doc-123",
-        "authorization_signed_at": "2026-08-27T00:00:00Z",
-        "authorization_signed_by": "Priya Khan",
-    }
+    body = {"authorization_id": 7}
     resp = client.post("/roi/requests/1/fulfill", json=body, headers=_auth())
 
     assert resp.status_code == 200
     assert captured["json"] == body
+
+
+def test_roi_clerk_can_create_and_review_an_authorization(client, monkeypatch):
+    # Gateway proxy routes don't forward the downstream status code by
+    # default (see _post's forward_status flag, unused here) — matches the
+    # existing proxy_roi_create convention, which also returns 200 for a
+    # downstream 201.
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
+    _stub_downstream(monkeypatch, payload={"id": 7, "patient_id": 1042, "status": "pending"}, status_code=201)
+
+    create_resp = client.post(
+        "/roi/authorizations",
+        json={
+            "patient_id": 1042,
+            "recipient": "Dr. Chen",
+            "signature_evidence_reference": "doc-123",
+            "signed_by": "Priya Khan",
+            "signed_at": "2026-08-27T00:00:00Z",
+        },
+        headers=_auth(),
+    )
+    assert create_resp.status_code == 200
+
+    _stub_downstream(monkeypatch, payload={"id": 7, "patient_id": 1042, "status": "valid"})
+    review_resp = client.post(
+        "/roi/authorizations/7/review",
+        json={"decision": "valid", "reviewed_by": "supervisor-1"},
+        headers=_auth(),
+    )
+    assert review_resp.status_code == 200
+
+
+def test_scheduler_is_denied_creating_a_roi_authorization(client, monkeypatch):
+    monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("scheduler") if t == VALID_TOKEN else None)
+
+    resp = client.post("/roi/authorizations", json={}, headers=_auth())
+
+    assert resp.status_code == 403
+    assert "roi.write" in resp.json()["detail"]
 
 
 def test_scheduler_can_book_an_appointment(client, monkeypatch):

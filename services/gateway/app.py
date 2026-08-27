@@ -1412,20 +1412,62 @@ def proxy_roi_fulfill(
     request_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
 ):
     # w8-planner-2: `payload` used to be hardcoded to {} here, discarding
-    # whatever the caller sent — roi-service now REQUIRES an authorization
-    # payload (reference/signed_at/signed_by) to fulfill at all, so it has
-    # to actually reach the service.
+    # whatever the caller sent. P4 (030) changed the payload shape again —
+    # it's now just {"authorization_id": N}, a reference to a persisted,
+    # human-reviewed roi_authorizations row that roi-service loads and
+    # revalidates itself. The gateway forwards the payload as-is either
+    # way; it has no opinion on its shape.
     return _post("roi", f"/roi/requests/{request_id}/fulfill", payload)
+
+
+@app.post("/roi/authorizations")
+def proxy_roi_authorization_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
+    return _post("roi", "/roi/authorizations", payload)
+
+
+@app.get("/roi/authorizations/{authorization_id}")
+def proxy_roi_authorization_get(
+    authorization_id: int, session: dict = Depends(require_permission("disclosures.read"))
+):
+    return _get("roi", f"/roi/authorizations/{authorization_id}")
+
+
+@app.post("/roi/authorizations/{authorization_id}/review")
+def proxy_roi_authorization_review(
+    authorization_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
+):
+    return _post("roi", f"/roi/authorizations/{authorization_id}/review", payload)
+
+
+@app.post("/roi/authorizations/{authorization_id}/revoke")
+def proxy_roi_authorization_revoke(
+    authorization_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
+):
+    return _post("roi", f"/roi/authorizations/{authorization_id}/revoke", payload)
+
+
+@app.post("/roi/restrictions")
+def proxy_roi_restriction_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
+    return _post("roi", "/roi/restrictions", payload)
+
+
+@app.post("/roi/restrictions/{restriction_id}/revoke")
+def proxy_roi_restriction_revoke(
+    restriction_id: int, session: dict = Depends(require_permission("roi.write"))
+):
+    return _post("roi", f"/roi/restrictions/{restriction_id}/revoke", {})
 
 
 @app.get("/roi/patients/{patient_id}/accounting")
 def proxy_roi_accounting(
     patient_id: int, session: dict = Depends(require_permission("disclosures.read"))
 ):
-    # 45 CFR 164.528 accounting of disclosures (w8-planner-2) — same
-    # disclosures.read permission proxy_roi_list already requires; no new
-    # RBAC entry needed (config/roles.yaml already grants this to roi_clerk
-    # and management).
+    # An internal disclosure log, NOT a 45 CFR 164.528 accounting of
+    # disclosures on its own — see roi-service/models.py::Disclosure for
+    # why (164.528(a)(2) exempts authorization-gated disclosures, which is
+    # all this ever contains). Same disclosures.read permission
+    # proxy_roi_list already requires; no new RBAC entry needed
+    # (config/roles.yaml already grants this to roi_clerk and management).
     return _get("roi", f"/roi/patients/{patient_id}/accounting")
 
 
