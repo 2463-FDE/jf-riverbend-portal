@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS users (
     -- The TOTP time-step last accepted, so the identical code cannot be
     -- replayed a second time inside its own valid window.
     mfa_last_totp_step BIGINT,
+    -- Monotonic revocation version copied into each Redis login challenge.
+    -- Supervisor reset increments it, invalidating all pre-reset challenges.
+    mfa_challenge_epoch BIGINT NOT NULL DEFAULT 0,
     -- TRUE (default) = not known to be an individually-owned login; never
     -- prompted or enforced for MFA regardless of rollout mode — a shared
     -- login holding one person's TOTP secret locks out everyone else who

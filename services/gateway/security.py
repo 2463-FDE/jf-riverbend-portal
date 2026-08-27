@@ -135,22 +135,20 @@ def _delete(key: str) -> None:
 # never accepts one: a challenge cannot reach any authenticated route. Short,
 # fixed TTL, never refreshed (settings.mfa_challenge_timeout_seconds).
 #
-# There is deliberately no reverse index tracking a user's outstanding
-# challenges for a supervisor reset to clean up. A reset clears
-# mfa_secret_ciphertext/mfa_enrolled_at and invalidates every backup code in
-# the same DB transaction (app.py::reset_mfa) — the moment that commits, any
-# leftover challenge token for that user becomes inert on its own: the
-# enroll-confirm/verify routes both re-read the user's CURRENT enrollment
-# state from the database at consumption time rather than trusting anything
-# cached in the challenge, so there is nothing left for a stale token to
-# verify against. Destroying Redis keys separately would be belt-and-braces,
-# not a correctness requirement.
+# A challenge carries the user's MFA challenge epoch from the instant the
+# password was verified. Supervisor reset increments the database epoch in
+# the same transaction that clears MFA state, so every outstanding challenge
+# becomes stale without needing a Redis reverse index. Challenges created by
+# an older build without an epoch fail closed in get_mfa_challenge().
 
 
-def create_mfa_challenge(user_id: int, *, purpose: str = "login") -> str:
+def create_mfa_challenge(user_id: int, *, purpose: str = "login", mfa_epoch: int) -> str:
     token = uuid.uuid4().hex
     key = f"mfa_challenge:{token}"
-    _redis().hset(key, mapping={"user_id": str(user_id), "purpose": purpose})
+    _redis().hset(
+        key,
+        mapping={"user_id": str(user_id), "purpose": purpose, "mfa_epoch": str(mfa_epoch)},
+    )
     _redis().expire(key, settings.mfa_challenge_timeout_seconds)
     return token
 
@@ -159,9 +157,16 @@ def get_mfa_challenge(token: str) -> dict | None:
     if not token:
         return None
     data = _redis().hgetall(f"mfa_challenge:{token}")
-    if not data or not data.get("user_id"):
+    if not data or not data.get("user_id") or data.get("mfa_epoch") is None:
         return None
-    return {"user_id": int(data["user_id"]), "purpose": data.get("purpose", "login")}
+    try:
+        return {
+            "user_id": int(data["user_id"]),
+            "purpose": data.get("purpose", "login"),
+            "mfa_epoch": int(data["mfa_epoch"]),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def destroy_mfa_challenge(token: str) -> None:

@@ -52,6 +52,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enrolled_at TIMESTAMPTZ;
 -- window — see mfa_totp.verify_code's step-return contract. NULL until the
 -- first successful verification.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_last_totp_step BIGINT;
+-- Monotonic revocation version copied into every Redis login challenge.
+-- Supervisor reset increments it transactionally, invalidating every older
+-- outstanding challenge without requiring a Redis reverse index.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_challenge_epoch BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_shared_account BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_pilot BOOLEAN NOT NULL DEFAULT FALSE;
 
@@ -61,6 +65,8 @@ COMMENT ON COLUMN users.mfa_secret_key_version IS
     'Which MFA_ENCRYPTION_KEY_V<n> encrypted mfa_secret_ciphertext. Never falls back to another key on read (fail closed) — see mfa_crypto.decrypt_totp_secret.';
 COMMENT ON COLUMN users.mfa_enrolled_at IS
     'Set only once a submitted code against mfa_secret_ciphertext has verified. NULL alongside a non-null mfa_secret_ciphertext = enrollment pending, not active.';
+COMMENT ON COLUMN users.mfa_challenge_epoch IS
+    'Monotonic reset generation copied into Redis login challenges; reset increments it so every challenge issued before the reset fails closed.';
 COMMENT ON COLUMN users.mfa_shared_account IS
     'TRUE (default) = not known to be an individually-owned login; never prompted or enforced for MFA regardless of rollout mode (services/gateway/mfa_config.py). Must be explicitly set FALSE per account before that account can be brought into scope — an operational dependency this migration does not resolve; see docs/runbook.md.';
 COMMENT ON COLUMN users.mfa_pilot IS

@@ -437,6 +437,18 @@ def test_a_replay_rejection_does_not_consume_the_challenge(client):
     assert retry.status_code == 200
 
 
+def _claim_totp_step(db, user_id, candidate_step):
+    user = db.get(app_mod.User, user_id)
+    return app_mod._claim_totp_step(
+        db,
+        user_id=user_id,
+        candidate_step=candidate_step,
+        expected_challenge_epoch=user.mfa_challenge_epoch,
+        expected_ciphertext=user.mfa_secret_ciphertext,
+        expected_key_version=user.mfa_secret_key_version,
+    )
+
+
 def test_claim_totp_step_helper_rejects_equal_and_lower_stored_values(client):
     user_id, _secret, _codes = _enrolled_user_with_secret(client)
     with client.Session() as s:
@@ -444,8 +456,8 @@ def test_claim_totp_step_helper_rejects_equal_and_lower_stored_values(client):
         user.mfa_last_totp_step = 100
         s.commit()
 
-        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=100) is False
-        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=99) is False
+        assert _claim_totp_step(s, user_id, 100) is False
+        assert _claim_totp_step(s, user_id, 99) is False
         s.rollback()
         user = s.get(app_mod.User, user_id)
         assert user.mfa_last_totp_step == 100
@@ -458,7 +470,7 @@ def test_claim_totp_step_helper_accepts_a_strictly_greater_value(client):
         user.mfa_last_totp_step = 100
         s.commit()
 
-        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=101) is True
+        assert _claim_totp_step(s, user_id, 101) is True
         s.commit()
         user = s.get(app_mod.User, user_id)
         assert user.mfa_last_totp_step == 101
@@ -467,7 +479,7 @@ def test_claim_totp_step_helper_accepts_a_strictly_greater_value(client):
 def test_claim_totp_step_helper_accepts_the_first_ever_claim_from_null(client):
     user_id, _secret, _codes = _enrolled_user_with_secret(client)
     with client.Session() as s:
-        assert app_mod._claim_totp_step(s, user_id=user_id, candidate_step=1) is True
+        assert _claim_totp_step(s, user_id, 1) is True
 
 
 def test_two_concurrent_claims_of_the_same_step_only_one_succeeds(client):
@@ -477,8 +489,8 @@ def test_two_concurrent_claims_of_the_same_step_only_one_succeeds(client):
     # calls). Only the guarded UPDATE decides the winner.
     user_id, _secret, _codes = _enrolled_user_with_secret(client)
     with client.Session() as s:
-        first = app_mod._claim_totp_step(s, user_id=user_id, candidate_step=500)
-        second = app_mod._claim_totp_step(s, user_id=user_id, candidate_step=500)
+        first = _claim_totp_step(s, user_id, 500)
+        second = _claim_totp_step(s, user_id, 500)
         s.commit()
 
     assert (first, second) == (True, False)

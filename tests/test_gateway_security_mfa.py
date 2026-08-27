@@ -40,21 +40,30 @@ def test_create_mfa_challenge_carries_user_id_and_purpose_and_sets_ttl(monkeypat
     fake = _FakeRedis()
     monkeypatch.setattr(security, "_redis", lambda: fake)
 
-    token = security.create_mfa_challenge(7, purpose="login")
+    token = security.create_mfa_challenge(7, purpose="login", mfa_epoch=3)
 
     assert token
     key = f"mfa_challenge:{token}"
-    assert fake._store[key] == {"user_id": "7", "purpose": "login"}
+    assert fake._store[key] == {"user_id": "7", "purpose": "login", "mfa_epoch": "3"}
     assert fake._ttls[key] == security.settings.mfa_challenge_timeout_seconds
 
 
 def test_get_mfa_challenge_returns_user_id_and_purpose(monkeypatch):
-    fake = _FakeRedis(store={"mfa_challenge:tok": {"user_id": "7", "purpose": "login"}})
+    fake = _FakeRedis(
+        store={"mfa_challenge:tok": {"user_id": "7", "purpose": "login", "mfa_epoch": "3"}}
+    )
     monkeypatch.setattr(security, "_redis", lambda: fake)
 
     data = security.get_mfa_challenge("tok")
 
-    assert data == {"user_id": 7, "purpose": "login"}
+    assert data == {"user_id": 7, "purpose": "login", "mfa_epoch": 3}
+
+
+def test_get_mfa_challenge_rejects_a_legacy_token_without_an_epoch(monkeypatch):
+    fake = _FakeRedis(store={"mfa_challenge:tok": {"user_id": "7", "purpose": "login"}})
+    monkeypatch.setattr(security, "_redis", lambda: fake)
+
+    assert security.get_mfa_challenge("tok") is None
 
 
 def test_get_mfa_challenge_is_none_for_missing_or_empty_token(monkeypatch):
@@ -68,7 +77,9 @@ def test_get_mfa_challenge_is_none_for_missing_or_empty_token(monkeypatch):
 def test_get_mfa_challenge_never_refreshes_its_own_ttl(monkeypatch):
     # Unlike a session, a challenge does NOT slide — reading it twice must
     # not extend its life, since it's meant to be single-purpose and short.
-    fake = _FakeRedis(store={"mfa_challenge:tok": {"user_id": "7", "purpose": "login"}})
+    fake = _FakeRedis(
+        store={"mfa_challenge:tok": {"user_id": "7", "purpose": "login", "mfa_epoch": "3"}}
+    )
     monkeypatch.setattr(security, "_redis", lambda: fake)
 
     security.get_mfa_challenge("tok")

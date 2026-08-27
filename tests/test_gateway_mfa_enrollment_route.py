@@ -402,6 +402,7 @@ def test_only_one_atomic_claim_can_confirm_a_pending_enrollment(client):
             "candidate_step": 500,
             "expected_ciphertext": user.mfa_secret_ciphertext,
             "expected_key_version": user.mfa_secret_key_version,
+            "expected_challenge_epoch": user.mfa_challenge_epoch,
             "mark_login": True,
         }
         first = app_mod._claim_mfa_enrollment(s, **kwargs)

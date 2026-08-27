@@ -41,6 +41,7 @@ class User(Base):
     mfa_secret_key_version = Column(Text)
     mfa_enrolled_at = Column(DateTime(timezone=True))
     mfa_last_totp_step = Column(BigInteger)
+    mfa_challenge_epoch = Column(BigInteger, nullable=False, default=0)
     mfa_shared_account = Column(Boolean, nullable=False, default=True)
     mfa_pilot = Column(Boolean, nullable=False, default=False)
 

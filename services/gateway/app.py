@@ -409,7 +409,11 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     requirement = mfa_config.mfa_requirement_for(user)
 
     if requirement == "enforce":
-        challenge_token = create_mfa_challenge(user.id, purpose="login")
+        challenge_token = create_mfa_challenge(
+            user.id,
+            purpose="login",
+            mfa_epoch=user.mfa_challenge_epoch,
+        )
         enrollment_required = user.mfa_enrolled_at is None
         _write_audit(
             db, actor=user.username,
@@ -826,9 +830,9 @@ def me(session: dict = Depends(require_session)):
 
 def _resolve_mfa_principal(
     db: Session, authorization: Optional[str], challenge_token: Optional[str]
-) -> Tuple[User, bool]:
+) -> Tuple[User, bool, int]:
     """An active User row from EXACTLY ONE of: a valid session, OR a valid
-    pending 'login' challenge. Returns (user, via_challenge).
+    pending 'login' challenge. Returns (user, via_challenge, mfa_epoch).
 
     Round-1 review (B01): this used to try the session first and silently
     ignore challenge_token whenever one was present, on the theory that a
@@ -860,13 +864,17 @@ def _resolve_mfa_principal(
             if user_id is not None:
                 user = db.get(User, user_id)
                 if user is not None and user.is_active:
-                    return user, False
+                    return user, False, user.mfa_challenge_epoch
     elif challenge_token:
         challenge = get_mfa_challenge(challenge_token)
         if challenge and challenge.get("purpose") == "login":
             user = db.get(User, challenge["user_id"])
-            if user is not None and user.is_active:
-                return user, True
+            if (
+                user is not None
+                and user.is_active
+                and challenge["mfa_epoch"] == user.mfa_challenge_epoch
+            ):
+                return user, True, challenge["mfa_epoch"]
     raise HTTPException(status_code=401, detail="not authenticated")
 
 
@@ -923,7 +931,15 @@ def _claim_backup_code(db: Session, *, backup_code_id: int, user_id: int) -> boo
     return claimed is not None
 
 
-def _claim_totp_step(db: Session, *, user_id: int, candidate_step: int) -> bool:
+def _claim_totp_step(
+    db: Session,
+    *,
+    user_id: int,
+    candidate_step: int,
+    expected_challenge_epoch: int,
+    expected_ciphertext: str,
+    expected_key_version: str,
+) -> bool:
     """Atomic compare-and-set for users.mfa_last_totp_step — the
     authoritative TOTP replay guard, not the ORM assignment
     `user.mfa_last_totp_step = step` it replaces.
@@ -944,6 +960,11 @@ def _claim_totp_step(db: Session, *, user_id: int, candidate_step: int) -> bool:
         update(User)
         .where(
             User.id == user_id,
+            User.is_active.is_(True),
+            User.mfa_enrolled_at.is_not(None),
+            User.mfa_challenge_epoch == expected_challenge_epoch,
+            User.mfa_secret_ciphertext == expected_ciphertext,
+            User.mfa_secret_key_version == expected_key_version,
             (User.mfa_last_totp_step.is_(None)) | (User.mfa_last_totp_step < candidate_step),
         )
         .values(mfa_last_totp_step=candidate_step)
@@ -959,6 +980,7 @@ def _claim_mfa_enrollment(
     candidate_step: int,
     expected_ciphertext: str,
     expected_key_version: str,
+    expected_challenge_epoch: int,
     mark_login: bool,
 ) -> bool:
     """Atomically transition one pending enrollment to confirmed.
@@ -987,12 +1009,44 @@ def _claim_mfa_enrollment(
             User.mfa_enrolled_at.is_(None),
             User.mfa_secret_ciphertext == expected_ciphertext,
             User.mfa_secret_key_version == expected_key_version,
+            User.mfa_challenge_epoch == expected_challenge_epoch,
             (User.mfa_last_totp_step.is_(None)) | (User.mfa_last_totp_step < candidate_step),
         )
         .values(**values)
         .returning(User.id)
     ).scalar_one_or_none()
     return claimed is not None
+
+
+def _store_pending_mfa_secret(
+    db: Session,
+    *,
+    user_id: int,
+    expected_challenge_epoch: int,
+    ciphertext: str,
+    key_version: str,
+) -> bool:
+    """Store a pending secret only while the authenticating epoch is current.
+
+    This closes the reset race around /mfa/enroll/start: a challenge can pass
+    the initial lookup, then lose to a supervisor reset before this guarded
+    UPDATE. The stale request cannot recreate pending MFA state after reset.
+    """
+    stored = db.execute(
+        update(User)
+        .where(
+            User.id == user_id,
+            User.is_active.is_(True),
+            User.mfa_enrolled_at.is_(None),
+            User.mfa_challenge_epoch == expected_challenge_epoch,
+        )
+        .values(
+            mfa_secret_ciphertext=ciphertext,
+            mfa_secret_key_version=key_version,
+        )
+        .returning(User.id)
+    ).scalar_one_or_none()
+    return stored is not None
 
 
 class MfaEnrollStartRequest(BaseModel):
@@ -1016,7 +1070,7 @@ def start_mfa_enrollment(
     account/pilot-scope exemptions) and for one already confirmed-enrolled
     (409 — re-enrollment goes through a supervisor reset, not this route).
     """
-    user, _via_challenge = _resolve_mfa_principal(db, authorization, req.challenge_token)
+    user, via_challenge, auth_epoch = _resolve_mfa_principal(db, authorization, req.challenge_token)
 
     if mfa_config.mfa_requirement_for(user) == "off":
         raise HTTPException(status_code=403, detail="mfa is not available for this account")
@@ -1025,8 +1079,16 @@ def start_mfa_enrollment(
 
     secret = mfa_totp.generate_secret()
     envelope, key_version = mfa_crypto.encrypt_totp_secret(user.id, secret)
-    user.mfa_secret_ciphertext = envelope
-    user.mfa_secret_key_version = key_version
+    if not _store_pending_mfa_secret(
+        db,
+        user_id=user.id,
+        expected_challenge_epoch=auth_epoch,
+        ciphertext=envelope,
+        key_version=key_version,
+    ):
+        db.rollback()
+        status_code = 401 if via_challenge else 409
+        raise HTTPException(status_code=status_code, detail="mfa enrollment authorization is no longer current")
     _commit_mfa_transaction(
         db,
         audit_events=[(user.username, f"mfa_enrollment_started user_id={user.id}")],
@@ -1056,7 +1118,7 @@ def confirm_mfa_enrollment(
     rather than an existing session — destroys that challenge and mints a
     real session, so forced first-time enrollment completes login in one
     step rather than requiring a second round-trip through /login."""
-    user, via_challenge = _resolve_mfa_principal(db, authorization, req.challenge_token)
+    user, via_challenge, auth_epoch = _resolve_mfa_principal(db, authorization, req.challenge_token)
 
     if not rate_limit(
         f"mfa-confirm:{user.id}", limit=_MFA_CONFIRM_RATE_LIMIT, window_seconds=_MFA_CONFIRM_RATE_WINDOW_SECONDS
@@ -1080,6 +1142,7 @@ def confirm_mfa_enrollment(
         candidate_step=step,
         expected_ciphertext=user.mfa_secret_ciphertext,
         expected_key_version=user.mfa_secret_key_version,
+        expected_challenge_epoch=auth_epoch,
         mark_login=via_challenge,
     ):
         db.rollback()
@@ -1138,7 +1201,12 @@ def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="mfa challenge expired or invalid")
 
     user = db.get(User, challenge["user_id"])
-    if user is None or not user.is_active or user.mfa_enrolled_at is None:
+    if (
+        user is None
+        or not user.is_active
+        or user.mfa_enrolled_at is None
+        or challenge["mfa_epoch"] != user.mfa_challenge_epoch
+    ):
         # Not a wrong-code case — this account cannot complete an MFA
         # challenge at all right now (deactivated mid-flow, or never
         # actually finished enrollment). The challenge is spent either way.
@@ -1167,7 +1235,14 @@ def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
         # the loser is treated as invalid below, same as a wrong code, and
         # must NOT consume the challenge (retry with a genuinely newer code
         # is still possible within the challenge's own TTL).
-        if not _claim_totp_step(db, user_id=user.id, candidate_step=step):
+        if not _claim_totp_step(
+            db,
+            user_id=user.id,
+            candidate_step=step,
+            expected_challenge_epoch=challenge["mfa_epoch"],
+            expected_ciphertext=user.mfa_secret_ciphertext,
+            expected_key_version=user.mfa_secret_key_version,
+        ):
             db.rollback()
             _write_audit(db, actor=user.username, message=f"mfa_verify_failed user_id={user.id} method=totp")
             raise HTTPException(status_code=401, detail="invalid code")
@@ -1314,6 +1389,7 @@ def reset_mfa(
     target.mfa_secret_key_version = None
     target.mfa_enrolled_at = None
     target.mfa_last_totp_step = None
+    target.mfa_challenge_epoch = target.mfa_challenge_epoch + 1
     db.execute(
         update(MfaBackupCode)
         .where(

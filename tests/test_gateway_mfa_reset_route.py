@@ -144,6 +144,7 @@ def test_supervisor_reset_succeeds_and_clears_everything_atomically(client):
         assert user.mfa_secret_key_version is None
         assert user.mfa_enrolled_at is None
         assert user.mfa_last_totp_step is None
+        assert user.mfa_challenge_epoch == 1
 
         active_codes = (
             s.query(app_mod.MfaBackupCode)
@@ -151,6 +152,67 @@ def test_supervisor_reset_succeeds_and_clears_everything_atomically(client):
             .count()
         )
         assert active_codes == 0
+
+
+def test_reset_invalidates_every_pre_reset_login_challenge(client, monkeypatch):
+    monkeypatch.setattr(app_mod.mfa_config, "mfa_requirement_for", lambda user, **kwargs: "enforce")
+    target_id = _make_enrolled_user(client, username="target")
+    admin_id = target_id + 150
+    with client.Session() as s:
+        target = s.get(app_mod.User, target_id)
+        old_epoch = target.mfa_challenge_epoch
+        s.add(
+            app_mod.User(
+                id=admin_id,
+                username="itadmin-epoch",
+                password_hash=app_mod.hash_password(PASSWORD),
+                role="it_admin",
+                is_active=True,
+            )
+        )
+        s.commit()
+
+    stale_challenge = app_mod.create_mfa_challenge(
+        target_id,
+        purpose="login",
+        mfa_epoch=old_epoch,
+    )
+    admin_token = _session_for(admin_id, "itadmin-epoch", "it_admin")
+    reset = client.post(
+        "/mfa/reset",
+        json={"username": "target"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert reset.status_code == 200
+
+    stale = client.post("/mfa/enroll/start", json={"challenge_token": stale_challenge})
+    assert stale.status_code == 401
+
+    # The write boundary carries the same epoch predicate, closing the race
+    # where reset commits after initial challenge resolution but before the
+    # pending secret is stored.
+    with client.Session() as s:
+        assert app_mod._store_pending_mfa_secret(
+            s,
+            user_id=target_id,
+            expected_challenge_epoch=old_epoch,
+            ciphertext="stale-ciphertext",
+            key_version="v1",
+        ) is False
+        s.rollback()
+        target = s.get(app_mod.User, target_id)
+        current_epoch = target.mfa_challenge_epoch
+        assert target.mfa_secret_ciphertext is None
+
+    # A new password proof would receive the current epoch and remains able
+    # to start the required re-enrollment flow.
+    fresh_challenge = app_mod.create_mfa_challenge(
+        target_id,
+        purpose="login",
+        mfa_epoch=current_epoch,
+    )
+    fresh = client.post("/mfa/enroll/start", json={"challenge_token": fresh_challenge})
+    assert fresh.status_code == 200
 
 
 def test_reset_is_audited_without_any_secret_material(client):
