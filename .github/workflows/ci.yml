@@ -69,11 +69,85 @@ jobs:
         # paths is thin — tracked in RIV-201.
         run: pytest -m "not integration" -q
 
-  # NOTE: no dependency vulnerability scan, no container image scan, and no
-  # secret-scanning step. Images are built and pushed straight from main.
+  # P5 (w8-planner-2): dependency vulnerability, secret, and container-image
+  # scanning. Severity/failure policy, applied consistently across all three
+  # via Trivy: CRITICAL/HIGH vulnerabilities fail the build (MEDIUM/LOW are
+  # reported but non-blocking); any secret finding fails the build outright
+  # — a leaked credential has no "low severity" tier. `--ignore-unfixed` on
+  # the vuln scans so CI doesn't block on an advisory with no available fix
+  # yet. Runs a version-pinned `ghcr.io/aquasecurity/trivy` image directly
+  # via `docker run`, not the `aquasecurity/trivy-action` marketplace
+  # action: that action's v0.28.0 release resolves an internal
+  # `aquasecurity/setup-trivy` sub-action version this environment cannot
+  # download, failing the job before any scan runs.
+  #
+  # .trivyignore.*.yaml files are a TEMPORARY, narrow baseline for specific
+  # pre-existing findings — see each file's own header for what it covers,
+  # why, and its expiry (2026-09-02 for all of them). Every entry is scoped
+  # to an exact id + purls/paths; nothing outside that exact scope is
+  # suppressed. All four are validated before use so a malformed baseline
+  # fails the build rather than silently ignoring nothing (or, worse,
+  # erroring past `--ignorefile` in a way that skips the flag). `paths` is
+  # optional here (not every entry uses it — OS-package findings are scoped
+  # by `purls` instead, since Trivy has no file path for a dpkg entry), but
+  # `id`, a nonempty `purls` or `paths`, `statement`, and `expired_at` are
+  # always required.
+  validate-ignore-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate .trivyignore.*.yaml are well-formed
+        run: |
+          python3 -c "
+          import sys, yaml
+          files = (
+              '.trivyignore.deps.yaml',
+              '.trivyignore.backend-image.yaml',
+              '.trivyignore.frontend-image.yaml',
+          )
+          for path in files:
+              with open(path) as f:
+                  data = yaml.safe_load(f)
+              if not isinstance(data, dict) or not isinstance(data.get('vulnerabilities'), list):
+                  print(f'{path}: missing a top-level vulnerabilities: list', file=sys.stderr)
+                  sys.exit(1)
+              if not data['vulnerabilities']:
+                  print(f'{path}: vulnerabilities: list is empty', file=sys.stderr)
+                  sys.exit(1)
+              for entry in data['vulnerabilities']:
+                  for required in ('id', 'statement', 'expired_at'):
+                      if required not in entry:
+                          print(f'{path}: entry {entry} missing required field {required!r}', file=sys.stderr)
+                          sys.exit(1)
+                  if not entry.get('purls') and not entry.get('paths'):
+                      print(f'{path}: entry {entry} has neither purls nor paths -- refusing an unscoped, blanket ignore', file=sys.stderr)
+                      sys.exit(1)
+              print(f'{path}: {len(data[\"vulnerabilities\"])} entries, well-formed')
+          "
+
+  dependency-scan:
+    runs-on: ubuntu-latest
+    needs: [validate-ignore-files]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependency vulnerability scan (fails on CRITICAL/HIGH)
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/aquasecurity/trivy:0.74.0 \
+            fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+            --ignorefile /repo/.trivyignore.deps.yaml --exit-code 1 /repo
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Secret scan (any finding fails)
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/aquasecurity/trivy:0.74.0 \
+            fs --scanners secret --exit-code 1 /repo
+
   docker-build:
     runs-on: ubuntu-latest
-    needs: [frontend, services, tests]
+    needs: [frontend, services, tests, validate-ignore-files]
     steps:
       - uses: actions/checkout@v4
       - name: Build images
@@ -114,6 +188,7 @@ jobs:
         # guard, though that guard cannot even run here: this step only
         # builds images, it never starts a container.
         run: |
+          set -euo pipefail
           for var in INTERNAL_SERVICE_TOKEN DB_PASSWORD DB_ADMIN_PASSWORD; do
             if [ -n "$(eval "echo \"\${$var:-}\"")" ]; then
               echo "Using $var from repository secret."
@@ -121,9 +196,129 @@ jobs:
               echo "No $var secret available (e.g. a fork PR) — generating a throwaway build-only value."
               export "$var=$(openssl rand -hex 32)"
             fi
+            # Persisted to $GITHUB_ENV (not just this step's shell) so the
+            # container-scan step below can run `docker compose config`
+            # too — compose requires all three as ${VAR:?} regardless of
+            # which step asks.
+            echo "$var=$(eval "echo \"\${$var}\"")" >> "$GITHUB_ENV"
           done
           docker compose build
         env:
           INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_ADMIN_PASSWORD: ${{ secrets.DB_ADMIN_PASSWORD }}
+      - name: Split built vs. third-party images
+        # `docker compose config --images <service-list>` does NOT actually
+        # restrict output to those services (confirmed empirically — it
+        # still returns postgres/redis regardless of which services are
+        # named), so filtering happens against the parsed JSON config
+        # instead: any service with a `build:` key is ours; anything else
+        # (postgres, redis) is a pinned third-party image we don't build
+        # and can't patch by editing this repo. Built images have no static
+        # `image:` name in the config (compose assigns one at build time),
+        # so it's reconstructed as `<project>-<service>` using the SAME
+        # project name compose itself resolved (`.name` in the JSON) —
+        # not an assumption about the checkout directory.
+        #
+        # set -euo pipefail so a failing `docker compose config` fails this
+        # step instead of silently producing empty lists; both lists are
+        # then explicitly checked non-empty for the same reason a prior
+        # false-green already taught this workflow — don't let "scanned
+        # zero images" report success.
+        run: |
+          set -euo pipefail
+          docker compose config --format json > /tmp/compose-config.json
+          python3 -c "
+          import json
+          data = json.load(open('/tmp/compose-config.json'))
+          project = data['name']
+          built = sorted(f'{project}-{name}' for name, svc in data['services'].items() if 'build' in svc)
+          thirdparty = sorted(svc['image'] for name, svc in data['services'].items() if 'build' not in svc)
+          if not built:
+              raise SystemExit('no built services found in compose config — refusing to report success')
+          if not thirdparty:
+              raise SystemExit('no third-party services found in compose config — refusing to report success')
+          open('/tmp/built-images.txt', 'w').write('\n'.join(built) + '\n')
+          open('/tmp/thirdparty-images.txt', 'w').write('\n'.join(thirdparty) + '\n')
+          print('built:', built)
+          print('third-party:', thirdparty)
+          "
+      - name: Merge frontend ignore baselines
+        # .trivyignore.deps.yaml (dependency-scan) and
+        # .trivyignore.frontend-image.yaml (container-only findings) are
+        # kept as separate source files on purpose, but Trivy's own
+        # `--ignorefile` only honors the LAST occurrence when passed more
+        # than once (confirmed empirically) — it does not merge. Both need
+        # to apply to the frontend image scan, so they're combined into one
+        # file here at scan time; the two source files stay the ones
+        # developers edit and delete entries from during remediation.
+        run: |
+          python3 -c "
+          import yaml
+          merged = {'vulnerabilities': []}
+          for path in ('.trivyignore.deps.yaml', '.trivyignore.frontend-image.yaml'):
+              with open(path) as f:
+                  merged['vulnerabilities'].extend(yaml.safe_load(f)['vulnerabilities'])
+          with open('/tmp/frontend-merged-ignore.yaml', 'w') as f:
+              yaml.safe_dump(merged, f)
+          "
+      - name: Container image scan — repo-built images (fails on CRITICAL/HIGH)
+        # Blocking, per Option 2: this repo can actually fix a finding here
+        # (a dependency bump, a base-image pin), unlike a vendor's own base
+        # image. frontend uses the merged ignore file (both frontend
+        # baselines apply); every other built image is Python-based and
+        # shares one baseline (.trivyignore.backend-image.yaml — the same
+        # python:3.12-slim base, so the same findings, on all seven).
+        run: |
+          set -euo pipefail
+          while IFS= read -r image; do
+            echo "Scanning (blocking) $image ..."
+            case "$image" in
+              *-frontend) ignorefile=/tmp/frontend-merged-ignore.yaml ;;
+              *) ignorefile=/repo/.trivyignore.backend-image.yaml ;;
+            esac
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v trivy-cache:/root/.cache/ \
+              -v "$PWD:/repo" \
+              -v /tmp/frontend-merged-ignore.yaml:/tmp/frontend-merged-ignore.yaml \
+              ghcr.io/aquasecurity/trivy:0.74.0 image \
+              --severity CRITICAL,HIGH --ignore-unfixed \
+              --ignorefile "$ignorefile" --exit-code 1 "$image"
+          done < /tmp/built-images.txt
+      - name: Container image scan — third-party images (report-only)
+        # NOT blocking, per Option 2: postgres/redis are pinned, unbuilt
+        # vendor images (docker-compose.yml) — a finding here can't be
+        # fixed by changing code in this repo, only by bumping the pinned
+        # tag (tracked separately; pgvector 0.8.6 evaluation is its own
+        # remediation item, not done in this PR). No --ignorefile and no
+        # --exit-code: every finding is left fully visible in the table
+        # output below AND in the uploaded JSON artifact — nothing here is
+        # suppressed, only non-blocking. A scanner/operational failure
+        # (bad pull, Trivy crash) still fails this step: `docker run`
+        # itself still exits non-zero for those regardless of --exit-code,
+        # which only controls the "vulnerabilities found" exit path —
+        # confirmed empirically against a nonexistent image.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/thirdparty-scan-results
+          while IFS= read -r image; do
+            echo "Scanning (report-only) $image ..."
+            safe_name="$(echo "$image" | tr '/:' '__')"
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v trivy-cache:/root/.cache/ \
+              ghcr.io/aquasecurity/trivy:0.74.0 image \
+              --severity CRITICAL,HIGH "$image"
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v trivy-cache:/root/.cache/ \
+              ghcr.io/aquasecurity/trivy:0.74.0 image \
+              --severity CRITICAL,HIGH --format json "$image" \
+              > "/tmp/thirdparty-scan-results/${safe_name}.json"
+          done < /tmp/thirdparty-images.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thirdparty-image-scan-results
+          path: /tmp/thirdparty-scan-results/
+          retention-days: 30
