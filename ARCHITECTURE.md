@@ -60,7 +60,10 @@ app.py             FastAPI app + routers
 - All non-public gateway routes require a valid session.
 - Every account has the single `staff` role (`config/roles.yaml`). There is no
   per-action authorization beyond "is logged in", and **sessions never expire**
-  (no TTL on the Redis key; `auth.yaml SESSION_TIMEOUT: never`). MFA is off.
+  (no TTL on the Redis key; `auth.yaml SESSION_TIMEOUT: never`).
+- **TOTP MFA is implemented** (w8-planner-2, migration 033,
+  `services/gateway/mfa_*.py`, `config/mfa.yaml`) but ships **off** — see §7
+  and `docs/runbook.md` for what activating it actually requires.
 
 See `adr/0003-authentication-and-sessions.md`.
 
@@ -183,11 +186,27 @@ here; sequencing lives in the current delivery plan, not in this file.
 - ~~Sessions never expire~~ **Resolved.** `services/gateway/config.py` now
   enforces both an idle TTL (default 8h, refreshed per request) and an
   absolute lifetime cap (default 24h, checked regardless of activity).
-- **No MFA — still open, deferred to next cycle by client direction
-  (2026-08-12).** A TOTP second factor was built and tested, then parked to
-  be delivered as one complete rollout rather than a bare mechanism. The
-  prototype is on `feat/mfa-totp-parked`, unmerged and incomplete against
-  the agreed scope. `/login` in the merged tree is password-only.
+- ~~No MFA — deferred to next cycle by client direction (2026-08-12), a bare
+  TOTP prototype parked on `feat/mfa-totp-parked`.~~ **Resolved as a
+  complete rollout** (w8-planner-2, PR #101, migration 033,
+  `services/gateway/mfa_*.py`, `config/mfa.yaml`): TOTP enrollment
+  (pending until a submitted code proves possession, AEAD-encrypted secret
+  under MFA-specific key material — not the PHI keys), a Redis login
+  challenge that withholds a session from an enforced account until that
+  proof completes (with a per-account challenge epoch so a supervisor
+  reset invalidates any challenge issued before it), ten salted-hash
+  one-time backup codes, a supervisor-only reset that refuses
+  self-approval, rate limiting, and audited enrollment/verify/reset events
+  that never carry secret material. Rollout is config-driven
+  (`off`/`prompt`/`enforce`, pilot scope, dated cutover, an emergency
+  rollback override) and **ships `off`** — merging this does not enroll or
+  enforce MFA for any account. Every existing/seeded account defaults to
+  `mfa_shared_account = TRUE` and `mfa_pilot = FALSE`
+  (migration 033) — deliberately fail-closed, since this repo has no
+  staff-directory data to say which accounts are individually owned versus
+  a shared login. Classifying the real roster, selecting pilot accounts,
+  and setting rollout dates are deployment/client decisions this repo
+  cannot make for them; see `docs/runbook.md` for the operator sequence.
 - ~~Every account has a single flat role with no per-action authorization~~
   **Partially resolved.** Four real, enforced least-privilege roles now exist
   (`config/roles.yaml`: `front_desk`, `clinician`, `roi_clerk`, `scheduler`
