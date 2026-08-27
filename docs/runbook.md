@@ -169,6 +169,59 @@ possible deletion.
 No scheduled/automated run of this script exists yet — running it is a
 manual operator action today.
 
+## Required one-time setup: PHI_ACTIVE_KEY_VERSION, PHI_ENCRYPTION_KEY_V1, PHI_BLIND_INDEX_KEY_V1
+
+w8-planner-2 P2 (`adr/0012`): `intake-service` and `records-service` encrypt
+`patients.ssn`/`dob`/`notes` at the application layer (`libs/phi_crypto`) and
+refuse to start unless three PHI key variables are set — needed **before**
+your first `make up`, `make seed`, or `make phi-backfill`, the same way
+`INTERNAL_SERVICE_TOKEN` and `DB_PASSWORD`/`DB_ADMIN_PASSWORD` are above.
+
+- **`PHI_ACTIVE_KEY_VERSION`** — a plain identifier (`v1`), not a secret.
+  Names which `PHI_ENCRYPTION_KEY_V<n>`/`PHI_BLIND_INDEX_KEY_V<n>` pair new
+  writes use.
+- **`PHI_ENCRYPTION_KEY_V1`** — the AEAD key that encrypts/decrypts
+  `ssn`/`dob`/`notes`.
+- **`PHI_BLIND_INDEX_KEY_V1`** — a SEPARATE key that computes the
+  deterministic SSN match key (`patients.ssn_digits`) duplicate detection
+  reads. **Must be a different value from `PHI_ENCRYPTION_KEY_V1`** —
+  `EnvKeyProvider` (`libs/phi_crypto/keys.py`) refuses to start if the two
+  are ever equal, the same "distinct credentials" reasoning as
+  `DB_PASSWORD`/`DB_ADMIN_PASSWORD` above.
+
+Only `intake-service` and `records-service` receive these — no other
+service gets the dependency or the key material (`docker-compose.yml`,
+`adr/0012`).
+
+```bash
+# two independent values — each MUST decode to exactly 32 bytes; do not
+# reuse one command's output for both
+openssl rand -base64 32   # -> PHI_ENCRYPTION_KEY_V1
+openssl rand -base64 32   # -> PHI_BLIND_INDEX_KEY_V1
+```
+
+Put both in `.env`, plus `PHI_ACTIVE_KEY_VERSION=v1` (see `.env.example`).
+Missing, malformed, wrong-length, or identical-key configuration stops
+`docker compose up`/`config`/`build` before any container starts
+(`${VAR:?...}` in `docker-compose.yml`) and, for a value that is merely
+present but unusable, fails the two services fast at container startup
+with a clear `RuntimeError` in `docker compose logs` — same two-layer
+fail-closed pattern as `INTERNAL_SERVICE_TOKEN` above.
+
+**This is environment-variable-provided secret injection, not KMS/secrets-
+manager-backed key custody** — no such integration exists in this repo. It
+is the deployment posture this codebase actually has today, not a
+production-grade recommendation; see `adr/0012` for the full reasoning and
+the rotation convention (a superseded key version may stay configured
+alongside the active one so old ciphertext keeps decrypting).
+
+**Seeded/demo data:** a fresh volume's `db/seed/seed.sql` self-seeds
+plaintext PHI (Postgres's own init sequence has no way to reach
+`libs/phi_crypto`) — `make up` and `make seed` both run
+`make phi-backfill` immediately afterward to encrypt it, using whatever
+keys are in `.env` at that moment. Idempotent — safe to run again by hand
+(`make phi-backfill`) if you ever need to.
+
 ## Start / stop
 
 ```bash

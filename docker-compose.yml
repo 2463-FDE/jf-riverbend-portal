@@ -147,6 +147,14 @@ services:
       # Round-17 review (2026-08-06): see gateway's identical entry above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
       ELIGIBILITY_URL: http://eligibility-service:8072
+      # w8-planner-2 P2 (adr/0012): this service encrypts ssn/dob/notes at
+      # intake time (libs/phi_crypto). Only intake-service and
+      # records-service receive these — see adr/0012 "which services hold
+      # keys" for why every other service gets neither the dependency nor
+      # the key material.
+      PHI_ACTIVE_KEY_VERSION: ${PHI_ACTIVE_KEY_VERSION:?PHI_ACTIVE_KEY_VERSION must be set in .env — see adr/0012}
+      PHI_ENCRYPTION_KEY_V1: ${PHI_ENCRYPTION_KEY_V1:?PHI_ENCRYPTION_KEY_V1 must be set in .env — see adr/0012}
+      PHI_BLIND_INDEX_KEY_V1: ${PHI_BLIND_INDEX_KEY_V1:?PHI_BLIND_INDEX_KEY_V1 must be set in .env — see adr/0012}
     ports:
       - "8071:8071"
     depends_on:
@@ -209,6 +217,12 @@ services:
     environment:
       # Round-17 review (2026-08-06): see gateway's identical entry above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # w8-planner-2 P2 (adr/0012): this service decrypts ssn/dob/notes on
+      # every patient read (libs/phi_crypto) — see intake-service's
+      # identical entry above and adr/0012 "which services hold keys".
+      PHI_ACTIVE_KEY_VERSION: ${PHI_ACTIVE_KEY_VERSION:?PHI_ACTIVE_KEY_VERSION must be set in .env — see adr/0012}
+      PHI_ENCRYPTION_KEY_V1: ${PHI_ENCRYPTION_KEY_V1:?PHI_ENCRYPTION_KEY_V1 must be set in .env — see adr/0012}
+      PHI_BLIND_INDEX_KEY_V1: ${PHI_BLIND_INDEX_KEY_V1:?PHI_BLIND_INDEX_KEY_V1 must be set in .env — see adr/0012}
     ports:
       - "8073:8073"
     depends_on:

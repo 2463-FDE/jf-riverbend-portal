@@ -194,6 +194,24 @@ jobs:
         # satisfying db/docker-init/00-create-app-role.sh's equal-password
         # guard, though that guard cannot even run here: this step only
         # builds images, it never starts a container.
+        #
+        # w8-planner-2 P2 (adr/0012): PHI_ACTIVE_KEY_VERSION/
+        # PHI_ENCRYPTION_KEY_V1/PHI_BLIND_INDEX_KEY_V1 joined the same
+        # category the moment docker-compose.yml made them required
+        # ${VAR:?} on intake-service/records-service. Unlike the generic
+        # hex-secret loop below: PHI_ENCRYPTION_KEY_V1 and
+        # PHI_BLIND_INDEX_KEY_V1 are generated as real base64-encoded
+        # 32-byte values (matching EnvKeyProvider's actual format,
+        # libs/phi_crypto/keys.py) — each its own independent
+        # `openssl rand -base64 32` call, never derived from the other —
+        # and PHI_ACTIVE_KEY_VERSION is a plain identifier, not a secret,
+        # so its throwaway fallback is the literal "v1", not random noise.
+        # No CI step here ever runs `docker compose up` (only `build` and
+        # `config`, plus `docker run` directly against built images for
+        # scanning — never a running container), so EnvKeyProvider's own
+        # validation never actually executes in CI either way; these are
+        # realistic-shaped throwaway values on principle, not because a
+        # step depends on it today.
         run: |
           set -euo pipefail
           for var in INTERNAL_SERVICE_TOKEN DB_PASSWORD DB_ADMIN_PASSWORD; do
@@ -205,8 +223,24 @@ jobs:
             fi
             # Persisted to $GITHUB_ENV (not just this step's shell) so the
             # container-scan step below can run `docker compose config`
-            # too — compose requires all three as ${VAR:?} regardless of
+            # too — compose requires all of these as ${VAR:?} regardless of
             # which step asks.
+            echo "$var=$(eval "echo \"\${$var}\"")" >> "$GITHUB_ENV"
+          done
+          if [ -n "${PHI_ACTIVE_KEY_VERSION:-}" ]; then
+            echo "Using PHI_ACTIVE_KEY_VERSION from repository secret."
+          else
+            echo "No PHI_ACTIVE_KEY_VERSION secret available — defaulting to v1."
+            export PHI_ACTIVE_KEY_VERSION=v1
+          fi
+          echo "PHI_ACTIVE_KEY_VERSION=$PHI_ACTIVE_KEY_VERSION" >> "$GITHUB_ENV"
+          for var in PHI_ENCRYPTION_KEY_V1 PHI_BLIND_INDEX_KEY_V1; do
+            if [ -n "$(eval "echo \"\${$var:-}\"")" ]; then
+              echo "Using $var from repository secret."
+            else
+              echo "No $var secret available — generating an independent throwaway base64-encoded 32-byte value."
+              export "$var=$(openssl rand -base64 32)"
+            fi
             echo "$var=$(eval "echo \"\${$var}\"")" >> "$GITHUB_ENV"
           done
           docker compose build
@@ -214,6 +248,9 @@ jobs:
           INTERNAL_SERVICE_TOKEN: ${{ secrets.INTERNAL_SERVICE_TOKEN }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_ADMIN_PASSWORD: ${{ secrets.DB_ADMIN_PASSWORD }}
+          PHI_ACTIVE_KEY_VERSION: ${{ secrets.PHI_ACTIVE_KEY_VERSION }}
+          PHI_ENCRYPTION_KEY_V1: ${{ secrets.PHI_ENCRYPTION_KEY_V1 }}
+          PHI_BLIND_INDEX_KEY_V1: ${{ secrets.PHI_BLIND_INDEX_KEY_V1 }}
       - name: Split built vs. third-party images
         # `docker compose config --images <service-list>` does NOT actually
         # restrict output to those services (confirmed empirically — it
