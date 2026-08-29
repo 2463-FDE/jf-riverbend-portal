@@ -101,10 +101,10 @@ def ingest(req: HL7IngestRequest):
 
     try:
         result = parse(message)
-    except Exception:
+    except Exception as exc:
         # The parser classifies every segment internally now; this guards
         # against anything unexpected at the call boundary.
-        log.exception("HL7 parse failed")
+        log.error("HL7 parse failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=422, detail="could not parse HL7 message")
 
     has_incomplete_content = any(s.status == "incomplete_invalid" for s in result.segments)

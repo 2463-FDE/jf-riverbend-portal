@@ -169,7 +169,7 @@ def _check_patient_grant_coverage() -> None:
         finally:
             db.close()
     except SQLAlchemyError as e:
-        log.exception("startup grant-coverage check failed")
+        log.error("startup grant-coverage check failed error_type=%s", type(e).__name__)
         if settings.environment == "production":
             raise RuntimeError(
                 "refusing to start: could not verify patient grant coverage "
@@ -310,8 +310,8 @@ def list_patients(
             .scalars()
             .all()
         )
-    except SQLAlchemyError:
-        log.exception("list_patients: database error")
+    except SQLAlchemyError as exc:
+        log.error("list_patients: database error error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     _write_audit(
@@ -431,7 +431,7 @@ def _authorize_actor_permission(
         row = db.execute(
             select(User.role, User.is_active).where(User.id == user_id)
         ).one_or_none()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         # Deliberately re-raised rather than turned into a status here. This
         # service has TWO established contracts for a database failure and they
         # differ by route: the grant-gated patient routes deny closed with 403
@@ -439,7 +439,7 @@ def _authorize_actor_permission(
         # routes report 503 rather than look like a legitimately empty result
         # (test_search_db_failure_is_503_not_silently_empty). A single decision
         # made here would silently override one of them, so the caller decides.
-        log.exception("permission check: authorization store unreadable for actor")
+        log.error("permission check: authorization store unreadable for actor error_type=%s", type(exc).__name__)
         raise
 
     if row is None or not row.is_active:
@@ -545,8 +545,8 @@ def get_patient(
 
     try:
         patient = db.get(Patient, patient_id)
-    except SQLAlchemyError:
-        log.exception("get_patient: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("get_patient: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     if patient is None:
@@ -624,10 +624,8 @@ def get_patient_records(
                     records=[RecordOut.model_validate(r) for r in recs],
                 )
             )
-    except SQLAlchemyError:
-        log.exception(
-            "get_patient_records: database error for patient_id=%s", patient_id
-        )
+    except SQLAlchemyError as exc:
+        log.error("get_patient_records: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     _write_audit(
@@ -653,9 +651,9 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
     try:
         db.add(AuditLog(actor=actor, message=message))
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("patient_view: failed to write audit_logs entry")
+        log.error("patient_view: failed to write audit_logs entry error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
 
@@ -815,8 +813,8 @@ def get_patient_view(
     # response, not a chart access.
     try:
         patient_exists = db.get(Patient, patient_id) is not None
-    except SQLAlchemyError:
-        log.exception("get_patient_view: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("get_patient_view: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
     if not patient_exists:
         raise HTTPException(status_code=404, detail="patient not found")
@@ -915,8 +913,8 @@ def get_patient_reconciliation(
 
     try:
         patient = db.get(Patient, patient_id)
-    except SQLAlchemyError:
-        log.exception("get_patient_reconciliation: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("get_patient_reconciliation: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
     if patient is None:
         raise HTTPException(status_code=404, detail="patient not found")
@@ -925,8 +923,8 @@ def get_patient_reconciliation(
         result = build_reconciliation_result(
             db, patient_id, patient, x_request_id or "", actor_id=x_actor_id or ""
         )
-    except SQLAlchemyError:
-        log.exception("get_patient_reconciliation: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("get_patient_reconciliation: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     _write_audit(
@@ -981,8 +979,8 @@ def search_records(
             required_permission="records.read",
             audit_action="records_search",
         )
-    except SQLAlchemyError:
-        log.exception("records_search: authorization store unreadable")
+    except SQLAlchemyError as exc:
+        log.error("records_search: authorization store unreadable error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     try:
@@ -999,8 +997,8 @@ def search_records(
             .scalars()
             .all()
         )
-    except SQLAlchemyError:
-        log.exception("search_records: database error")
+    except SQLAlchemyError as exc:
+        log.error("search_records: database error error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     _write_audit(
@@ -1080,8 +1078,8 @@ def get_patient_summary(
             .scalars()
             .all()
         )
-    except SQLAlchemyError:
-        log.exception("patient summary: chart unreadable patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("patient summary: chart unreadable patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="records temporarily unavailable")
 
     # The clinician gate (S3). Content the renderer refuses is shown only when
@@ -1101,11 +1099,11 @@ def get_patient_summary(
             [(i.record_id, i.refusal_reason and "no clean quote") for i in rendered if i.refusal_reason],
         )
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         # Queueing is bookkeeping for staff; it must never take down a
         # patient's ability to read their own results.
         db.rollback()
-        log.exception("review queue: could not enqueue refusals patient_id=%s", patient_id)
+        log.error("review queue: could not enqueue refusals patient_id=%s error_type=%s", patient_id, type(exc).__name__)
 
     items = [_to_summary_item_out(item) for item in rendered]
 
@@ -1240,8 +1238,8 @@ def get_review_queue(
                 select(Record).where(Record.id.in_([rv.record_id for rv in reviews] or [0]))
             ).scalars().all()
         }
-    except SQLAlchemyError:
-        log.exception("review queue: unreadable")
+    except SQLAlchemyError as exc:
+        log.error("review queue: unreadable error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="review queue temporarily unavailable")
 
     items = []
@@ -1303,9 +1301,9 @@ def decide_review(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("review queue: decision failed review_id=%s", review_id)
+        log.error("review queue: decision failed review_id=%s error_type=%s", review_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not record the decision")
 
     if review is None:
@@ -1333,9 +1331,9 @@ def decide_review(
             )
         )
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("review queue: decision+audit commit failed review_id=%s", review_id)
+        log.error("review queue: decision+audit commit failed review_id=%s error_type=%s", review_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not record the decision")
 
     return ReviewDecisionOut(
@@ -1444,9 +1442,9 @@ def generate_agent_draft(
                      f"passed={outcome.accepted} correlation_id={correlation_id}"),
         )
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("agent draft: generation failed for patient_id=%s", patient_id)
+        log.error("agent draft: generation failed for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not generate a draft right now")
     return _draft_out(db, outcome.draft)
 
@@ -1522,9 +1520,9 @@ def decide_agent_draft(
     except agent_drafts.DraftError as e:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(e))
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("agent draft: decision failed draft_id=%s", draft_id)
+        log.error("agent draft: decision failed draft_id=%s error_type=%s", draft_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not record the decision")
     return _draft_out(db, draft)
 
@@ -1564,8 +1562,8 @@ def get_agent_summary(
             draft_version=draft.version, label=ProvenanceLabel(draft.provenance_label),
         )
         detail = _draft_out(db, draft)
-    except SQLAlchemyError:
-        log.exception("agent summary: unreadable for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("agent summary: unreadable for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
 
     return AgentSummaryOut(
@@ -1620,9 +1618,9 @@ def request_agent_summary(
                      f"passed={outcome.accepted} correlation_id={correlation_id}"),
         )
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("agent summary request: generation failed patient_id=%s", patient_id)
+        log.error("agent summary request: generation failed patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not request a summary right now")
 
     detail = _draft_out(db, outcome.draft)
@@ -1702,8 +1700,8 @@ def list_threads(
         items = messaging.thread_summaries(
             db, patient_ids=active_patient_ids_query(actor_id), viewer_user_id=actor_id, limit=limit,
         )
-    except SQLAlchemyError:
-        log.exception("messaging: inbox unreadable for actor_id=%s", actor_id)
+    except SQLAlchemyError as exc:
+        log.error("messaging: inbox unreadable for actor_id=%s error_type=%s", actor_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="messages temporarily unavailable")
     return ThreadPage(items=[ThreadSummaryOut(**i) for i in items])
 
@@ -1769,9 +1767,9 @@ def create_thread(
             )
         )
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("messaging: thread create failed patient_id=%s", patient_id)
+        log.error("messaging: thread create failed patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not start a new thread right now")
 
     patient = db.get(Patient, patient_id)
@@ -1814,9 +1812,9 @@ def get_thread(
         db.commit()
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("messaging: thread read failed thread_id=%s", thread_id)
+        log.error("messaging: thread read failed thread_id=%s error_type=%s", thread_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="messages temporarily unavailable")
 
     return ThreadDetailOut(
@@ -1870,9 +1868,9 @@ def reply_to_thread(
         raise HTTPException(status_code=409, detail=str(e))
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("messaging: reply failed thread_id=%s", thread_id)
+        log.error("messaging: reply failed thread_id=%s error_type=%s", thread_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not send that message")
 
     sender = db.get(User, actor_id)
@@ -1923,9 +1921,9 @@ def set_thread_status(
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("messaging: status change failed thread_id=%s", thread_id)
+        log.error("messaging: status change failed thread_id=%s error_type=%s", thread_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not update that thread")
 
     return ThreadDetailOut(

@@ -140,8 +140,8 @@ def authorized_patient_ids(db: Session, actor_id: str, patient_ids: Iterable[int
             .scalars()
             .all()
         )
-    except SQLAlchemyError:
-        log.exception("patient_access_gate: batch grant lookup failed")
+    except SQLAlchemyError as exc:
+        log.error("patient_access_gate: batch grant lookup failed error_type=%s", type(exc).__name__)
         # Round 8 review: same reasoning as SqlPatientAccessGate.authorize()
         # above — roll back before propagating, so the session this error
         # travels back on (get_patient_reconciliation reuses `db` for its own
@@ -192,8 +192,8 @@ class SqlPatientAccessGate(AuthorizationPort):
                     User.is_active.is_(True),
                 )
             ).first()
-        except SQLAlchemyError:
-            log.exception("patient_access_gate: grant lookup failed (correlation_id=%s)", cid)
+        except SQLAlchemyError as exc:
+            log.error("patient_access_gate: grant lookup failed (correlation_id=%s) error_type=%s", cid, type(exc).__name__)
             # Round 8 review (2026-08-08 — medium): without this rollback, a real
             # DBAPI failure here (missing table, aborted transaction) leaves the
             # session's transaction ABORTED — Postgres refuses any further

@@ -1,19 +1,22 @@
-# PHI-Safe Logging Policy (New Code)
+# PHI-Safe Logging Policy
 
-- **Date:** 2026-07-04
-- **Scope:** Applies to new code going forward — currently `libs/llm_client`
-  and any future caller of it or of `libs/safe_logging`. It is **not** a
-  retroactive fix to existing services.
+- **Date:** 2026-07-04. **Updated 2026-08-29 (W10 Final Stage 3):** originally
+  scoped to new code only (`libs/llm_client` and any future caller of
+  `libs/safe_logging`); every repository service's `logging_config.py` now
+  attaches `PHISafeFilter` (rule 6) and every `log.exception(...)` call
+  across `services/` was replaced with categorical `type(exc).__name__`
+  logging (rule 5) — see the rules below for what that closes and does not.
 
-## This does not fix D1
+## D1 status
 
-`services/intake-service/app.py:65` logs the full intake request body
+`services/intake-service/app.py:65` used to log the full intake request body
 (name/DOB/SSN/notes) in plaintext at INFO — tracked as debt marker `D1`
 (`docs/analysis/system-audit-07-01-2026.md` finding `AUD-06`, restated in
-`docs/planning/ai-readiness-debt-log-07-04-2026.md`). This policy and its
-helper do not touch that file. Fixing it is a separate, scoped decision, not
-a side effect of adding a logging policy for unrelated new code — see
-`CLAUDE.md`'s rule against opportunistically fixing documented debt.
+`docs/planning/ai-readiness-debt-log-07-04-2026.md`). **Resolved separately**
+(Week 1 catch-up) — `app.py`'s `_intake_log_summary` now logs only an
+allowlist (`correlation_id`, `created_via`), never the request body; see that
+file's own module docstring for the full history. Not touched by this policy
+or by W10 Final Stage 3.
 
 ## Rules
 
@@ -57,5 +60,9 @@ in the first place, rather than being logged and then "cleaned."
 
 ## Non-goal
 
-This document does not assert that logging anywhere else in the system is
-PHI-safe. It defines the policy for new code only.
+This document does not assert that every log line in the system is PHI-safe.
+Rules 6 (safe filter attached) and 5 (categorical exception logging) now
+apply repository-wide (W10 Final Stage 3); rules 1-4 and 7 remain a
+discipline enforced at each call site, not something a filter can guarantee
+— a future call that logs a raw body/prompt/response would still violate
+this policy even with the filter attached.

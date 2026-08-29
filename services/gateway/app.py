@@ -327,9 +327,9 @@ def _commit_mfa_transaction(db: Session, *, audit_events: list[tuple[str, str]])
         for actor, message in audit_events:
             _stage_audit(db, actor=actor, message=message)
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("mfa: failed to commit credential state with audit event")
+        log.error("mfa: failed to commit credential state with audit event error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
 
@@ -350,9 +350,9 @@ def _write_audit(db: Session, *, actor: str, message: str) -> None:
     try:
         _stage_audit(db, actor=actor, message=message)
         db.commit()
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("mfa: failed to write audit_logs entry")
+        log.error("mfa: failed to write audit_logs entry error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
 
@@ -729,8 +729,8 @@ def activate_patient_account(req: ActivateRequest, db: Session = Depends(get_db)
                 PatientInvitation.code_hash == patient_invitations.hash_code(req.code)
             )
         ).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("activation: invitation lookup failed")
+    except SQLAlchemyError as exc:
+        log.error("activation: invitation lookup failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not activate right now; please retry")
 
     reason = patient_invitations.invitation_state(invitation)
@@ -744,9 +744,9 @@ def activate_patient_account(req: ActivateRequest, db: Session = Depends(get_db)
 
     try:
         account = _activate_invitation(db, invitation, req.password)
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("activation: could not create the account")
+        log.error("activation: could not create the account error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="could not activate right now; please retry")
 
     log.info("patient account activated user_id=%s patient_id=%s", account.id, invitation.patient_id)
@@ -2198,8 +2198,8 @@ def proxy_cancel(
         raise HTTPException(status_code=403, detail="not authorized")
     try:
         appointment = find_authorized_appointment(db, user_id=actor_id, appointment_id=appointment_id)
-    except SQLAlchemyError:
-        log.exception("cancel: grant lookup failed appointment_id=%s", appointment_id)
+    except SQLAlchemyError as exc:
+        log.error("cancel: grant lookup failed appointment_id=%s error_type=%s", appointment_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="authorization store unavailable")
     if appointment is None:
         raise HTTPException(status_code=403, detail="not authorized")
@@ -2428,8 +2428,8 @@ def proxy_own_identity(
         patient_id = db.execute(
             select(User.patient_id).where(User.id == user_id)
         ).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("own identity: account store unreadable for user_id=%s", user_id)
+    except SQLAlchemyError as exc:
+        log.error("own identity: account store unreadable for user_id=%s error_type=%s", user_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if patient_id is None:
         log.warning("own identity: account has no linked patient user_id=%s", user_id)
@@ -2437,16 +2437,16 @@ def proxy_own_identity(
 
     try:
         authorized = has_active_grant(db, user_id=user_id, patient_id=patient_id)
-    except SQLAlchemyError:
-        log.exception("own identity: grant store unreadable for user_id=%s", user_id)
+    except SQLAlchemyError as exc:
+        log.error("own identity: grant store unreadable for user_id=%s error_type=%s", user_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if not authorized:
         raise HTTPException(status_code=403, detail="not authorized")
 
     try:
         patient = db.execute(select(Patient).where(Patient.id == patient_id)).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("own identity: patient store unreadable for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("own identity: patient store unreadable for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if patient is None:
         raise HTTPException(status_code=403, detail="not authorized")
@@ -2467,8 +2467,8 @@ def proxy_own_results_summary(
         patient_id = db.execute(
             select(User.patient_id).where(User.id == user_id)
         ).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("own results: account store unreadable for user_id=%s", user_id)
+    except SQLAlchemyError as exc:
+        log.error("own results: account store unreadable for user_id=%s error_type=%s", user_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
 
     if patient_id is None:
@@ -2622,8 +2622,8 @@ def proxy_own_agent_summary(
         patient_id = db.execute(
             select(User.patient_id).where(User.id == user_id)
         ).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("agent summary: account store unreadable for user_id=%s", user_id)
+    except SQLAlchemyError as exc:
+        log.error("agent summary: account store unreadable for user_id=%s error_type=%s", user_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if patient_id is None:
         log.warning("agent summary: account has no linked patient user_id=%s", user_id)
@@ -2651,8 +2651,8 @@ def proxy_request_own_agent_summary(
         patient_id = db.execute(
             select(User.patient_id).where(User.id == user_id)
         ).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("agent summary request: account store unreadable user_id=%s", user_id)
+    except SQLAlchemyError as exc:
+        log.error("agent summary request: account store unreadable user_id=%s error_type=%s", user_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if patient_id is None:
         log.warning("agent summary request: account has no linked patient user_id=%s", user_id)
@@ -2733,8 +2733,8 @@ def proxy_create_own_thread(
         patient_id = db.execute(
             select(User.patient_id).where(User.id == user_id)
         ).scalar_one_or_none()
-    except SQLAlchemyError:
-        log.exception("messages: account store unreadable user_id=%s", user_id)
+    except SQLAlchemyError as exc:
+        log.error("messages: account store unreadable user_id=%s error_type=%s", user_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
     if patient_id is None:
         log.warning("messages: account has no linked patient user_id=%s", user_id)

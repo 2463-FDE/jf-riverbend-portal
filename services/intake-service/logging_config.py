@@ -12,6 +12,8 @@ module has no way to enforce it.
 import logging
 import os
 
+from libs.safe_logging import PHISafeFilter
+
 
 def configure(service_name: str) -> logging.Logger:
     level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -19,6 +21,13 @@ def configure(service_name: str) -> logging.Logger:
 
     logger = logging.getLogger(service_name)
     logger.setLevel(log_level)
+
+    # W10 Final Stage 3: defense-in-depth backstop (see
+    # docs/planning/phi-safe-logging-policy.md) — checked before the
+    # handlers early-return below so it's attached exactly once regardless
+    # of how many times configure() is called.
+    if not any(isinstance(f, PHISafeFilter) for f in logger.filters):
+        logger.addFilter(PHISafeFilter())
 
     # Don't stack duplicate handlers if configure() is called more than once.
     if logger.handlers:

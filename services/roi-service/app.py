@@ -114,8 +114,8 @@ def list_roi_requests(
         if patient_id is not None:
             stmt = stmt.where(RoiRequest.patient_id == patient_id)
         rows = db.execute(stmt.order_by(RoiRequest.id.desc())).scalars().all()
-    except SQLAlchemyError:
-        log.exception("list_roi_requests: database error")
+    except SQLAlchemyError as exc:
+        log.error("list_roi_requests: database error error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return [RoiRequestOut.model_validate(r) for r in rows]
@@ -144,9 +144,9 @@ def create_roi_request(payload: RoiRequestCreate, db: Session = Depends(get_db))
         db.refresh(req)
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("create_roi_request: database error")
+        log.error("create_roi_request: database error error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return RoiRequestOut.model_validate(req)
@@ -186,9 +186,9 @@ def create_authorization(payload: AuthorizationCreate, db: Session = Depends(get
         db.refresh(auth)
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("create_authorization: database error")
+        log.error("create_authorization: database error error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return AuthorizationOut.model_validate(auth)
@@ -201,8 +201,8 @@ def create_authorization(payload: AuthorizationCreate, db: Session = Depends(get
 def get_authorization(authorization_id: int, db: Session = Depends(get_db)):
     try:
         auth = db.get(RoiAuthorization, authorization_id)
-    except SQLAlchemyError:
-        log.exception("get_authorization: database error for authorization_id=%s", authorization_id)
+    except SQLAlchemyError as exc:
+        log.error("get_authorization: database error for authorization_id=%s error_type=%s", authorization_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
     if auth is None:
         raise HTTPException(status_code=404, detail="authorization not found")
@@ -232,9 +232,9 @@ def review_authorization(authorization_id: int, payload: AuthorizationReview, db
         db.refresh(auth)
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("review_authorization: database error for authorization_id=%s", authorization_id)
+        log.error("review_authorization: database error for authorization_id=%s error_type=%s", authorization_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return AuthorizationOut.model_validate(auth)
@@ -262,9 +262,9 @@ def revoke_authorization(authorization_id: int, payload: AuthorizationRevoke, db
         log.info("authorization revoked (authorization_id=%s revoked_by=%s)", authorization_id, payload.revoked_by)
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("revoke_authorization: database error for authorization_id=%s", authorization_id)
+        log.error("revoke_authorization: database error for authorization_id=%s error_type=%s", authorization_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return AuthorizationOut.model_validate(auth)
@@ -296,9 +296,9 @@ def create_restriction(payload: RestrictionCreate, db: Session = Depends(get_db)
         db.refresh(restriction)
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("create_restriction: database error")
+        log.error("create_restriction: database error error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return RestrictionOut.model_validate(restriction)
@@ -322,9 +322,9 @@ def revoke_restriction(restriction_id: int, db: Session = Depends(get_db)):
         db.refresh(restriction)
     except HTTPException:
         raise
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("revoke_restriction: database error for restriction_id=%s", restriction_id)
+        log.error("revoke_restriction: database error for restriction_id=%s error_type=%s", restriction_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return RestrictionOut.model_validate(restriction)
@@ -486,9 +486,9 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
         # already-fulfilled case rather than a raw 500.
         db.rollback()
         raise HTTPException(status_code=409, detail="roi request has already been fulfilled")
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
-        log.exception("fulfill_roi_request: database error for request_id=%s", request_id)
+        log.error("fulfill_roi_request: database error for request_id=%s error_type=%s", request_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return FulfillResult(
@@ -531,8 +531,8 @@ def disclosure_accounting(patient_id: int, db: Session = Depends(get_db)):
             .scalars()
             .all()
         )
-    except SQLAlchemyError:
-        log.exception("disclosure_accounting: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("disclosure_accounting: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return DisclosureAccounting(
