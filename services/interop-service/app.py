@@ -2,9 +2,10 @@
 interop-service — ingests HL7 v2 messages from the hospital system feed.
 
 The gateway now sends JSON ({"message": "<raw hl7>"}) rather than text/plain.
-Parsing is delegated to hl7_parser.parse(), which is intentionally brittle: it
-only maps PID/PV1 and silently drops AL1 (allergies) and RXA (medications).
-That loss is preserved here on purpose (brittle-parser debt, D6).
+Parsing is delegated to hl7_parser.parse(), which now maps PID, PV1, AL1
+(allergies), and RXA (medications), and returns an explicit per-segment
+comprehension result (W10 Final Stage 2) — the previous silent AL1/RXA drop
+(brittle-parser debt, D6) is closed; see hl7_parser.py's module docstring.
 """
 import hmac
 import os
@@ -15,21 +16,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from config import settings
 from hl7_parser import parse
 from logging_config import configure
-from schemas import HL7IngestRequest, HL7IngestResponse, ParsedRecord
+from schemas import HL7IngestRequest, HL7IngestResponse, ParsedRecord, SegmentComprehensionEntry
 
 log = configure(settings.service_name)
 
 app = FastAPI(title="Riverbend interop-service")
 
 SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "samples", "adt_sample.hl7")
-
-# Plain-language note returned with every ingest. We do NOT compute this from the
-# message (the parser drops AL1/RXA before we ever see a segment count), so the
-# loss stays invisible to callers — exactly the legacy behaviour.
-UNMAPPED_NOTE = (
-    "Only PID and PV1 segments are mapped into the internal record; "
-    "other segments are not surfaced."
-)
 
 
 @app.get("/healthz")
@@ -107,18 +100,25 @@ def ingest(req: HL7IngestRequest):
         raise HTTPException(status_code=413, detail="message too large")
 
     try:
-        record = parse(message)
+        result = parse(message)
     except Exception:
-        # The parser swallows per-segment errors internally; this guards against
-        # anything unexpected at the call boundary.
+        # The parser classifies every segment internally now; this guards
+        # against anything unexpected at the call boundary.
         log.exception("HL7 parse failed")
         raise HTTPException(status_code=422, detail="could not parse HL7 message")
 
-    log.info("ingested HL7 message (%d bytes)", len(message.encode("utf-8")))
-    # No schema validation of dropped/unmapped segments — AL1/RXA are already
-    # gone by the time we get the record back.
+    has_incomplete_content = any(s.status == "incomplete_invalid" for s in result.segments)
+    log.info(
+        "ingested HL7 message (%d bytes, %d segment(s), incomplete=%s)",
+        len(message.encode("utf-8")), len(result.segments), has_incomplete_content,
+    )
     return HL7IngestResponse(
-        record=ParsedRecord(**record), unmapped_note=UNMAPPED_NOTE
+        record=ParsedRecord(**result.record),
+        segments=[
+            SegmentComprehensionEntry(segment=s.segment, line_number=s.line_number, status=s.status)
+            for s in result.segments
+        ],
+        has_incomplete_content=has_incomplete_content,
     )
 
 

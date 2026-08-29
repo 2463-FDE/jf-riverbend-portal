@@ -846,6 +846,10 @@ CREATE TABLE IF NOT EXISTS disclosures (
     authorization_reference  TEXT,
     purpose                  TEXT
 );
+-- 035: at most one disclosure per tracked ROI request — the database-level
+-- backstop behind fulfill_roi_request's own row lock (see that route).
+CREATE UNIQUE INDEX IF NOT EXISTS disclosures_roi_request_id_unique
+    ON disclosures (roi_request_id) WHERE roi_request_id IS NOT NULL;
 
 -- Narrowly scoped patient disclosure-restriction record (45 CFR 164.522) —
 -- NOT a general consent-management platform: no category taxonomy, no

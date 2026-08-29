@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy import or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -411,10 +411,25 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
         the whole thing, never a partial effect.
       * Idempotent: an already-'fulfilled' request is refused (409), not
         silently re-fulfilled into a second disclosure row.
+
+    W10 Final Stage 2 (remaining concurrency gap): the read above used to be
+    a plain `db.get`, with no lock — two simultaneous requests for the SAME
+    request_id could both read status='pending' before either committed,
+    both pass every check below, and both insert a disclosure row. The
+    `SELECT ... FOR UPDATE` here makes the second request block until the
+    first's transaction ends, so it re-reads status='fulfilled' and takes
+    the 409 path above instead. `disclosures.roi_request_id` also now
+    carries a partial UNIQUE index (migration 035) as the database-level
+    backstop: even if two transactions somehow raced past the lock (a
+    different isolation level, a direct caller bypassing this route), the
+    second INSERT itself is rejected — caught below and turned into the
+    same truthful 409, never a raw 500.
     ==========================================================================
     """
     try:
-        req = db.get(RoiRequest, request_id)
+        req = db.execute(
+            select(RoiRequest).where(RoiRequest.id == request_id).with_for_update()
+        ).scalar_one_or_none()
         if req is None:
             raise HTTPException(status_code=404, detail="roi request not found")
         if req.status == "fulfilled":
@@ -463,6 +478,14 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
     except HTTPException:
         db.rollback()
         raise
+    except IntegrityError:
+        # Backstop for disclosures_roi_request_id_unique (migration 035):
+        # the FOR UPDATE lock above should make this unreachable in normal
+        # operation, but if a second disclosure for this request_id is ever
+        # attempted anyway, report it the same truthful way as the ordinary
+        # already-fulfilled case rather than a raw 500.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="roi request has already been fulfilled")
     except SQLAlchemyError:
         db.rollback()
         log.exception("fulfill_roi_request: database error for request_id=%s", request_id)

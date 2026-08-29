@@ -14,7 +14,7 @@ repo root on `sys.path` for this.
 
 ## What's covered
 - `test_gateway_security.py` — password hashing/verification roundtrip + edge cases.
-- `test_hl7_parser.py` — HL7 PID/PV1 happy path.
+- `test_hl7_parser.py` — HL7 PID/PV1/AL1/RXA mapping and per-segment comprehension.
 - `test_eligibility_check.py` — payer eligibility response shaping.
 - `test_intake_schemas.py` — multi-step intake payload validation.
 - `test_llm_client.py` — LLM client retry/backoff, timeout handling, structured-output
@@ -37,8 +37,12 @@ work — corrected below to match current tests, not the handoff snapshot.
   `integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`
   is a real, passing regression test (403 for an ungranted chart), not an
   xfail.
-- **HL7 allergy/medication extraction is `xfail`** — the parser silently drops
-  AL1/RXA; the test documents the gap rather than hiding it. Still open.
+- ~~**HL7 allergy/medication extraction is `xfail`** — the parser silently
+  drops AL1/RXA~~ **Resolved** (W10 Final Stage 2) — `hl7_parser.py` now maps
+  both, and returns an explicit per-segment comprehension result (mapped /
+  incomplete_invalid / recognized_but_unmapped / ignored_standard / unknown)
+  so a caller can tell what, if anything, was actually dropped; see
+  `test_hl7_parser.py` (no `xfail` remains).
 - **No tests for ROI authorization enforcement** — none exists to test. Still
   open.
 - **No tests for input normalization / duplicate-patient prevention** —
