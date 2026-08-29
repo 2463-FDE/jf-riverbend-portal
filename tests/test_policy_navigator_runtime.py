@@ -250,6 +250,96 @@ def test_a_mid_run_provider_failure_degrades_to_a_safe_fallback():
     assert result.label == "fallback"
 
 
+# --- W10 Final Stage 3: caller-text scrubbing -------------------------------
+
+
+def _capturing_chat_model(responses):
+    """Same shape as ScriptedChatModel, but records the exact messages it
+    was invoked with — needed to prove what the model actually received,
+    not just what run_policy_navigator was called with."""
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    class _Capturing(BaseChatModel):
+        model_id: str = "scripted-policy-model-v0"
+        script: list = []
+        calls: int = 0
+        seen_messages: list = []
+
+        @property
+        def _llm_type(self):
+            return "scripted"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            object.__setattr__(self, "seen_messages", self.seen_messages + [list(messages)])
+            object.__setattr__(self, "calls", self.calls + 1)
+            return ChatResult(generations=[ChatGeneration(
+                message=self.script[min(self.calls - 1, len(self.script) - 1)])])
+
+    return _Capturing(script=list(responses))
+
+
+def test_a_caller_question_with_an_ssn_never_reaches_the_chat_model_unscrubbed():
+    retriever = _FakeRetriever([[]])
+    model = _capturing_chat_model([_final("I found no approved policy evidence for this question.")])
+
+    result = run_policy_navigator(
+        "My SSN is 123-45-6789, how long does my coverage last?",
+        scope=_SCOPE, retriever=retriever, model=model,
+    )
+
+    assert result.termination_reason == "no_evidence"
+    sent_text = " ".join(m.content for m in model.seen_messages[0] if isinstance(m.content, str))
+    assert "123-45-6789" not in sent_text
+    assert "[REDACTED]" in sent_text
+
+
+def test_the_same_scrubbed_text_is_what_the_retrieval_tool_could_ever_see():
+    """The model never receives raw caller text at all (proven above), so
+    whatever query it constructs for retrieve_policy — the Titan embedding
+    path — can only ever be derived from the already-scrubbed prompt. This
+    locks in that a tool call fires from a scrubbed run and its query
+    reaches the retriever exactly as the (scripted, in this test) model
+    supplied it — there is no second, independent raw-text path into
+    retrieval."""
+    chunk = _chunk("SRC-001@1.0#overview", "Coverage stays active until the end of the plan year.")
+    retriever = _FakeRetriever([[chunk]])
+    model = ScriptedChatModel([
+        _tool_call(query="coverage duration"),
+        _final("Coverage stays active for the plan year [SRC-001@1.0#overview]."),
+    ])
+
+    result = run_policy_navigator(
+        "My SSN is 123-45-6789 — how long does coverage last?",
+        scope=_SCOPE, retriever=retriever, model=model,
+    )
+
+    assert result.termination_reason == "answered"
+    assert len(retriever.calls) == 1
+    assert retriever.calls[0][0] == "coverage duration"
+    assert not any("123-45-6789" in str(call) for call in retriever.calls)
+
+
+def test_a_scrub_failure_refuses_the_call_rather_than_sending_the_raw_question(monkeypatch):
+    retriever = _FakeRetriever([[]])
+    model = ScriptedChatModel([_final("should never be reached")])
+
+    monkeypatch.setattr(
+        "libs.policy_navigator.runtime.scrub",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scrub boom")),
+    )
+
+    result = run_policy_navigator("A question", scope=_SCOPE, retriever=retriever, model=model)
+
+    assert result.termination_reason == "provider_error"
+    assert result.label == "fallback"
+    assert model.calls == 0  # never reached the provider at all
+    assert retriever.calls == []
+
+
 # --- read-only boundary: the tool never exposes scope as a parameter -------
 
 

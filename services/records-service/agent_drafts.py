@@ -295,8 +295,8 @@ def approved_draft(db: Session, patient_id: int,
                 label=ProvenanceLabel(draft.provenance_label),
             )
         return draft
-    except SQLAlchemyError:
-        log.exception("approved_draft: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("approved_draft: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise
 
 
@@ -315,8 +315,8 @@ def has_pending_draft(db: Session, patient_id: int) -> bool:
                 AgentDraftProvenance.status == VALIDATED,
             )
         ).scalars().first() is not None
-    except SQLAlchemyError:
-        log.exception("has_pending_draft: database error for patient_id=%s", patient_id)
+    except SQLAlchemyError as exc:
+        log.error("has_pending_draft: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise
 
 

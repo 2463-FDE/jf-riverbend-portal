@@ -145,8 +145,8 @@ def list_slots(
 
     try:
         rows = db.execute(stmt).all()
-    except Exception:
-        log.exception("failed to list slots")
+    except Exception as exc:
+        log.error("failed to list slots error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     items = []
@@ -172,8 +172,8 @@ def list_appointments(
     )
     try:
         rows = db.execute(stmt).scalars().all()
-    except Exception:
-        log.exception("failed to list appointments for patient %s", patient_id)
+    except Exception as exc:
+        log.error("failed to list appointments for patient %s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     items = [AppointmentOut.model_validate(a) for a in rows]
@@ -219,10 +219,8 @@ def create_appointment(req: BookingRequest):
             status_code=409,
             detail={"error": "idempotency_key_conflict", "existing_appointment_id": e.existing_appointment_id},
         )
-    except Exception:
-        log.exception(
-            "booking failed for patient=%s slot=%s", req.patient_id, req.slot_id
-        )
+    except Exception as exc:
+        log.error("booking failed for patient=%s slot=%s error_type=%s", req.patient_id, req.slot_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     if appointment_id is None:
@@ -262,9 +260,9 @@ def cancel_appointment(appointment_id: int, db: Session = Depends(get_db)):
             slot.status = "open"
     try:
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        log.exception("failed to cancel appointment %s", appointment_id)
+        log.error("failed to cancel appointment %s error_type=%s", appointment_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
     log.info("cancelled appointment %s", appointment_id)

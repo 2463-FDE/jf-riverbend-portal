@@ -19,6 +19,7 @@ import re
 from typing import Optional
 
 from libs.agent_provenance import ProvenanceLabel
+from libs.deid import scrub
 from libs.metrics import record_counter
 from libs.policy_corpus import PolicyRetriever, RetrievalLedger, RetrievalScope
 from libs.safe_logging import get_safe_logger
@@ -153,6 +154,28 @@ def _run_policy_navigator(
 ) -> PolicyNavigatorResult:
     from langchain.agents import create_agent
     from langchain_core.messages import AIMessage, HumanMessage
+
+    # W10 Final Stage 3: scrub the caller's raw question once, before it
+    # reaches either provider call this run makes — the chat model (via the
+    # HumanMessage below) AND, transitively, the Titan embedding call inside
+    # retrieve_policy (build_policy_tool), since the model can only ever
+    # construct a tool-call query from what it was shown in this prompt.
+    # Mirrors libs/eligibility_agent/runtimes/raw_bedrock.py's existing
+    # scrub of the caller's chat message — same helper, same fail-closed
+    # posture: a scrub failure must never fall back to the unscrubbed
+    # original.
+    try:
+        question, deid_report = scrub(question)
+    except Exception as exc:
+        log.warning("policy navigator question scrub failed, refusing provider call (error_type=%s)", type(exc).__name__)
+        return PolicyNavigatorResult(
+            answer=_SAFE_PROVIDER_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
+            model_id=None, termination_reason="provider_error",
+        )
+    if deid_report:
+        # Categories/counts only, per DeidReport's own contract — never the
+        # removed values, never the question itself.
+        log.info("policy navigator question scrubbed before provider call (%s)", deid_report.summary())
 
     ledger = RetrievalLedger()
 
