@@ -42,6 +42,10 @@ _SAFE_CITATION_INVALID_REPLY = (
     "I can't show that answer safely — it referenced policy text that wasn't actually retrieved "
     "for this question. Please try rephrasing your question."
 )
+_SAFE_MAX_TURNS_REPLY = (
+    "I wasn't able to finish researching this within the allowed number of steps. "
+    "Please try a narrower question."
+)
 
 _CITATION_RE = re.compile(r"\[([A-Za-z0-9_-]+@[0-9][0-9.]*#[a-z0-9][a-z0-9-]*)\]")
 
@@ -154,6 +158,7 @@ def _run_policy_navigator(
 ) -> PolicyNavigatorResult:
     from langchain.agents import create_agent
     from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.errors import GraphRecursionError
 
     # W10 Final Stage 3: scrub the caller's raw question once, before it
     # reaches either provider call this run makes — the chat model (via the
@@ -203,6 +208,17 @@ def _run_policy_navigator(
         )
         final = next(m for m in reversed(state["messages"]) if isinstance(m, AIMessage))
         answer_text = final.content if isinstance(final.content, str) else ""
+    except GraphRecursionError as exc:
+        # W10 Final Stage 4: bounded loop exhaustion is not a provider
+        # problem — the model was reachable and responding, it simply never
+        # reached a final answer within max_turns. Must not share
+        # "provider_error"'s classification, even though the safe reply and
+        # model_id=None are the same either way.
+        log.warning("policy navigator hit its turn limit (error_type=%s)", type(exc).__name__)
+        return PolicyNavigatorResult(
+            answer=_SAFE_MAX_TURNS_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
+            model_id=None, termination_reason="max_turns",
+        )
     except Exception as exc:
         log.warning("policy navigator run failed (error_type=%s)", type(exc).__name__)
         return PolicyNavigatorResult(

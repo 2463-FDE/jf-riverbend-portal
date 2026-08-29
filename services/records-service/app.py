@@ -55,6 +55,7 @@ from patient_access_gate import (
     parse_user_id,
 )
 import agent_drafts
+import agent_lifecycle
 import messaging
 import patient_summary
 import policy_navigator_path
@@ -1428,7 +1429,11 @@ def generate_agent_draft(
         audit_action="agent_draft_generate",
     )
     actor_id = parse_user_id(x_actor_id)
-    correlation_id = x_request_id or new_correlation_id()
+    # Review fix ALC-CORR-COLLISION: lifecycle identity is always server-
+    # generated, never the caller-supplied X-Request-Id (which stays
+    # request/audit metadata only) — a reused X-Request-Id must never let
+    # two drafts' event streams collide.
+    correlation_id = new_correlation_id()
 
     try:
         outcome = summary_agent_path.generate_draft(
@@ -1507,10 +1512,13 @@ def decide_agent_draft(
         raise HTTPException(status_code=404, detail="no such draft")
 
     try:
+        review_trace = TraceRecorder(draft.correlation_id)  # the draft's own id, never a new one
         agent_drafts.decide(
             db, draft, approve=req.decision == agent_drafts.APPROVED, reviewed_by=actor_id,
-            trace=TraceRecorder(draft.correlation_id),  # the draft's own id, never a new one
+            trace=review_trace,
         )
+        # Append to the same durable stream generation already wrote to.
+        agent_lifecycle.persist(db, draft.correlation_id, review_trace.events)
         _write_audit(
             db, actor=_actor_label(x_actor_name, x_actor_id),
             message=(f"agent_draft_decide draft_id={draft.id} version={draft.version} "
@@ -1558,11 +1566,17 @@ def get_agent_summary(
         # Display is the eighth stage, recorded under the draft's OWN
         # correlation id — which is only knowable after the row is read, so the
         # stage is emitted here rather than passed into the read above.
-        TraceRecorder(draft.correlation_id).display(
+        display_trace = TraceRecorder(draft.correlation_id)
+        display_trace.display(
             draft_version=draft.version, label=ProvenanceLabel(draft.provenance_label),
         )
+        # Append to the same durable stream generation/review already wrote
+        # to. This route was previously read-only; it now commits.
+        agent_lifecycle.persist(db, draft.correlation_id, display_trace.events)
+        db.commit()
         detail = _draft_out(db, draft)
     except SQLAlchemyError as exc:
+        db.rollback()
         log.error("agent summary: unreadable for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
 
@@ -1604,7 +1618,11 @@ def request_agent_summary(
         audit_action="agent_summary_request",
     )
     actor_id = parse_user_id(x_actor_id)
-    correlation_id = x_request_id or new_correlation_id()
+    # Review fix ALC-CORR-COLLISION: lifecycle identity is always server-
+    # generated, never the caller-supplied X-Request-Id (which stays
+    # request/audit metadata only) — a reused X-Request-Id must never let
+    # two drafts' event streams collide.
+    correlation_id = new_correlation_id()
 
     try:
         outcome = summary_agent_path.generate_draft(

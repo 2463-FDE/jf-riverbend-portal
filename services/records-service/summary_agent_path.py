@@ -17,6 +17,7 @@ from libs.summary_agent import RetrievalLimits, ValidationOutcome, load_corpus, 
 from libs.summary_agent.runtime import run_summary_agent
 
 import agent_drafts
+import agent_lifecycle
 from config import settings
 from logging_config import configure
 
@@ -74,6 +75,11 @@ def generate_draft(
     agent_drafts.record_validation(
         db, draft, passed=outcome.passed, validation_code=outcome.refusal_code, trace=trace,
     )
+    # W10 Final Stage 4: append every stage this generation accumulated
+    # (request, provider_call(s), agent_decision(s), retrieval(s), draft,
+    # validation) to the durable lifecycle stream, in the SAME transaction
+    # as the draft/validation rows above — commits or rolls back together.
+    agent_lifecycle.persist(db, correlation_id, trace.events)
     log.info(
         "summary agent draft (correlation_id=%s patient_id=%s version=%s label=%s passed=%s code=%s)",
         correlation_id, patient_id, draft.version, result.label.value, outcome.passed,

@@ -79,6 +79,25 @@ describe("the policy navigator", () => {
     expect(screen.getByText(/couldn't reach the policy navigator/i)).toHaveAttribute("role", "alert");
   });
 
+  it("displays the safe-step-limit message for max_turns, never the provider-unreachable wording", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      ok({
+        answer: "I wasn't able to finish researching this within the allowed number of steps. Please try a narrower question.",
+        citations: [], label: "fallback", termination_reason: "max_turns",
+      })
+    );
+
+    render(<PolicyNavigator />);
+    ask("A question that loops");
+
+    const answer = await screen.findByText(/wasn't able to finish researching/i);
+    expect(answer).toHaveAttribute("data-termination", "max_turns");
+    expect(answer).toHaveAttribute("role", "alert");
+    expect(screen.getByText(/safe step limit/i)).toBeInTheDocument();
+    expect(screen.queryByText(/could not reach a live model/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/where this came from/i)).not.toBeInTheDocument();
+  });
+
   it("displays the citation-invalid safety refusal distinctly, never as an answered result", async () => {
     vi.mocked(apiFetch).mockResolvedValue(
       ok({

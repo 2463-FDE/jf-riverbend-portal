@@ -341,5 +341,5 @@ export interface PolicyAnswer {
   answer: string;
   citations: PolicyCitation[];
   label: string; // "real" | "fixture" | "fallback"
-  termination_reason: string; // "answered" | "no_evidence" | "provider_error" | "citation_invalid"
+  termination_reason: "answered" | "no_evidence" | "provider_error" | "citation_invalid" | "max_turns";
 }

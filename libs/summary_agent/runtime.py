@@ -138,7 +138,7 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
     )
 
 
-def _fallback(corpus, *, audience, ledger, limits, trace, error_type) -> AgentRunResult:
+def _fallback(corpus, *, audience, ledger, limits, trace, error_type, termination_reason) -> AgentRunResult:
     if not ledger.citation_ids:
         # The failure came before any retrieval, so the fallback fetches its own
         # evidence — deterministically, through the same bounded call.
@@ -150,6 +150,7 @@ def _fallback(corpus, *, audience, ledger, limits, trace, error_type) -> AgentRu
         # attribute the text to a prompt that was never sent, which is the same
         # misattribution create_draft already refuses for model_id.
         model_id=None, prompt_version=None, provider_error_type=error_type,
+        termination_reason=termination_reason,
         citations=ledger.citations_for_persistence(draft.citation_ids()),
     )
 
@@ -174,12 +175,14 @@ def run_summary_agent(
     from langchain.agents import create_agent
     from langchain_core.messages import AIMessage, HumanMessage
 
+    from langgraph.errors import GraphRecursionError
+
     corpus = corpus or load_corpus()
     limits = limits or RetrievalLimits()
     ledger = RetrievalLedger()
     trace.request(actor_role=actor_role)
-    fallback = lambda err: _fallback(corpus, audience=audience, ledger=ledger, limits=limits,
-                                     trace=trace, error_type=err)
+    fallback = lambda err, reason: _fallback(corpus, audience=audience, ledger=ledger, limits=limits,
+                                             trace=trace, error_type=err, termination_reason=reason)
 
     if model is None:
         resolved = label or ProvenanceLabel.REAL
@@ -188,7 +191,7 @@ def run_summary_agent(
         except Exception as exc:
             log.warning("summary agent provider unavailable (error_type=%s)", type(exc).__name__)
             trace.provider_call(label=resolved, model_id=None, error_type=type(exc).__name__)
-            return fallback(type(exc).__name__)
+            return fallback(type(exc).__name__, "provider_error")
     else:
         resolved = label or ProvenanceLabel.FIXTURE
 
@@ -204,14 +207,22 @@ def run_summary_agent(
         )
         final = next(m for m in reversed(state["messages"]) if isinstance(m, AIMessage))
         draft = parse_draft(final.content if isinstance(final.content, str) else "")
+    except GraphRecursionError as exc:
+        # W10 Final Stage 4: bounded loop exhaustion is not a provider
+        # problem — the model was reachable and responding, it simply never
+        # reached a final answer within max_turns. Must not share
+        # "provider_error"'s classification even though the fallback text
+        # and model_id=None are identical either way.
+        log.warning("summary agent hit its turn limit (error_type=%s)", type(exc).__name__)
+        return fallback(type(exc).__name__, "max_turns")
     except Exception as exc:
         # DraftParseError included: an unusable draft is a failed run, not a
         # partial one, and the fallback is the same either way.
         log.warning("summary agent run failed (error_type=%s)", type(exc).__name__)
-        return fallback(type(exc).__name__)
+        return fallback(type(exc).__name__, "provider_error")
 
     return AgentRunResult(
         draft=draft, label=resolved, ledger=ledger, model_id=model_id,
-        prompt_version=PROMPT_VERSION,
+        prompt_version=PROMPT_VERSION, termination_reason="answered",
         citations=ledger.citations_for_persistence(draft.citation_ids()),
     )

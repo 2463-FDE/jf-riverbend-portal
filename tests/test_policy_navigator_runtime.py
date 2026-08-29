@@ -340,6 +340,34 @@ def test_a_scrub_failure_refuses_the_call_rather_than_sending_the_raw_question(m
     assert retriever.calls == []
 
 
+# --- W10 Final Stage 4: truthful loop-exhaustion classification ------------
+
+
+def test_bounded_loop_exhaustion_is_classified_as_max_turns_not_provider_error():
+    """A model that always requests a tool and never finalizes genuinely
+    exhausts the real create_agent loop's recursion_limit (a real
+    GraphRecursionError from langgraph, not simulated) — must be reported
+    as bounded loop exhaustion, never lumped in with a provider failure."""
+    from langchain_core.messages import AIMessage
+
+    retriever = _FakeRetriever([[]] * 20)
+    endless_tool_calls = [
+        AIMessage(content="", tool_calls=[{
+            "name": "retrieve_policy", "args": {"query": "x"}, "id": f"call_{i}",
+        }])
+        for i in range(20)
+    ]
+    model = ScriptedChatModel(endless_tool_calls)
+
+    result = run_policy_navigator(
+        "A question", scope=_SCOPE, retriever=retriever, model=model, max_turns=2,
+    )
+
+    assert result.termination_reason == "max_turns"
+    assert result.model_id is None
+    assert result.label == "fallback"
+
+
 # --- read-only boundary: the tool never exposes scope as a parameter -------
 
 

@@ -124,9 +124,10 @@ def db():
     session.close()
 
 
-def _generate(db, script, raises=None, trace=None, audience="patient", limits=None):
+def _generate(db, script, raises=None, trace=None, audience="patient", limits=None,
+              correlation_id=CORR):
     return path.generate_draft(
-        db, patient_id=PATIENT, actor_role="clinician", correlation_id=CORR,
+        db, patient_id=PATIENT, actor_role="clinician", correlation_id=correlation_id,
         audience=audience, model=ScriptedChatModel(script, raises=raises),
         label=ProvenanceLabel.FIXTURE, trace=trace, limits=limits,
     )
@@ -228,8 +229,10 @@ def test_trace_carries_no_prompt_document_text_model_output_or_raw_error(db):
     real = TraceRecorder(CORR)
     _generate(db, [_tool_call(), _final(GROUNDED_SUMMARY, GROUNDED_CLAIMS)], trace=real)
 
+    # Its own distinct, server-generated lifecycle id — a second generation
+    # never reuses the first's (migration 036, review fix ALC-CORR-COLLISION).
     failed = TraceRecorder("corr-agent-2")
-    outcome = _generate(db, [], raises=PayerExploded(secret), trace=failed)
+    outcome = _generate(db, [], raises=PayerExploded(secret), trace=failed, correlation_id="corr-agent-2")
 
     for trace in (real, failed):
         for event in trace.events:
@@ -299,3 +302,52 @@ def test_a_sentence_reusing_the_computed_number_is_refused(db):
     assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE
     assert outcome.draft.status == drafts.REFUSED
     assert drafts.approved_draft(db, PATIENT) is None
+
+
+# --- W10 Final Stage 4: truthful loop-exhaustion classification ------------
+
+
+def test_bounded_loop_exhaustion_is_classified_as_max_turns_not_provider_error():
+    """A model that always requests a tool and never finalizes genuinely
+    exhausts the real create_agent loop's recursion_limit (GraphRecursionError
+    from langgraph itself, not simulated) — this must be reported as bounded
+    loop exhaustion, never lumped in with an actual provider failure."""
+    from langchain_core.messages import AIMessage
+
+    from libs.summary_agent.runtime import run_summary_agent
+
+    # Each call needs its own tool_call id — ScriptedChatModel replays a
+    # fixed script, and langgraph's own bookkeeping keys tool results by
+    # that id, so reusing one across turns raises a KeyError of ITS OWN
+    # (a scripting artifact) before recursion_limit is ever reached.
+    endless_tool_calls = [
+        AIMessage(content="", tool_calls=[{
+            "name": "retrieve_approved_documents", "args": {"category": ""}, "id": f"call_{i}",
+        }])
+        for i in range(20)
+    ]
+    trace = TraceRecorder("corr-max-turns")
+    model = ScriptedChatModel(endless_tool_calls)  # always requests a tool; never finalizes
+
+    result = run_summary_agent(
+        audience="patient", actor_role="clinician", trace=trace, model=model, max_turns=2,
+    )
+
+    assert result.termination_reason == "max_turns"
+    assert result.model_id is None
+    assert result.label == ProvenanceLabel.FALLBACK
+    assert result.provider_error_type == "GraphRecursionError"
+
+
+def test_a_genuine_provider_failure_is_still_classified_as_provider_error():
+    from libs.summary_agent.runtime import run_summary_agent
+
+    trace = TraceRecorder("corr-provider-error")
+    model = ScriptedChatModel([], raises=RuntimeError("bedrock is down"))
+
+    result = run_summary_agent(
+        audience="patient", actor_role="clinician", trace=trace, model=model,
+    )
+
+    assert result.termination_reason == "provider_error"
+    assert result.model_id is None

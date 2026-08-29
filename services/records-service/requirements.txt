@@ -33,3 +33,9 @@ pgvector==0.4.2
 # w8-planner-2 P2 (adr/0012): AEAD field decryption (libs/phi_crypto) for
 # ssn/dob/notes reads. See libs/phi_crypto/requirements.txt.
 cryptography==50.0.1
+
+# W10 Final Stage 4: best-effort OpenTelemetry emission of the durable agent
+# lifecycle stream (agent_lifecycle.py). See libs/tracing/requirements.txt —
+# same pins already used by intake-service/eligibility-service.
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0

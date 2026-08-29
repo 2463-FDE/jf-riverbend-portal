@@ -117,7 +117,8 @@ jobs:
             tests/integration/test_roi_fulfillment_concurrency_db.py \
             tests/integration/test_disclosures_roi_request_unique_migration.py \
             tests/integration/test_audit_logs_hash_chain.py \
-            tests/integration/test_agent_draft_provenance_contract.py
+            tests/integration/test_agent_draft_provenance_contract.py \
+            tests/integration/test_agent_lifecycle_events_migration.py
 
   # P5 (w8-planner-2): dependency vulnerability, secret, and container-image
   # scanning. Severity/failure policy, applied consistently across all three

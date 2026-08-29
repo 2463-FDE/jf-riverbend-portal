@@ -1,6 +1,6 @@
 """ORM models records-service touches. (Copy-paste per service — no shared lib yet, ADR 0001.)"""
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy import JSON, Boolean, Column, ForeignKey, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.sql import func
 
 from db import Base
@@ -198,7 +198,9 @@ class AgentDraftProvenance(Base):
     version = Column(Integer, nullable=False)
     status = Column(Text, nullable=False, default="draft")
     provenance_label = Column(Text, nullable=False)
-    correlation_id = Column(Text, nullable=False)
+    # Server-generated, never the caller's X-Request-Id (migration 036,
+    # ALC-CORR-COLLISION) — unique so two drafts can't share a lifecycle key.
+    correlation_id = Column(Text, nullable=False, unique=True)
     model_id = Column(Text)
     validation_code = Column(Text)
     generated_text = Column(Text, nullable=False)
@@ -232,6 +234,34 @@ class AgentDraftCitation(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("draft_id", "citation_id", name="agent_draft_citation_unique"),)
+
+
+class AgentLifecycleEvent(Base):
+    """One stage of one draft's durable lifecycle trace (migration 036) —
+    see agent_lifecycle.py, the only writer/reader."""
+
+    __tablename__ = "agent_lifecycle_events"
+
+    id = Column(Integer, primary_key=True)
+    correlation_id = Column(Text, nullable=False)
+    # default=0 is a placeholder — Postgres's trigger (036) overwrites it;
+    # exists so SQLite (no trigger support) satisfies NOT NULL in tests.
+    sequence = Column(Integer, nullable=False, default=0)
+    stage = Column(Text, nullable=False)
+    # Real JSONB in Postgres; generic JSON in SQLite (unit tests only).
+    attributes = Column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, server_default="{}")
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("correlation_id", "sequence", name="agent_lifecycle_events_correlation_sequence_unique"),
+        # ALC-DISPLAY-REPEAT: at most one display row per correlation_id (036).
+        Index(
+            "agent_lifecycle_events_one_display_per_correlation", "correlation_id",
+            unique=True,
+            postgresql_where=text("stage = 'display'"),
+            sqlite_where=text("stage = 'display'"),
+        ),
+    )
 
 
 class MessageThread(Base):

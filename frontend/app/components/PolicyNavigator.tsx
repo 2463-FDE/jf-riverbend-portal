@@ -22,6 +22,11 @@ const PROVIDER_TEXT: Record<string, string> = {
   fallback: "The policy navigator could not reach a live model for this question.",
 };
 
+// max_turns is a genuinely different failure from provider unavailability:
+// the model was reachable and responding, it just never finished within
+// the safe bounded step limit — never describe it as unreachable.
+const MAX_TURNS_TEXT = "The policy navigator stopped after reaching its safe step limit.";
+
 const CORPUS_NOTICE =
   "Synthetic training corpus — not real Riverbend policy, and a policy document never proves the running application actually behaves this way.";
 
@@ -67,7 +72,8 @@ export default function PolicyNavigator() {
   const isRefusalOrError =
     result?.termination_reason === "no_evidence" ||
     result?.termination_reason === "provider_error" ||
-    result?.termination_reason === "citation_invalid";
+    result?.termination_reason === "citation_invalid" ||
+    result?.termination_reason === "max_turns";
 
   return (
     <section className="rb-policy-navigator" aria-labelledby="policy-navigator-heading">
@@ -97,7 +103,7 @@ export default function PolicyNavigator() {
       {result && (
         <div className="rb-policy-navigator__result" role="status">
           <p className="rb-policy-navigator__label" data-provenance={result.label}>
-            {PROVIDER_TEXT[result.label] ?? "Answered."}
+            {result.termination_reason === "max_turns" ? MAX_TURNS_TEXT : PROVIDER_TEXT[result.label] ?? "Answered."}
           </p>
 
           <p
