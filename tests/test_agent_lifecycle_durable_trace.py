@@ -1,6 +1,4 @@
-"""W10 Final Stage 4 — services/records-service/agent_lifecycle.py, the
-durable append-only sink replacing three separate per-request in-memory
-TraceRecorder instances. Fast DB-less (SQLite) coverage of
+"""Fast DB-less (SQLite) coverage of agent_lifecycle.py's
 persist()/reconstruct() and the verifier's reporting logic; real Postgres
 trigger enforcement is proved in
 tests/integration/test_agent_lifecycle_events_migration.py.
@@ -57,22 +55,18 @@ def test_persisting_and_reconstructing_round_trips_the_same_shape(db):
 
 
 def test_review_and_display_append_to_the_same_persisted_stream_across_calls(db):
-    """Generation, review, and display happen in three separate HTTP
-    requests but must accumulate into one reconstructible stream."""
+    """Three separate HTTP requests must accumulate into one stream."""
     generation = _full_trace("corr-shared")
     agent_lifecycle.persist(db, "corr-shared", generation.events)
     db.commit()
-
     review_trace = TraceRecorder("corr-shared")
     review_trace.review(decision="approved", draft_version=1)
     agent_lifecycle.persist(db, "corr-shared", review_trace.events)
     db.commit()
-
     display_trace = TraceRecorder("corr-shared")
     display_trace.display(draft_version=1, label=ProvenanceLabel.REAL)
     agent_lifecycle.persist(db, "corr-shared", display_trace.events)
     db.commit()
-
     rebuilt = agent_lifecycle.reconstruct(db, "corr-shared")
     assert rebuilt.is_complete()
     assert rebuilt.is_ordered()
@@ -94,7 +88,6 @@ def test_sequence_continues_across_separate_correlation_ids_independently(db):
     a.request(actor_role="clinician")
     b = TraceRecorder("corr-b")
     b.request(actor_role="patient")
-
     agent_lifecycle.persist(db, "corr-a", a.events)
     agent_lifecycle.persist(db, "corr-b", b.events)
     db.commit()
@@ -108,23 +101,16 @@ def test_sequence_continues_across_separate_correlation_ids_independently(db):
 def test_persist_re_checks_the_safety_guard_and_never_reaches_the_database(db):
     """persist() must not trust that a StageEvent was built via TraceRecorder."""
     forbidden_event = StageEvent(stage=Stage.REVIEW, attributes={"name": "Dr. Grace Kim"})
-
     with pytest.raises(ForbiddenPayload):
         agent_lifecycle.persist(db, "corr-leak", [forbidden_event])
-
     assert db.query(AgentLifecycleEvent).filter_by(correlation_id="corr-leak").count() == 0
 
 
 def test_persist_rejects_a_manually_constructed_event_with_a_nested_forbidden_key(db):
-    """ALC-NESTED-GUARD at the persist() boundary: a hand-built StageEvent
-    with a nested forbidden key must be caught before any DB write."""
-    forbidden_event = StageEvent(
-        stage=Stage.REQUEST, attributes={"metadata": {"user_id": 13}},
-    )
-
+    """ALC-NESTED-GUARD at the persist() boundary."""
+    forbidden_event = StageEvent(stage=Stage.REQUEST, attributes={"metadata": {"user_id": 13}})
     with pytest.raises(ForbiddenPayload):
         agent_lifecycle.persist(db, "corr-leak-nested", [forbidden_event])
-
     assert db.query(AgentLifecycleEvent).filter_by(correlation_id="corr-leak-nested").count() == 0
 
 

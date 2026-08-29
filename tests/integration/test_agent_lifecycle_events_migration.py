@@ -1,8 +1,7 @@
 """Integration test — requires a real Postgres (`make up`). Proves
-migration 036's actual triggers: server-side sequence assignment,
-advisory-lock serialization, append-only enforcement for both the runtime
-role and table owner, and the display partial-unique-index invariant.
-"""
+migration 036's actual triggers: sequence assignment, advisory-lock
+serialization, append-only enforcement (runtime role and table owner),
+and the display partial-unique-index invariant."""
 import os
 import threading
 import uuid
@@ -63,7 +62,6 @@ def test_sequence_is_assigned_server_side_ignoring_the_client_value(conn):
     first = _insert(conn, correlation_id, "request", client_sequence=999)
     second = _insert(conn, correlation_id, "draft", client_sequence=999)
     conn.commit()
-
     assert (first, second) == (1, 2)
 
 
@@ -90,13 +88,10 @@ def test_two_concurrent_inserts_for_the_same_correlation_id_get_distinct_sequent
 
 
 def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
-    """ALC-DISPLAY-REPEAT at the DB boundary: two simultaneous 'display'
-    inserts for the same correlation_id must yield exactly one stored row,
-    with sequence ordering unbroken by the loser's failed attempt."""
+    """ALC-DISPLAY-REPEAT: two simultaneous displays yield one stored row."""
     correlation_id = _correlation_id()
     _insert(conn, correlation_id, "request")
     conn.commit()
-
     barrier = threading.Barrier(2)
     outcomes = []
 
@@ -120,7 +115,6 @@ def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
     conflicts = [o for o in outcomes if o[0] == "conflict"]
     assert len(successes) == 1, f"exactly one display insert must win: {outcomes}"
     assert len(conflicts) == 1, f"the other must fail on the partial unique index: {outcomes}"
-
     with conn.cursor() as cur:
         cur.execute(
             "SELECT sequence, stage FROM agent_lifecycle_events "
@@ -128,7 +122,6 @@ def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
             (correlation_id,),
         )
         rows = cur.fetchall()
-
     stages = [stage for _, stage in rows]
     sequences = [seq for seq, _ in rows]
     assert stages.count("display") == 1
@@ -146,7 +139,6 @@ def test_mutation_is_rejected_for_the_runtime_role(conn, sql):
     correlation_id = _correlation_id()
     _insert(conn, correlation_id, "request")
     conn.commit()
-
     with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
         with conn.cursor() as cur:
             cur.execute(sql, (correlation_id,))
@@ -162,7 +154,6 @@ def test_update_is_rejected_even_for_the_table_owner_admin_role():
         correlation_id = _correlation_id()
         _insert(admin_conn, correlation_id, "request")
         admin_conn.commit()
-
         with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
             with admin_conn.cursor() as cur:
                 cur.execute("UPDATE agent_lifecycle_events SET stage = 'display' WHERE correlation_id = %s",

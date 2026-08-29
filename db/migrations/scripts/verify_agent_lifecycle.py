@@ -5,10 +5,8 @@
 
 Usage:  DATABASE_URL=postgresql://... python3 verify_agent_lifecycle.py <correlation_id>
 
-Prints stage names, counts, and boolean verdicts
-(is_complete/is_ordered/is_grounded/is_acceptable) — never attribute
-values, mirroring verify_audit_chain.py's posture for audit_logs.
-"""
+Prints stage names, counts, and boolean verdicts — never attribute values,
+mirroring verify_audit_chain.py's posture for audit_logs."""
 import os
 import sys
 
@@ -52,10 +50,8 @@ def report(trace: TraceRecorder) -> str:
     if not trace.is_complete():
         lines.append(f"missing stages: {trace.missing_stages()}")
     if not trace.is_acceptable():
-        lines.append(
-            "note: a fallback/error lifecycle is a genuinely shorter shape "
-            "and is not expected to satisfy is_acceptable()."
-        )
+        lines.append("note: a fallback/error lifecycle is a genuinely shorter shape "
+                      "and is not expected to satisfy is_acceptable().")
     return "\n".join(lines)
 
 
