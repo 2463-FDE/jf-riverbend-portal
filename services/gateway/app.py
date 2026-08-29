@@ -398,7 +398,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     try:
         user = db.execute(select(User).where(User.username == req.username)).scalar_one_or_none()
     except Exception as e:  # DB down in local dev without compose
-        log.error("login db error: %s", e)
+        log.error("login db error error_type=%s", type(e).__name__)
         raise HTTPException(status_code=503, detail="auth backend unavailable")
 
     # Password FIRST, status second. The combined check this replaces was
@@ -1874,7 +1874,7 @@ def proxy_visit_message_stream(
         )
     except Exception as e:
         client.close()
-        log.error("proxy stream %s failed to open: %s", visit_id, e)
+        log.error("proxy stream %s failed to open error_type=%s", visit_id, type(e).__name__)
         return JSONResponse(status_code=502, content={"error": str(e)})
 
     if upstream.status_code >= 300:
@@ -1892,7 +1892,7 @@ def proxy_visit_message_stream(
             # already committed by this point — a mid-stream outage must
             # still end the stream with one sanitized terminal event, not a
             # silently truncated response the browser reads as complete.
-            log.error("proxy stream %s failed mid-stream: %s", visit_id, e)
+            log.error("proxy stream %s failed mid-stream error_type=%s", visit_id, type(e).__name__)
             yield (
                 json.dumps(
                     {
@@ -2325,7 +2325,7 @@ def _post(service: str, path: str, payload: dict, *, headers: Optional[dict] = N
             return JSONResponse(status_code=r.status_code, content=data)
         return data
     except Exception as e:
-        log.error("proxy POST %s%s failed: %s", service, path, e)
+        log.error("proxy POST %s%s failed error_type=%s", service, path, type(e).__name__)
         if forward_status:
             return JSONResponse(status_code=502, content={"error": str(e)})
         return {"error": str(e)}
@@ -2371,7 +2371,7 @@ def _get(
             return JSONResponse(status_code=r.status_code, content=data)
         return data
     except Exception as e:
-        log.error("proxy GET %s%s failed: %s", service, path, e)
+        log.error("proxy GET %s%s failed error_type=%s", service, path, type(e).__name__)
         if forward_status:
             return JSONResponse(status_code=502, content={"error": str(e)})
         return {"error": str(e)}

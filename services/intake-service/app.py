@@ -299,7 +299,7 @@ def intake_config():
         log.error("intake config missing at %s", INTAKE_CONFIG_PATH)
         raise HTTPException(status_code=500, detail="intake config not found")
     except yaml.YAMLError as e:
-        log.error("intake config parse error: %s", e)
+        log.error("intake config parse error error_type=%s", type(e).__name__)
         raise HTTPException(status_code=500, detail="intake config invalid")
 
 
