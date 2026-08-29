@@ -69,6 +69,56 @@ jobs:
         # paths is thin — tracked in RIV-201.
         run: pytest -m "not integration" -q
 
+  # W10 Final Stage 2: proves the scheduling (RIV-175), ROI, audit-chain, and
+  # agent-draft database-level concurrency invariants under a REAL Postgres —
+  # not the full docker-compose stack (no gateway/redis/other services), and
+  # not the entire integration suite (most of which needs that full stack).
+  # Reuses docker-compose.yml's own postgres service (same init scripts, same
+  # schema.sql/seed.sql) so schema bootstrap is never reimplemented here.
+  concurrency-tests:
+    runs-on: ubuntu-latest
+    needs: [tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install -r requirements-dev.txt
+      - name: Start a disposable Postgres (real schema + seed, no other service)
+        # No .env file exists in this checkout (untracked, gitignored) — same
+        # "generate a throwaway value, never assume a committed secret"
+        # posture as the docker-build job below. DB_USER/DB_NAME are not
+        # secret, so they're plain values here rather than generated.
+        run: |
+          set -euo pipefail
+          export DB_USER=riverbend_app
+          export DB_NAME=riverbend
+          export DB_PASSWORD="$(openssl rand -hex 32)"
+          export DB_ADMIN_PASSWORD="$(openssl rand -hex 32)"
+          export INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
+          export PHI_ACTIVE_KEY_VERSION=v1
+          export PHI_ENCRYPTION_KEY_V1="$(openssl rand -base64 32)"
+          export PHI_BLIND_INDEX_KEY_V1="$(openssl rand -base64 32)"
+          {
+            echo "DB_USER=$DB_USER"
+            echo "DB_NAME=$DB_NAME"
+            echo "DB_PASSWORD=$DB_PASSWORD"
+            echo "DB_ADMIN_PASSWORD=$DB_ADMIN_PASSWORD"
+          } >> "$GITHUB_ENV"
+          docker compose up -d --wait postgres
+      - name: Run the selected concurrency-defining integration tests
+        env:
+          DB_HOST: localhost
+          DB_ADMIN_USER: riverbend_admin
+        run: |
+          pytest -m integration -q \
+            tests/integration/test_scheduling_concurrency_db.py \
+            tests/integration/test_roi_fulfillment_concurrency_db.py \
+            tests/integration/test_disclosures_roi_request_unique_migration.py \
+            tests/integration/test_audit_logs_hash_chain.py \
+            tests/integration/test_agent_draft_provenance_contract.py
+
   # P5 (w8-planner-2): dependency vulnerability, secret, and container-image
   # scanning. Severity/failure policy, applied consistently across all three
   # via Trivy: CRITICAL/HIGH vulnerabilities fail the build (MEDIUM/LOW are

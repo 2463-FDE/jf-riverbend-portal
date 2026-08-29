@@ -11,11 +11,9 @@ class HL7IngestRequest(BaseModel):
 
 
 class ParsedRecord(BaseModel):
-    """Internal record shape produced by hl7_parser.parse().
-
-    NOTE: allergies/medications are part of the shape but the parser only maps
-    PID/PV1 — AL1/RXA segments are silently dropped (brittle-parser debt, D6).
-    """
+    """Internal record shape produced by hl7_parser.parse(). PID, PV1, AL1
+    (allergies), and RXA (medications) are all mapped — see
+    SegmentComprehensionEntry for what happened to every other segment."""
 
     mrn: Optional[str] = None
     name: Optional[str] = None
@@ -26,6 +24,20 @@ class ParsedRecord(BaseModel):
     medications: List[str] = Field(default_factory=list)
 
 
+class SegmentComprehensionEntry(BaseModel):
+    """One line of the inbound message and what this parser did with it —
+    see hl7_parser.py's module docstring for the five status values."""
+
+    segment: str
+    line_number: int
+    status: str
+
+
 class HL7IngestResponse(BaseModel):
     record: ParsedRecord
-    unmapped_note: str
+    segments: List[SegmentComprehensionEntry]
+    # True when at least one segment was mapped-worthy (PID/PV1/AL1/RXA) but
+    # too short to extract — required clinical content was present and
+    # dropped, not merely absent. A caller must never read a 200 alone as
+    # "nothing was lost."
+    has_incomplete_content: bool
