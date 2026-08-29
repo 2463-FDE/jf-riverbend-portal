@@ -24,7 +24,6 @@ from models import User
 _DEMO_SALT_MARKER = "$riverbend"
 
 _PLACEHOLDER_BEDROCK_MODEL_IDS = ("", "changeme")
-_PLACEHOLDER_PAYER_HOSTS = ("edi.example.com",)
 
 
 def _payer_mode_problem(settings) -> "str | None":
