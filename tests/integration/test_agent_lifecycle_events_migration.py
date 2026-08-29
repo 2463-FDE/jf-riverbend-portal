@@ -109,6 +109,65 @@ def test_two_concurrent_inserts_for_the_same_correlation_id_get_distinct_sequent
     # test_agent_draft_provenance_contract.py's own uncommented rows.
 
 
+def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
+    """Review fix ALC-DISPLAY-REPEAT, at the database boundary: two
+    genuinely simultaneous attempts to record a 'display' event for the
+    SAME correlation_id must result in exactly one stored display row —
+    the partial unique index (migration 036) is what makes this true
+    regardless of application-level idempotency handling — and sequence
+    assignment for the loser's failed attempt must not corrupt ordering
+    for whichever rows already exist."""
+    correlation_id = _correlation_id()
+    _insert(conn, correlation_id, "request")
+    conn.commit()
+
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def _do_display_insert():
+        c = _connect()
+        try:
+            barrier.wait(timeout=5)
+            try:
+                seq = _insert(c, correlation_id, "display")
+                c.commit()
+                outcomes.append(("ok", seq))
+            except psycopg2.errors.UniqueViolation:
+                c.rollback()
+                outcomes.append(("conflict", None))
+        finally:
+            c.close()
+
+    t1 = threading.Thread(target=_do_display_insert)
+    t2 = threading.Thread(target=_do_display_insert)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert len(outcomes) == 2
+    successes = [o for o in outcomes if o[0] == "ok"]
+    conflicts = [o for o in outcomes if o[0] == "conflict"]
+    assert len(successes) == 1, f"exactly one display insert must win: {outcomes}"
+    assert len(conflicts) == 1, f"the other must fail on the partial unique index: {outcomes}"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sequence, stage FROM agent_lifecycle_events "
+            "WHERE correlation_id = %s ORDER BY sequence",
+            (correlation_id,),
+        )
+        rows = cur.fetchall()
+
+    stages = [stage for _, stage in rows]
+    sequences = [seq for seq, _ in rows]
+    assert stages.count("display") == 1
+    assert sequences == sorted(sequences) == sorted(set(sequences)), (
+        "sequence must stay strictly increasing with no duplicates, even though "
+        "one insert attempt failed"
+    )
+
+
 def test_update_is_rejected_for_the_runtime_role(conn):
     correlation_id = _correlation_id()
     _insert(conn, correlation_id, "request")

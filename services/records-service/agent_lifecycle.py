@@ -19,6 +19,7 @@ module never computes or supplies a sequence number.
 from typing import Iterable, List
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from libs.agent_provenance import Stage, StageEvent, TraceRecorder, assert_safe
@@ -60,12 +61,30 @@ def persist(db: Session, correlation_id: str, events: Iterable[StageEvent]) -> N
     with safe_span(_TRACER_NAME, "agent_lifecycle.persist", {"correlation_id": correlation_id}) as span:
         for offset, event in enumerate(events, start=1):
             assert_safe(event.attributes)
-            db.add(AgentLifecycleEvent(
+            row = AgentLifecycleEvent(
                 correlation_id=correlation_id,
                 sequence=current_max + offset,
                 stage=event.stage.value,
                 attributes=dict(event.attributes),
-            ))
+            )
+            if event.stage is Stage.DISPLAY:
+                # Review fix ALC-DISPLAY-REPEAT: the partial unique index
+                # (migration 036) allows at most one display row per
+                # correlation_id. A concurrent second attempt to record the
+                # SAME terminal display (two patient reads racing) must
+                # succeed as a no-op — never surfaced as an error to a
+                # caller who only asked to read their own approved summary.
+                # A SAVEPOINT scopes the failure to this one insert; the
+                # rest of the caller's transaction (and any earlier events
+                # in this same batch) is untouched.
+                try:
+                    with db.begin_nested():
+                        db.add(row)
+                        db.flush()
+                except IntegrityError:
+                    continue
+            else:
+                db.add(row)
             span.add_event(event.stage.value, dict(event.attributes))
     db.flush()
 

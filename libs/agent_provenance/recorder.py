@@ -154,9 +154,33 @@ FORBIDDEN_KEYS = frozenset(
 )
 
 
+def _forbidden_key_paths(value: Any, path: str = "") -> list:
+    """Recursively find forbidden key names at ANY depth: nested mappings,
+    and lists/tuples of mappings (or of further-nested lists/tuples) —
+    review fix ALC-NESTED-GUARD. A caller who nests a forbidden key one
+    level down (`{"metadata": {"user_id": 13}}`) or inside a list of
+    mappings must be caught exactly like a bare top-level one; the guard
+    checked only top-level keys before this fix. Returns dotted/indexed
+    PATHS to each offending key, never the value that key held."""
+    found = []
+    if isinstance(value, Mapping):
+        for key, sub_value in value.items():
+            key_path = f"{path}.{key}" if path else str(key)
+            if str(key).lower() in FORBIDDEN_KEYS:
+                found.append(key_path)
+            else:
+                found.extend(_forbidden_key_paths(sub_value, key_path))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found.extend(_forbidden_key_paths(item, f"{path}[{index}]"))
+    return found
+
+
 def assert_safe(attributes: Mapping[str, Any]) -> None:
-    """Raise if any attribute name is forbidden. Called on every write."""
-    offenders = sorted(k for k in attributes if k.lower() in FORBIDDEN_KEYS)
+    """Raise if any attribute name is forbidden, at any nesting depth —
+    a top-level key, a key nested inside a mapping value, or a key inside
+    a mapping found within a list/tuple. Called on every write."""
+    offenders = sorted(set(_forbidden_key_paths(attributes)))
     if offenders:
         raise ForbiddenPayload(
             f"attribute(s) {offenders} may never be traced or persisted. Record a "

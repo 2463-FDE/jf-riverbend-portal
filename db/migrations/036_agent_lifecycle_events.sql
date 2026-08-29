@@ -55,6 +55,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_sequence_un
 CREATE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_id_idx
     ON agent_lifecycle_events (correlation_id);
 
+-- Review fix ALC-DISPLAY-REPEAT: display is the trace's TERMINAL stage —
+-- TraceRecorder.is_ordered() already rejects a repeat of it in-memory, but
+-- that guards one request's own trace, not two genuinely concurrent
+-- requests (two patient GETs of the same approved summary) each building
+-- their OWN trace and both trying to persist a display event for the same
+-- correlation_id. This partial unique index is the database-level
+-- backstop: at most one display row can ever exist per correlation_id,
+-- full stop. services/records-service/agent_lifecycle.py's persist()
+-- catches the resulting UniqueViolation for a display insert specifically
+-- and treats it as an already-recorded no-op, never a surfaced error —
+-- concurrent reads must both succeed even though only one display row is
+-- ever stored. No other stage is restricted this way: provider_call,
+-- agent_decision and retrieval are all genuinely repeatable within one
+-- bounded tool loop.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_one_display_per_correlation
+    ON agent_lifecycle_events (correlation_id) WHERE stage = 'display';
+
 CREATE OR REPLACE FUNCTION agent_lifecycle_events_assign_sequence() RETURNS TRIGGER AS $$
 DECLARE
     next_seq integer;
@@ -87,3 +104,38 @@ DROP TRIGGER IF EXISTS agent_lifecycle_events_no_delete ON agent_lifecycle_event
 CREATE TRIGGER agent_lifecycle_events_no_delete
     BEFORE DELETE ON agent_lifecycle_events
     FOR EACH ROW EXECUTE FUNCTION agent_lifecycle_events_reject_mutation();
+
+-- Review fix ALC-CORR-COLLISION: agent_draft_provenance.correlation_id was
+-- never unique — before this PR, a caller-supplied X-Request-Id could be
+-- reused verbatim as the lifecycle key (services/records-service/app.py's
+-- two generation routes now always call new_correlation_id() instead, but
+-- the database itself must refuse a duplicate too, not merely rely on the
+-- application never sending one again). Every row this migration finds is
+-- either pre-fix demo/seed data or a genuine bug; either way, silently
+-- picking a "winner" among duplicates (or deleting/merging their
+-- agent_lifecycle_events rows) is a real, human-reviewable decision this
+-- migration must not make on its own — it fails loudly and touches zero
+-- rows instead, the same posture migration 013 already established for
+-- appointments.slot_id.
+DO $$
+DECLARE
+    dup_count integer;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes WHERE indexname = 'agent_draft_provenance_correlation_id_unique'
+    ) THEN
+        SELECT count(*) INTO dup_count FROM (
+            SELECT correlation_id FROM agent_draft_provenance
+            GROUP BY correlation_id
+            HAVING count(*) > 1
+        ) dupes;
+
+        IF dup_count > 0 THEN
+            RAISE EXCEPTION 'agent_draft_provenance_correlation_id_unique: % correlation_id value(s) are shared by more than one draft. This migration will NOT silently join or delete lifecycle data. Identify and resolve each duplicate by hand (a pre-fix row that reused a caller-supplied X-Request-Id, or a genuine bug), then re-run this migration.', dup_count;
+        END IF;
+
+        CREATE UNIQUE INDEX agent_draft_provenance_correlation_id_unique
+            ON agent_draft_provenance (correlation_id);
+    END IF;
+END
+$$;

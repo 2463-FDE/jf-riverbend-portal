@@ -122,6 +122,21 @@ def test_persist_re_checks_the_safety_guard_and_never_reaches_the_database(db):
     assert db.query(AgentLifecycleEvent).filter_by(correlation_id="corr-leak").count() == 0
 
 
+def test_persist_rejects_a_manually_constructed_event_with_a_nested_forbidden_key(db):
+    """ALC-NESTED-GUARD, at the persist() boundary specifically: a StageEvent
+    built by hand (bypassing TraceRecorder's own guarded wrappers) with a
+    forbidden key nested inside a dict value must still be caught before
+    any database write."""
+    forbidden_event = StageEvent(
+        stage=Stage.REQUEST, attributes={"metadata": {"user_id": 13}},
+    )
+
+    with pytest.raises(ForbiddenPayload):
+        agent_lifecycle.persist(db, "corr-leak-nested", [forbidden_event])
+
+    assert db.query(AgentLifecycleEvent).filter_by(correlation_id="corr-leak-nested").count() == 0
+
+
 # --- the verifier's report() — pure formatting, no DB -----------------------
 
 

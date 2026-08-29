@@ -69,9 +69,10 @@ def _decrypted(draft):
     )
 
 
-def _create(db, text=TEXT_V1, label=drafts.LABEL_REAL, model_id="model-x", citations=()):
+def _create(db, text=TEXT_V1, label=drafts.LABEL_REAL, model_id="model-x", citations=(),
+            correlation_id=CORR):
     return drafts.create_draft(
-        db, patient_id=1042, generated_text=text, correlation_id=CORR,
+        db, patient_id=1042, generated_text=text, correlation_id=correlation_id,
         provenance_label=label, model_id=model_id, prompt_version="v1",
         citations=citations,
     )
@@ -81,8 +82,11 @@ def _create(db, text=TEXT_V1, label=drafts.LABEL_REAL, model_id="model-x", citat
 
 
 def test_versions_are_monotonic_per_patient(db):
+    # Each generation is its own request with its own server-generated
+    # lifecycle id (migration 036, review fix ALC-CORR-COLLISION) — a
+    # regeneration never reuses the prior version's correlation_id.
     v1 = _create(db)
-    v2 = _create(db, text=TEXT_V2)
+    v2 = _create(db, text=TEXT_V2, correlation_id="corr-agent-2")
 
     assert (v1.version, v2.version) == (1, 2)
     assert _decrypted(v1) == TEXT_V1, "version 1's text is untouched by a regeneration"
@@ -228,8 +232,12 @@ def test_approving_v2_supersedes_v1_so_the_approved_version_is_unambiguous(db):
     display would have to pick one."""
     v1 = drafts.decide(db, drafts.record_validation(db, _create(db), passed=True),
                        approve=True, reviewed_by=13)
-    v2 = drafts.decide(db, drafts.record_validation(db, _create(db, text=TEXT_V2), passed=True),
-                       approve=True, reviewed_by=13)
+    v2 = drafts.decide(
+        db, drafts.record_validation(
+            db, _create(db, text=TEXT_V2, correlation_id="corr-agent-2"), passed=True,
+        ),
+        approve=True, reviewed_by=13,
+    )
 
     shown = drafts.approved_draft(db, 1042)
     assert shown.version == v2.version
@@ -244,7 +252,7 @@ def test_a_pending_v2_does_not_replace_an_approved_v1(db):
     approved."""
     drafts.decide(db, drafts.record_validation(db, _create(db), passed=True),
                   approve=True, reviewed_by=13)
-    _create(db, text=TEXT_V2)  # v2 created, not validated, not approved
+    _create(db, text=TEXT_V2, correlation_id="corr-agent-2")  # v2 created, not validated, not approved
 
     shown = drafts.approved_draft(db, 1042)
     assert shown.version == 1 and _decrypted(shown) == TEXT_V1

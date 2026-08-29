@@ -124,9 +124,10 @@ def db():
     session.close()
 
 
-def _generate(db, script, raises=None, trace=None, audience="patient", limits=None):
+def _generate(db, script, raises=None, trace=None, audience="patient", limits=None,
+              correlation_id=CORR):
     return path.generate_draft(
-        db, patient_id=PATIENT, actor_role="clinician", correlation_id=CORR,
+        db, patient_id=PATIENT, actor_role="clinician", correlation_id=correlation_id,
         audience=audience, model=ScriptedChatModel(script, raises=raises),
         label=ProvenanceLabel.FIXTURE, trace=trace, limits=limits,
     )
@@ -228,8 +229,10 @@ def test_trace_carries_no_prompt_document_text_model_output_or_raw_error(db):
     real = TraceRecorder(CORR)
     _generate(db, [_tool_call(), _final(GROUNDED_SUMMARY, GROUNDED_CLAIMS)], trace=real)
 
+    # Its own distinct, server-generated lifecycle id — a second generation
+    # never reuses the first's (migration 036, review fix ALC-CORR-COLLISION).
     failed = TraceRecorder("corr-agent-2")
-    outcome = _generate(db, [], raises=PayerExploded(secret), trace=failed)
+    outcome = _generate(db, [], raises=PayerExploded(secret), trace=failed, correlation_id="corr-agent-2")
 
     for trace in (real, failed):
         for event in trace.events:

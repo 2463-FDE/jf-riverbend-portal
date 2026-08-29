@@ -591,6 +591,12 @@ CREATE INDEX IF NOT EXISTS agent_draft_provenance_patient_idx
     ON agent_draft_provenance (patient_id);
 CREATE INDEX IF NOT EXISTS agent_draft_provenance_correlation_idx
     ON agent_draft_provenance (correlation_id);
+-- 036 (review fix ALC-CORR-COLLISION): the draft's lifecycle identity is
+-- always server-generated (new_correlation_id()), never a caller-supplied
+-- X-Request-Id — unique so the database itself refuses a collision, not
+-- just the application.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_draft_provenance_correlation_id_unique
+    ON agent_draft_provenance (correlation_id);
 
 -- At most one PATIENT-VISIBLE version at a time, enforced by a unique index
 -- rather than an application-level check-then-insert — concurrency-safe by
@@ -649,6 +655,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_sequence_un
     ON agent_lifecycle_events (correlation_id, sequence);
 CREATE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_id_idx
     ON agent_lifecycle_events (correlation_id);
+-- Review fix ALC-DISPLAY-REPEAT: at most one display row per
+-- correlation_id — see migration 036 for the full rationale.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_one_display_per_correlation
+    ON agent_lifecycle_events (correlation_id) WHERE stage = 'display';
 
 CREATE OR REPLACE FUNCTION agent_lifecycle_events_assign_sequence() RETURNS TRIGGER AS $$
 DECLARE

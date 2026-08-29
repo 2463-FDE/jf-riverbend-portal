@@ -58,9 +58,9 @@ def db():
     session.close()
 
 
-def _create(db, text=TEXT, patient_id=1042):
+def _create(db, text=TEXT, patient_id=1042, correlation_id=CORR):
     return drafts.create_draft(
-        db, patient_id=patient_id, generated_text=text, correlation_id=CORR,
+        db, patient_id=patient_id, generated_text=text, correlation_id=correlation_id,
         provenance_label=drafts.LABEL_REAL, model_id="model-x", prompt_version="v1",
     )
 
@@ -81,7 +81,9 @@ def test_the_same_text_encrypted_twice_produces_different_ciphertext(db):
     # text — proves the encryption is not a deterministic/lookup-style
     # scheme that would leak "these two drafts say the same thing".
     d1 = _create(db, patient_id=1042)
-    d2 = _create(db, patient_id=1042)  # v2, same patient, same text
+    # v2, same patient, same text — its own distinct, server-generated
+    # lifecycle id (migration 036, review fix ALC-CORR-COLLISION).
+    d2 = _create(db, patient_id=1042, correlation_id="corr-agent-2")
 
     assert d1.generated_text != d2.generated_text
 

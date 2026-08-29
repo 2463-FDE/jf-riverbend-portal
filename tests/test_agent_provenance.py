@@ -72,6 +72,45 @@ def test_the_guard_is_case_insensitive():
         _rec().record(Stage.REQUEST, PROMPT="x")
 
 
+# --- ALC-NESTED-GUARD: the guard recurses into nested structures -----------
+
+
+def test_a_forbidden_key_nested_inside_a_mapping_raises():
+    with pytest.raises(ForbiddenPayload):
+        _rec().record(Stage.REQUEST, metadata={"user_id": 13})
+
+
+def test_a_forbidden_key_inside_a_list_of_mappings_raises():
+    with pytest.raises(ForbiddenPayload):
+        _rec().record(Stage.RETRIEVAL, sources=[{"citation_id": "c1"}, {"name": "Jane Doe"}])
+
+
+def test_a_forbidden_key_nested_two_levels_deep_raises():
+    with pytest.raises(ForbiddenPayload):
+        _rec().record(Stage.REQUEST, a={"b": {"ssn": "123-45-6789"}})
+
+
+def test_the_nested_guard_never_reveals_the_forbidden_value():
+    with pytest.raises(ForbiddenPayload) as exc:
+        _rec().record(Stage.REQUEST, metadata={"user_id": "super-secret-id-42"})
+
+    assert "super-secret-id-42" not in str(exc.value)
+
+
+def test_valid_nested_citation_and_category_metadata_is_still_accepted():
+    """The recursive guard must not become so broad that ordinary nested
+    metadata (a list of citation dicts, a nested category breakdown) is
+    unusable."""
+    event = _rec().record(
+        Stage.RETRIEVAL,
+        sources=[{"citation_id": "c1", "category": "lab"}, {"citation_id": "c2", "category": "vitals"}],
+        breakdown={"lab": 1, "vitals": 1},
+    )
+
+    assert event.attributes["sources"][0]["citation_id"] == "c1"
+    assert event.attributes["breakdown"] == {"lab": 1, "vitals": 1}
+
+
 def test_failing_loudly_is_the_chosen_behaviour():
     """A dropped trace is recoverable; a leaked prompt in an aggregator is not.
     So the guard raises rather than silently dropping the attribute — a silent

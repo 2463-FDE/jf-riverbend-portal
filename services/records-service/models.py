@@ -1,5 +1,5 @@
 """ORM models records-service touches. (Copy-paste per service — no shared lib yet, ADR 0001.)"""
-from sqlalchemy import JSON, Boolean, Column, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Column, ForeignKey, Index, Integer, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.sql import func
 
@@ -198,7 +198,10 @@ class AgentDraftProvenance(Base):
     version = Column(Integer, nullable=False)
     status = Column(Text, nullable=False, default="draft")
     provenance_label = Column(Text, nullable=False)
-    correlation_id = Column(Text, nullable=False)
+    # Server-generated (new_correlation_id()), never the caller-supplied
+    # X-Request-Id (migration 036, review fix ALC-CORR-COLLISION) — unique
+    # so a lifecycle key can never be shared by two drafts.
+    correlation_id = Column(Text, nullable=False, unique=True)
     model_id = Column(Text)
     validation_code = Column(Text)
     generated_text = Column(Text, nullable=False)
@@ -269,6 +272,16 @@ class AgentLifecycleEvent(Base):
 
     __table_args__ = (
         UniqueConstraint("correlation_id", "sequence", name="agent_lifecycle_events_correlation_sequence_unique"),
+        # Review fix ALC-DISPLAY-REPEAT: at most one display row per
+        # correlation_id — see migration 036 for the full rationale. The
+        # WHERE clause is portable (both dialects support partial indexes),
+        # so SQLite unit tests enforce the same invariant as real Postgres.
+        Index(
+            "agent_lifecycle_events_one_display_per_correlation", "correlation_id",
+            unique=True,
+            postgresql_where=text("stage = 'display'"),
+            sqlite_where=text("stage = 'display'"),
+        ),
     )
 
 

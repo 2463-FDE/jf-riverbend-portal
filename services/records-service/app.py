@@ -1429,7 +1429,14 @@ def generate_agent_draft(
         audit_action="agent_draft_generate",
     )
     actor_id = parse_user_id(x_actor_id)
-    correlation_id = x_request_id or new_correlation_id()
+    # Review fix ALC-CORR-COLLISION: this is the draft's LIFECYCLE identity —
+    # always server-generated, never the caller-supplied X-Request-Id (that
+    # header stays request/audit correlation metadata only, passed to
+    # _authorize_or_deny/_write_audit above/below as before). A caller can
+    # send any X-Request-Id it likes, including the same one across
+    # unrelated requests; using it as the lifecycle key would let two
+    # different drafts' event streams collide into one.
+    correlation_id = new_correlation_id()
 
     try:
         outcome = summary_agent_path.generate_draft(
@@ -1617,7 +1624,14 @@ def request_agent_summary(
         audit_action="agent_summary_request",
     )
     actor_id = parse_user_id(x_actor_id)
-    correlation_id = x_request_id or new_correlation_id()
+    # Review fix ALC-CORR-COLLISION: this is the draft's LIFECYCLE identity —
+    # always server-generated, never the caller-supplied X-Request-Id (that
+    # header stays request/audit correlation metadata only, passed to
+    # _authorize_or_deny/_write_audit above/below as before). A caller can
+    # send any X-Request-Id it likes, including the same one across
+    # unrelated requests; using it as the lifecycle key would let two
+    # different drafts' event streams collide into one.
+    correlation_id = new_correlation_id()
 
     try:
         outcome = summary_agent_path.generate_draft(

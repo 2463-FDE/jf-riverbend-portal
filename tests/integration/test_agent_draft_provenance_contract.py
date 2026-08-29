@@ -74,9 +74,14 @@ def user_id(conn):
 
 
 def _insert_draft(conn, *, patient_id, version, status="draft", provenance_label="real",
-                   correlation_id="corr-contract", model_id="model-x", prompt_version="v1",
+                   correlation_id=None, model_id="model-x", prompt_version="v1",
                    validation_code=None, generated_text="draft text",
                    reviewed_by=None, approved_at=None, rejected_at=None):
+    # Unique per call by default (migration 036, review fix
+    # ALC-CORR-COLLISION: agent_draft_provenance.correlation_id is now
+    # UNIQUE) — a real, distinct "generation" per row, not one id reused
+    # across versions.
+    correlation_id = correlation_id or f"corr-contract-{uuid.uuid4().hex[:8]}"
     with conn.cursor() as cur:
         cur.execute(
             """
