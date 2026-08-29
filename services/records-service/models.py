@@ -1,6 +1,6 @@
 """ORM models records-service touches. (Copy-paste per service — no shared lib yet, ADR 0001.)"""
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy import JSON, Boolean, Column, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.sql import func
 
 from db import Base
@@ -232,6 +232,44 @@ class AgentDraftCitation(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("draft_id", "citation_id", name="agent_draft_citation_unique"),)
+
+
+class AgentLifecycleEvent(Base):
+    """One stage of one draft's durable lifecycle trace (migration 036,
+    W10 Final Stage 4) — see services/records-service/agent_lifecycle.py,
+    the only writer/reader.
+
+    Replaces three separate, per-request, in-memory-only TraceRecorder
+    instances (generation, review, display) with one persisted stream keyed
+    by correlation_id. `sequence` is assigned by a database trigger, never
+    supplied here — see migration 036 for why (concurrency-safe, monotonic
+    ordering per correlation_id). `attributes` only ever holds whatever
+    `libs.agent_provenance.assert_safe` already allowed through: never a
+    patient/user id, an actor name, a prompt, a response, draft/retrieved
+    text, a credential, or a raw provider error.
+    """
+
+    __tablename__ = "agent_lifecycle_events"
+
+    id = Column(Integer, primary_key=True)
+    correlation_id = Column(Text, nullable=False)
+    # default=0 is a client-side placeholder ONLY — real Postgres's BEFORE
+    # INSERT trigger (migration 036) unconditionally overwrites it with the
+    # correctly computed value regardless of what's sent. It exists so a
+    # dialect with no trigger support (SQLite, in unit tests) still
+    # satisfies NOT NULL; those tests never depend on the real value.
+    sequence = Column(Integer, nullable=False, default=0)
+    stage = Column(Text, nullable=False)
+    # Real JSONB in Postgres; generic JSON elsewhere (SQLite in unit tests
+    # — this table's real DDL, including the Postgres-only trigger
+    # functions, is only ever exercised against a real Postgres in
+    # integration tests).
+    attributes = Column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, server_default="{}")
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("correlation_id", "sequence", name="agent_lifecycle_events_correlation_sequence_unique"),
+    )
 
 
 class MessageThread(Base):

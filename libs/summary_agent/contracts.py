@@ -104,7 +104,14 @@ def parse_draft(payload: str) -> StructuredDraft:
 
 @dataclass
 class AgentRunResult:
-    """One run: the draft, where it came from, and the evidence behind it."""
+    """One run: the draft, where it came from, and the evidence behind it.
+
+    `termination_reason` ("answered" | "max_turns" | "provider_error") is
+    W10 Final Stage 4's truthful classification: a bounded LangGraph
+    recursion-limit exception (GraphRecursionError) is loop exhaustion, not
+    a provider outage, and must never share `provider_error`'s bucket even
+    though both currently produce the same deterministic fallback draft.
+    """
 
     draft: StructuredDraft
     label: ProvenanceLabel
@@ -112,4 +119,5 @@ class AgentRunResult:
     model_id: Optional[str] = None
     prompt_version: Optional[str] = None
     provider_error_type: Optional[str] = None
+    termination_reason: Optional[str] = None
     citations: list = field(default_factory=list)

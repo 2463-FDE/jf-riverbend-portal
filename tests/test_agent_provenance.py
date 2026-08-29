@@ -45,7 +45,7 @@ def _full(t):
     # that used None here (as this once did) would model a state the real
     # schema now rejects outright.
     t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])
-    t.review(decision="approved", draft_version=1, decided_by_user_id=13)
+    t.review(decision="approved", draft_version=1)
     t.display(draft_version=1, label=ProvenanceLabel.REAL)
     return t
 
@@ -100,7 +100,7 @@ def test_assert_safe_allows_the_permitted_metadata():
         "categories": ["lab"], "status": "approved", "correlation_id": "corr-1",
         "created_at": "2026-09-02T00:00:00Z", "model_id": "model-x",
         "provenance_label": "real", "validation_code": "UNSUPPORTED_CLAIM",
-        "draft_version": 1, "decided_by_user_id": 13, "error_type": "ClientError",
+        "draft_version": 1, "error_type": "ClientError",
     })
 
 
@@ -108,7 +108,7 @@ def test_forbidden_keys_does_not_accidentally_ban_permitted_names():
     permitted = {
         "source_id", "source_version", "citation_ids", "categories", "status",
         "correlation_id", "model_id", "provenance_label", "validation_code",
-        "draft_version", "decided_by_user_id", "error_type", "tool_name",
+        "draft_version", "error_type", "tool_name",
         "document_count", "excluded_count", "latency_ms", "actor_role",
     }
     assert not (permitted & FORBIDDEN_KEYS)
@@ -173,7 +173,7 @@ def _final_decision_through_display(t, *, turn: int):
     t.draft(draft_version=1, label=ProvenanceLabel.REAL, model_id="model-x",
             prompt_version="v3", citation_ids=["c1"])
     t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])
-    t.review(decision="approved", draft_version=1, decided_by_user_id=13)
+    t.review(decision="approved", draft_version=1)
     t.display(draft_version=1, label=ProvenanceLabel.REAL)
     return t
 
@@ -281,7 +281,7 @@ def test_post_draft_agent_activity_is_rejected(loop_stage, call):
 
 @pytest.mark.parametrize("repeated_stage,call", [
     ("validation", lambda t: t.validation(passed=True, validation_code="PASS", citation_ids=["c1"])),
-    ("review", lambda t: t.review(decision="approved", draft_version=1, decided_by_user_id=13)),
+    ("review", lambda t: t.review(decision="approved", draft_version=1)),
     ("display", lambda t: t.display(draft_version=1, label=ProvenanceLabel.REAL)),
 ])
 def test_a_terminal_stage_repeating_is_rejected(repeated_stage, call):
@@ -346,13 +346,24 @@ def test_provider_call_accepts_an_error_TYPE_but_not_a_message():
         t.record(Stage.PROVIDER_CALL, error_message="No module named 'boto3'")
 
 
-def test_review_records_a_user_id_never_a_name():
+def test_review_records_only_a_decision_category_and_version_never_who_decided():
+    """W10 Final Stage 4 (tightened): review() used to accept
+    decided_by_user_id on the theory that an id is a reference, not an
+    identifier — the client's persisted-metadata allowlist has no user/
+    patient id in it at all. Who decided is audit_logs' job, not this
+    trace's."""
     t = _rec()
-    t.review(decision="approved", draft_version=2, decided_by_user_id=13)
+    t.review(decision="approved", draft_version=2)
 
-    assert t.events[-1].attributes["decided_by_user_id"] == 13
+    assert t.events[-1].attributes == {"decision": "approved", "draft_version": 2}
+    with pytest.raises(TypeError):
+        t.review(decision="approved", draft_version=2, decided_by_user_id=13)
     with pytest.raises(ForbiddenPayload):
         t.record(Stage.REVIEW, name="Dr. Grace Kim")
+    with pytest.raises(ForbiddenPayload):
+        t.record(Stage.REVIEW, decided_by_user_id=13)
+    with pytest.raises(ForbiddenPayload):
+        t.record(Stage.REVIEW, user_id=13)
 
 
 # --- the three labels ------------------------------------------------------- #

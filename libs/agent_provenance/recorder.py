@@ -132,6 +132,18 @@ FORBIDDEN_KEYS = frozenset(
         "name", "first_name", "last_name", "full_name", "patient_name",
         "address", "street_address", "city", "zip_code", "phone", "email",
         "notes", "clinical_notes", "diagnosis", "allergies", "medications",
+        # W10 Final Stage 4 (tightened): any account/patient identifier, even
+        # as a bare reference id — the allowlist this trace persists against
+        # is stage/sequence/timestamps/correlation id/source-version-citation
+        # references/categories/bounded counts/provenance label/model-prompt
+        # version/validation code/decision category/display version, and
+        # none of those is a person or a chart. `review()` used to accept
+        # `decided_by_user_id` on the theory that an id is a reference, not
+        # an identifier — audit_logs is the system of record for "who did
+        # this," not this trace.
+        "user_id", "patient_id", "actor_id", "decided_by_user_id",
+        "reviewed_by", "requested_by", "created_by", "actor_name", "username",
+        "account_id", "session_id",
         # credentials
         "password", "token", "api_key", "apikey", "secret", "authorization",
         "aws_access_key_id", "aws_secret_access_key", "session_token",
@@ -260,13 +272,16 @@ class TraceRecorder:
                            validation_code=validation_code,
                            citation_ids=list(citation_ids))
 
-    def review(self, *, decision: str, draft_version: int,
-               decided_by_user_id: Optional[int]) -> StageEvent:
-        """A user id, never a username or a name — an id is a reference, a name
-        is an identifier."""
-        return self.record(Stage.REVIEW, decision=decision,
-                           draft_version=draft_version,
-                           decided_by_user_id=decided_by_user_id)
+    def review(self, *, decision: str, draft_version: int) -> StageEvent:
+        """W10 Final Stage 4 (tightened): a decision CATEGORY and the version
+        it applies to — never who decided. `decided_by_user_id` used to be
+        accepted here on the theory that "an id is a reference, not an
+        identifier"; the client's allowlist for what may persist in this
+        trace does not include user/patient ids at all, reference or not —
+        who reviewed a draft is already recorded durably in `audit_logs`
+        (the actor-accountability system), which is what that fact belongs
+        to. This trace answers what happened to the draft, not who did it."""
+        return self.record(Stage.REVIEW, decision=decision, draft_version=draft_version)
 
     def display(self, *, draft_version: int, label: ProvenanceLabel) -> StageEvent:
         return self.record(Stage.DISPLAY, draft_version=draft_version,

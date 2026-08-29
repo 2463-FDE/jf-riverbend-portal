@@ -263,10 +263,13 @@ def decide(db: Session, draft: AgentDraftProvenance, *, approve: bool,
         draft.correlation_id, draft.version, approve, reviewed_by,
     )
     if trace is not None:
+        # W10 Final Stage 4 (tightened): who reviewed is already durable in
+        # audit_logs (see the caller's own _write_audit call) — this trace
+        # persists only the decision category and which version it applies
+        # to, never a user id.
         trace.review(
             decision=APPROVED if approve else REJECTED,
             draft_version=draft.version,
-            decided_by_user_id=reviewed_by,
         )
     return draft
 

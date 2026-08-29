@@ -299,3 +299,52 @@ def test_a_sentence_reusing_the_computed_number_is_refused(db):
     assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE
     assert outcome.draft.status == drafts.REFUSED
     assert drafts.approved_draft(db, PATIENT) is None
+
+
+# --- W10 Final Stage 4: truthful loop-exhaustion classification ------------
+
+
+def test_bounded_loop_exhaustion_is_classified_as_max_turns_not_provider_error():
+    """A model that always requests a tool and never finalizes genuinely
+    exhausts the real create_agent loop's recursion_limit (GraphRecursionError
+    from langgraph itself, not simulated) — this must be reported as bounded
+    loop exhaustion, never lumped in with an actual provider failure."""
+    from langchain_core.messages import AIMessage
+
+    from libs.summary_agent.runtime import run_summary_agent
+
+    # Each call needs its own tool_call id — ScriptedChatModel replays a
+    # fixed script, and langgraph's own bookkeeping keys tool results by
+    # that id, so reusing one across turns raises a KeyError of ITS OWN
+    # (a scripting artifact) before recursion_limit is ever reached.
+    endless_tool_calls = [
+        AIMessage(content="", tool_calls=[{
+            "name": "retrieve_approved_documents", "args": {"category": ""}, "id": f"call_{i}",
+        }])
+        for i in range(20)
+    ]
+    trace = TraceRecorder("corr-max-turns")
+    model = ScriptedChatModel(endless_tool_calls)  # always requests a tool; never finalizes
+
+    result = run_summary_agent(
+        audience="patient", actor_role="clinician", trace=trace, model=model, max_turns=2,
+    )
+
+    assert result.termination_reason == "max_turns"
+    assert result.model_id is None
+    assert result.label == ProvenanceLabel.FALLBACK
+    assert result.provider_error_type == "GraphRecursionError"
+
+
+def test_a_genuine_provider_failure_is_still_classified_as_provider_error():
+    from libs.summary_agent.runtime import run_summary_agent
+
+    trace = TraceRecorder("corr-provider-error")
+    model = ScriptedChatModel([], raises=RuntimeError("bedrock is down"))
+
+    result = run_summary_agent(
+        audience="patient", actor_role="clinician", trace=trace, model=model,
+    )
+
+    assert result.termination_reason == "provider_error"
+    assert result.model_id is None

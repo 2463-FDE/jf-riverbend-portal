@@ -628,6 +628,61 @@ CREATE INDEX IF NOT EXISTS agent_draft_citation_draft_idx
 CREATE INDEX IF NOT EXISTS agent_draft_citation_source_idx
     ON agent_draft_citation (source_id, source_version);
 
+-- Durable, append-only lifecycle event stream (036) — replaces three
+-- separate, per-request, in-memory-only TraceRecorder instances (generation,
+-- review, display) with one persisted stream keyed by correlation_id.
+-- attributes only ever holds what libs/agent_provenance/recorder.py's
+-- FORBIDDEN_KEYS guard already allows — see that migration for the full
+-- rationale, the sequence-assignment trigger, and the append-only guard.
+CREATE TABLE IF NOT EXISTS agent_lifecycle_events (
+    id             BIGSERIAL PRIMARY KEY,
+    correlation_id TEXT NOT NULL,
+    sequence       INTEGER NOT NULL,          -- assigned by trigger, never application-supplied
+    stage          TEXT NOT NULL
+                   CHECK (stage IN ('request', 'provider_call', 'agent_decision',
+                                    'retrieval', 'draft', 'validation', 'review',
+                                    'display')),
+    attributes     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_sequence_unique
+    ON agent_lifecycle_events (correlation_id, sequence);
+CREATE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_id_idx
+    ON agent_lifecycle_events (correlation_id);
+
+CREATE OR REPLACE FUNCTION agent_lifecycle_events_assign_sequence() RETURNS TRIGGER AS $$
+DECLARE
+    next_seq integer;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('agent_lifecycle_events:' || NEW.correlation_id));
+    SELECT COALESCE(MAX(sequence), 0) + 1 INTO next_seq
+        FROM agent_lifecycle_events WHERE correlation_id = NEW.correlation_id;
+    NEW.sequence := next_seq;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS agent_lifecycle_events_sequence ON agent_lifecycle_events;
+CREATE TRIGGER agent_lifecycle_events_sequence
+    BEFORE INSERT ON agent_lifecycle_events
+    FOR EACH ROW EXECUTE FUNCTION agent_lifecycle_events_assign_sequence();
+
+CREATE OR REPLACE FUNCTION agent_lifecycle_events_reject_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'agent_lifecycle_events is append-only: % is not permitted', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS agent_lifecycle_events_no_update ON agent_lifecycle_events;
+CREATE TRIGGER agent_lifecycle_events_no_update
+    BEFORE UPDATE ON agent_lifecycle_events
+    FOR EACH ROW EXECUTE FUNCTION agent_lifecycle_events_reject_mutation();
+
+DROP TRIGGER IF EXISTS agent_lifecycle_events_no_delete ON agent_lifecycle_events;
+CREATE TRIGGER agent_lifecycle_events_no_delete
+    BEFORE DELETE ON agent_lifecycle_events
+    FOR EACH ROW EXECUTE FUNCTION agent_lifecycle_events_reject_mutation();
+
 -- IDENTITY, EVIDENCE AND LIFECYCLE GUARD. A CHECK constraint only sees one
 -- row's final state; these guarantees each compare OLD to NEW, or must
 -- run on DELETE (which no CHECK ever sees), so they must be a trigger:

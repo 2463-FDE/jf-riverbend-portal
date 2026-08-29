@@ -55,6 +55,7 @@ from patient_access_gate import (
     parse_user_id,
 )
 import agent_drafts
+import agent_lifecycle
 import messaging
 import patient_summary
 import policy_navigator_path
@@ -1507,10 +1508,15 @@ def decide_agent_draft(
         raise HTTPException(status_code=404, detail="no such draft")
 
     try:
+        review_trace = TraceRecorder(draft.correlation_id)  # the draft's own id, never a new one
         agent_drafts.decide(
             db, draft, approve=req.decision == agent_drafts.APPROVED, reviewed_by=actor_id,
-            trace=TraceRecorder(draft.correlation_id),  # the draft's own id, never a new one
+            trace=review_trace,
         )
+        # W10 Final Stage 4: append the review stage to the same durable
+        # lifecycle stream generation already wrote to — same transaction
+        # as the decision and audit rows below.
+        agent_lifecycle.persist(db, draft.correlation_id, review_trace.events)
         _write_audit(
             db, actor=_actor_label(x_actor_name, x_actor_id),
             message=(f"agent_draft_decide draft_id={draft.id} version={draft.version} "
@@ -1558,11 +1564,18 @@ def get_agent_summary(
         # Display is the eighth stage, recorded under the draft's OWN
         # correlation id — which is only knowable after the row is read, so the
         # stage is emitted here rather than passed into the read above.
-        TraceRecorder(draft.correlation_id).display(
+        display_trace = TraceRecorder(draft.correlation_id)
+        display_trace.display(
             draft_version=draft.version, label=ProvenanceLabel(draft.provenance_label),
         )
+        # W10 Final Stage 4: append to the same durable lifecycle stream
+        # generation/review already wrote to. This route was previously
+        # read-only; it now commits this one append.
+        agent_lifecycle.persist(db, draft.correlation_id, display_trace.events)
+        db.commit()
         detail = _draft_out(db, draft)
     except SQLAlchemyError as exc:
+        db.rollback()
         log.error("agent summary: unreadable for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="temporarily unavailable")
 
