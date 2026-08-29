@@ -101,9 +101,7 @@ _draft_correlation_ids = itertools.count(1)
 
 
 def _draft(db, text, *, patient_id=PATIENT, passed=True):
-    # Each call is its own "generation" — a distinct, server-generated
-    # correlation_id every time (migration 036, review fix
-    # ALC-CORR-COLLISION), never one hardcoded id reused across versions.
+    # Distinct correlation_id per call (migration 036 UNIQUE constraint).
     row = drafts.create_draft(
         db, patient_id=patient_id, generated_text=text,
         correlation_id=f"corr-portal-{next(_draft_correlation_ids)}",
@@ -303,17 +301,12 @@ def test_a_clinician_ungranted_for_a_patient_cannot_reach_its_draft_even_if_gene
 
 
 def test_the_same_x_request_id_never_becomes_two_drafts_shared_lifecycle_id(client):
-    """ALC-CORR-COLLISION: a caller-supplied X-Request-Id must never become
-    the draft's lifecycle correlation_id — it stays request/audit metadata
-    only. Two generations sharing one X-Request-Id must still get two
-    distinct, server-generated lifecycle ids, and each must reconstruct as
-    its own independent event stream."""
+    """ALC-CORR-COLLISION: two generations sharing one caller X-Request-Id
+    must still get distinct, server-generated lifecycle ids, each
+    reconstructing as its own independent event stream."""
     api, db = client
     same_request_id = {**CLINICIAN, "X-Request-Id": "shared-req-id-reused-by-a-caller"}
 
-    # Two SEPARATE generations for the same patient (a regeneration), both
-    # asserting the identical caller-supplied X-Request-Id — the collision
-    # risk this finding is about has nothing to do with which patient.
     first = api.post(f"/patients/{PATIENT}/agent-draft", headers=same_request_id)
     second = api.post(f"/patients/{PATIENT}/agent-draft", headers=same_request_id)
     assert first.status_code == 201 and second.status_code == 201
@@ -329,8 +322,6 @@ def test_the_same_x_request_id_never_becomes_two_drafts_shared_lifecycle_id(clie
     trace2 = app_mod.agent_lifecycle.reconstruct(db, row2.correlation_id)
     assert trace1.events and trace2.events, "both generations must have persisted a real stream"
 
-    # Independent: the total persisted row count is exactly the sum of the
-    # two streams — neither leaked an event into the other's correlation_id.
     total_rows = db.query(models.AgentLifecycleEvent).filter(
         models.AgentLifecycleEvent.correlation_id.in_([row1.correlation_id, row2.correlation_id])
     ).count()
@@ -339,15 +330,11 @@ def test_the_same_x_request_id_never_becomes_two_drafts_shared_lifecycle_id(clie
 
 def test_refreshing_an_approved_summary_appends_exactly_one_display_event(client):
     """ALC-DISPLAY-REPEAT: two sequential approved-summary reads must both
-    succeed and return the same version, but the durable stream may only
-    ever record ONE display event for that draft's lifecycle.
-
-    Seeds a real, full-shape generation trace directly (the actual route
-    falls back — no Bedrock model is configured in this test environment —
-    and a fallback trace is a genuinely shorter shape not held to
-    is_acceptable(), per libs.agent_provenance's own module docstring) so
-    the reconstructed lifecycle can be checked against the real grammar
-    end to end, the same way a real generation's would be."""
+    succeed and return the same version, but record only ONE display event.
+    Seeds a real, full-shape trace directly (the route itself falls back
+    with no Bedrock configured, and a fallback trace is a shorter shape not
+    held to is_acceptable()) so the reconstructed lifecycle can be checked
+    against the real grammar end to end."""
     from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 
     api, db = client
@@ -382,7 +369,6 @@ def test_refreshing_an_approved_summary_appends_exactly_one_display_event(client
     trace_out = app_mod.agent_lifecycle.reconstruct(db, correlation_id)
     display_events = [e for e in trace_out.events if e.stage.value == "display"]
     assert len(display_events) == 1, "exactly one display row, no matter how many times it was read"
-
     assert trace_out.is_complete()
     assert trace_out.is_ordered()
     assert trace_out.is_grounded()

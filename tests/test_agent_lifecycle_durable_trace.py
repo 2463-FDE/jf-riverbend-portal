@@ -1,12 +1,9 @@
 """W10 Final Stage 4 — services/records-service/agent_lifecycle.py, the
-durable append-only sink replacing three separate, per-request, in-memory-
-only TraceRecorder instances (generation, review, display).
-
-Real Postgres concurrency/append-only enforcement (migration 036's
-trigger) is proved separately, against a live database, in
-tests/integration/test_agent_lifecycle_events_migration.py. This file is
-the fast, DB-less (SQLite) unit coverage of persist()/reconstruct()'s own
-contract and the verifier script's reporting logic.
+durable append-only sink replacing three separate per-request in-memory
+TraceRecorder instances. Fast DB-less (SQLite) coverage of
+persist()/reconstruct() and the verifier's reporting logic; real Postgres
+trigger enforcement is proved in
+tests/integration/test_agent_lifecycle_events_migration.py.
 """
 import pytest
 from sqlalchemy import create_engine
@@ -53,7 +50,6 @@ def test_persisting_and_reconstructing_round_trips_the_same_shape(db):
     db.commit()
 
     rebuilt = agent_lifecycle.reconstruct(db, trace.correlation_id)
-
     assert [e.stage for e in rebuilt.events] == [e.stage for e in trace.events]
     assert [e.attributes for e in rebuilt.events] == [e.attributes for e in trace.events]
     assert rebuilt.is_ordered()
@@ -61,9 +57,8 @@ def test_persisting_and_reconstructing_round_trips_the_same_shape(db):
 
 
 def test_review_and_display_append_to_the_same_persisted_stream_across_calls(db):
-    """The whole point: generation, review, and display happen in three
-    SEPARATE calls (real routes: three separate HTTP requests) but must
-    accumulate into ONE reconstructible stream."""
+    """Generation, review, and display happen in three separate HTTP
+    requests but must accumulate into one reconstructible stream."""
     generation = _full_trace("corr-shared")
     agent_lifecycle.persist(db, "corr-shared", generation.events)
     db.commit()
@@ -79,7 +74,6 @@ def test_review_and_display_append_to_the_same_persisted_stream_across_calls(db)
     db.commit()
 
     rebuilt = agent_lifecycle.reconstruct(db, "corr-shared")
-
     assert rebuilt.is_complete()
     assert rebuilt.is_ordered()
     assert rebuilt.is_grounded()
@@ -112,8 +106,7 @@ def test_sequence_continues_across_separate_correlation_ids_independently(db):
 
 
 def test_persist_re_checks_the_safety_guard_and_never_reaches_the_database(db):
-    """Defense in depth: persist() must not trust that every StageEvent it is
-    handed was actually built through the guarded TraceRecorder API."""
+    """persist() must not trust that a StageEvent was built via TraceRecorder."""
     forbidden_event = StageEvent(stage=Stage.REVIEW, attributes={"name": "Dr. Grace Kim"})
 
     with pytest.raises(ForbiddenPayload):
@@ -123,10 +116,8 @@ def test_persist_re_checks_the_safety_guard_and_never_reaches_the_database(db):
 
 
 def test_persist_rejects_a_manually_constructed_event_with_a_nested_forbidden_key(db):
-    """ALC-NESTED-GUARD, at the persist() boundary specifically: a StageEvent
-    built by hand (bypassing TraceRecorder's own guarded wrappers) with a
-    forbidden key nested inside a dict value must still be caught before
-    any database write."""
+    """ALC-NESTED-GUARD at the persist() boundary: a hand-built StageEvent
+    with a nested forbidden key must be caught before any DB write."""
     forbidden_event = StageEvent(
         stage=Stage.REQUEST, attributes={"metadata": {"user_id": 13}},
     )
@@ -146,7 +137,6 @@ def test_report_names_the_full_grounded_path_as_acceptable():
     trace.display(draft_version=1, label=ProvenanceLabel.REAL)
 
     output = verify.report(trace)
-
     assert "is_complete: True" in output
     assert "is_ordered: True" in output
     assert "is_grounded: True" in output
@@ -159,7 +149,6 @@ def test_report_never_prints_attribute_values_only_stage_names():
     trace.provider_call(label=ProvenanceLabel.REAL, model_id="a-secret-looking-model-id-xyz")
 
     output = verify.report(trace)
-
     assert "a-secret-looking-model-id-xyz" not in output
     assert "provider_call" in output
 
@@ -171,6 +160,5 @@ def test_report_names_a_fallback_shape_as_such_not_as_a_failed_acceptable_trace(
     trace.display(draft_version=1, label=ProvenanceLabel.FALLBACK)
 
     output = verify.report(trace)
-
     assert "is_acceptable (real/grounded path only): False" in output
     assert "genuinely shorter shape" in output

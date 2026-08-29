@@ -75,19 +75,14 @@ def test_the_guard_is_case_insensitive():
 # --- ALC-NESTED-GUARD: the guard recurses into nested structures -----------
 
 
-def test_a_forbidden_key_nested_inside_a_mapping_raises():
+@pytest.mark.parametrize("stage,kwargs", [
+    (Stage.REQUEST, {"metadata": {"user_id": 13}}),
+    (Stage.RETRIEVAL, {"sources": [{"citation_id": "c1"}, {"name": "Jane Doe"}]}),
+    (Stage.REQUEST, {"a": {"b": {"ssn": "123-45-6789"}}}),
+])
+def test_a_forbidden_key_nested_at_any_depth_raises(stage, kwargs):
     with pytest.raises(ForbiddenPayload):
-        _rec().record(Stage.REQUEST, metadata={"user_id": 13})
-
-
-def test_a_forbidden_key_inside_a_list_of_mappings_raises():
-    with pytest.raises(ForbiddenPayload):
-        _rec().record(Stage.RETRIEVAL, sources=[{"citation_id": "c1"}, {"name": "Jane Doe"}])
-
-
-def test_a_forbidden_key_nested_two_levels_deep_raises():
-    with pytest.raises(ForbiddenPayload):
-        _rec().record(Stage.REQUEST, a={"b": {"ssn": "123-45-6789"}})
+        _rec().record(stage, **kwargs)
 
 
 def test_the_nested_guard_never_reveals_the_forbidden_value():
@@ -98,9 +93,7 @@ def test_the_nested_guard_never_reveals_the_forbidden_value():
 
 
 def test_valid_nested_citation_and_category_metadata_is_still_accepted():
-    """The recursive guard must not become so broad that ordinary nested
-    metadata (a list of citation dicts, a nested category breakdown) is
-    unusable."""
+    """The recursive guard must not make ordinary nested metadata unusable."""
     event = _rec().record(
         Stage.RETRIEVAL,
         sources=[{"citation_id": "c1", "category": "lab"}, {"citation_id": "c2", "category": "vitals"}],
@@ -386,11 +379,8 @@ def test_provider_call_accepts_an_error_TYPE_but_not_a_message():
 
 
 def test_review_records_only_a_decision_category_and_version_never_who_decided():
-    """W10 Final Stage 4 (tightened): review() used to accept
-    decided_by_user_id on the theory that an id is a reference, not an
-    identifier — the client's persisted-metadata allowlist has no user/
-    patient id in it at all. Who decided is audit_logs' job, not this
-    trace's."""
+    """review() no longer accepts decided_by_user_id — who decided is
+    audit_logs' job, not this trace's."""
     t = _rec()
     t.review(decision="approved", draft_version=2)
 

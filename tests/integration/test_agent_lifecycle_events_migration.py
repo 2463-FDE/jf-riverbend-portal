@@ -1,22 +1,7 @@
-"""Integration test — requires a real Postgres (`make up`, or the CI
-concurrency job's disposable postgres-only container).
-
-W10 Final Stage 4: proves migration 036's actual triggers — not just the
-application-level agent_lifecycle.py wrapper (see
-tests/test_agent_lifecycle_durable_trace.py for that DB-less coverage) —
-under a real database: sequence is assigned server-side (a client-supplied
-value is silently overridden), concurrent inserts for the SAME
-correlation_id serialize correctly via the transaction-scoped advisory
-lock (no duplicate or out-of-order sequence numbers), and UPDATE/DELETE are
-rejected outright, for both the runtime role and the table owner (mirrors
-test_audit_logs_append_only.py's own proof for audit_logs).
-
-Connects directly to Postgres, same pattern as
-tests/integration/test_agent_draft_provenance_contract.py — every row this
-file creates is a fresh, uuid-suffixed throwaway correlation_id, never
-touching seeded/shared data.
-
-Run with:  pytest -m integration tests/integration/test_agent_lifecycle_events_migration.py
+"""Integration test — requires a real Postgres (`make up`). Proves
+migration 036's actual triggers: server-side sequence assignment,
+advisory-lock serialization, append-only enforcement for both the runtime
+role and table owner, and the display partial-unique-index invariant.
 """
 import os
 import threading
@@ -38,9 +23,7 @@ _DB_ADMIN_USER = os.getenv("DB_ADMIN_USER", "riverbend_admin")
 
 
 def _connect(user=_DB_USER, password=_DB_PASSWORD):
-    conn = psycopg2.connect(
-        host=_DB_HOST, port=_DB_PORT, dbname=_DB_NAME, user=user, password=password,
-    )
+    conn = psycopg2.connect(host=_DB_HOST, port=_DB_PORT, dbname=_DB_NAME, user=user, password=password)
     conn.autocommit = False
     return conn
 
@@ -67,6 +50,14 @@ def _insert(conn, correlation_id, stage, attributes_json="{}", client_sequence=9
         return cur.fetchone()[0]
 
 
+def _run_pair(fn):
+    threads = [threading.Thread(target=fn), threading.Thread(target=fn)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+
 def test_sequence_is_assigned_server_side_ignoring_the_client_value(conn):
     correlation_id = _correlation_id()
     first = _insert(conn, correlation_id, "request", client_sequence=999)
@@ -79,14 +70,13 @@ def test_sequence_is_assigned_server_side_ignoring_the_client_value(conn):
 def test_two_concurrent_inserts_for_the_same_correlation_id_get_distinct_sequential_numbers():
     correlation_id = _correlation_id()
     barrier = threading.Barrier(2)
-    results = []
-    errors = []
+    results, errors, stages = [], [], iter(["request", "draft"])
 
-    def _do_insert(stage):
+    def _do_insert():
         conn = _connect()
         try:
             barrier.wait(timeout=5)
-            seq = _insert(conn, correlation_id, stage)
+            seq = _insert(conn, correlation_id, next(stages))
             conn.commit()
             results.append(seq)
         except Exception as exc:  # pragma: no cover - failure path asserted below
@@ -94,29 +84,15 @@ def test_two_concurrent_inserts_for_the_same_correlation_id_get_distinct_sequent
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=_do_insert, args=("request",))
-    t2 = threading.Thread(target=_do_insert, args=("draft",))
-    t1.start()
-    t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
-
+    _run_pair(_do_insert)
     assert not errors, f"concurrent insert raised: {errors}"
     assert sorted(results) == [1, 2], "both must succeed with distinct, sequential numbers"
 
-    # cleanup: append-only means we cannot delete these rows even as admin —
-    # they are fresh, uuid-suffixed throwaway ids, same convention as
-    # test_agent_draft_provenance_contract.py's own uncommented rows.
-
 
 def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
-    """Review fix ALC-DISPLAY-REPEAT, at the database boundary: two
-    genuinely simultaneous attempts to record a 'display' event for the
-    SAME correlation_id must result in exactly one stored display row —
-    the partial unique index (migration 036) is what makes this true
-    regardless of application-level idempotency handling — and sequence
-    assignment for the loser's failed attempt must not corrupt ordering
-    for whichever rows already exist."""
+    """ALC-DISPLAY-REPEAT at the DB boundary: two simultaneous 'display'
+    inserts for the same correlation_id must yield exactly one stored row,
+    with sequence ordering unbroken by the loser's failed attempt."""
     correlation_id = _correlation_id()
     _insert(conn, correlation_id, "request")
     conn.commit()
@@ -138,13 +114,7 @@ def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
         finally:
             c.close()
 
-    t1 = threading.Thread(target=_do_display_insert)
-    t2 = threading.Thread(target=_do_display_insert)
-    t1.start()
-    t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
-
+    _run_pair(_do_display_insert)
     assert len(outcomes) == 2
     successes = [o for o in outcomes if o[0] == "ok"]
     conflicts = [o for o in outcomes if o[0] == "conflict"]
@@ -168,34 +138,22 @@ def test_concurrent_duplicate_display_appends_yield_one_stored_display(conn):
     )
 
 
-def test_update_is_rejected_for_the_runtime_role(conn):
+@pytest.mark.parametrize("sql", [
+    "UPDATE agent_lifecycle_events SET stage = 'display' WHERE correlation_id = %s",
+    "DELETE FROM agent_lifecycle_events WHERE correlation_id = %s",
+])
+def test_mutation_is_rejected_for_the_runtime_role(conn, sql):
     correlation_id = _correlation_id()
     _insert(conn, correlation_id, "request")
     conn.commit()
 
     with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
         with conn.cursor() as cur:
-            cur.execute("UPDATE agent_lifecycle_events SET stage = 'display' WHERE correlation_id = %s",
-                        (correlation_id,))
-    conn.rollback()
-
-
-def test_delete_is_rejected_for_the_runtime_role(conn):
-    correlation_id = _correlation_id()
-    _insert(conn, correlation_id, "request")
-    conn.commit()
-
-    with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM agent_lifecycle_events WHERE correlation_id = %s", (correlation_id,))
+            cur.execute(sql, (correlation_id,))
     conn.rollback()
 
 
 def test_update_is_rejected_even_for_the_table_owner_admin_role():
-    """Mirrors test_audit_logs_append_only.py's own proof: the trigger fires
-    regardless of caller, including the admin role that owns the table —
-    only an explicit ALTER TABLE ... DISABLE TRIGGER (a schema change, not
-    an ordinary DML statement) could bypass it."""
     admin_password = os.environ.get("DB_ADMIN_PASSWORD")
     if not admin_password:
         pytest.skip("DB_ADMIN_PASSWORD not set")

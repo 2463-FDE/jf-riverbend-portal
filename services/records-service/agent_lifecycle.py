@@ -1,20 +1,9 @@
 """Durable, append-only lifecycle event stream for the agent draft path
-(W10 Final Stage 4, migration 036).
-
-Summary generation, clinician review, and approved display each used to
-instantiate their OWN in-memory `libs.agent_provenance.TraceRecorder`,
-scoped to a single HTTP request, and discard it when that request ended —
-three separate, temporally disjoint objects, none of them ever persisted.
-This module is the caller-side durable sink that library's own docstring
-anticipated ("wiring it to... `agent_draft_provenance` is the caller's job,
-and keeping it pure is what lets the guard be tested without
-infrastructure"): `TraceRecorder` itself stays exactly as it was.
-
-Every write re-checks `assert_safe` as a second, independent gate before
-anything reaches the database — never trusting that a caller only ever
-constructs events through the guarded recorder. The sequence/append-only
-guarantees live in the database itself (migration 036's trigger); this
-module never computes or supplies a sequence number.
+(migration 036). Generation, review, and display each used to build their
+OWN in-memory `libs.agent_provenance.TraceRecorder`, discarded per
+request; this module is the caller-side durable sink. Every write
+re-checks `assert_safe` independently; sequence/append-only guarantees
+live in the database trigger, never here.
 """
 from typing import Iterable, List
 
@@ -31,25 +20,12 @@ _TRACER_NAME = "records-service.agent_lifecycle"
 
 def persist(db: Session, correlation_id: str, events: Iterable[StageEvent]) -> None:
     """Append already-recorded StageEvents to the durable table, in the SAME
-    transaction as whatever else the caller is doing — commits or rolls
-    back together with the draft/validation/review write it describes.
-
-    The `sequence` computed here is a plain, non-locking MAX+N read — a
-    reasonable value in the common case, but NOT what makes concurrent
-    appends for the same correlation_id safe. Migration 036's BEFORE INSERT
-    trigger recomputes and overwrites it unconditionally, under a
-    transaction-scoped advisory lock keyed on correlation_id; that trigger,
-    not this function, is the actual concurrency guarantee. This read only
-    exists so dialects without trigger support (SQLite, in unit tests —
-    this table's Postgres-specific trigger is only ever exercised against a
-    real Postgres in integration tests) still get a valid, unique value.
-
-    Also emits the same allowlisted attributes through the existing
-    OpenTelemetry seam (libs.tracing), best-effort — see that module's own
-    "degrades to no-op on any failure" contract. This is NOT completion
-    evidence: the durable rows just written are. Losing the OTel emission
-    (SDK absent, exporter down) must never affect what was just persisted.
-    """
+    transaction as whatever else the caller is doing. The `sequence`
+    computed here is a plain non-locking MAX+N read — valid for dialects
+    without trigger support (SQLite), but not the concurrency guarantee:
+    migration 036's trigger recomputes it under an advisory lock in real
+    Postgres. Also emits through libs.tracing, best-effort — never
+    completion evidence."""
     events = list(events)
     if not events:
         return
@@ -68,15 +44,8 @@ def persist(db: Session, correlation_id: str, events: Iterable[StageEvent]) -> N
                 attributes=dict(event.attributes),
             )
             if event.stage is Stage.DISPLAY:
-                # Review fix ALC-DISPLAY-REPEAT: the partial unique index
-                # (migration 036) allows at most one display row per
-                # correlation_id. A concurrent second attempt to record the
-                # SAME terminal display (two patient reads racing) must
-                # succeed as a no-op — never surfaced as an error to a
-                # caller who only asked to read their own approved summary.
-                # A SAVEPOINT scopes the failure to this one insert; the
-                # rest of the caller's transaction (and any earlier events
-                # in this same batch) is untouched.
+                # ALC-DISPLAY-REPEAT (036's partial unique index): a
+                # concurrent duplicate display is a no-op, not an error.
                 try:
                     with db.begin_nested():
                         db.add(row)
@@ -90,12 +59,7 @@ def persist(db: Session, correlation_id: str, events: Iterable[StageEvent]) -> N
 
 
 def reconstruct(db: Session, correlation_id: str) -> TraceRecorder:
-    """Read-only: rebuild one draft's lifecycle, in persisted sequence
-    order, as a real TraceRecorder — the existing successful-path grammar
-    (is_ordered/is_complete/is_grounded/is_acceptable) applies to it
-    unchanged. A fallback/error lifecycle is a genuinely shorter shape (see
-    TraceRecorder's own module docstring) and is not expected to satisfy
-    is_acceptable()."""
+    """Read-only: rebuild one draft's lifecycle as a real TraceRecorder."""
     rows = db.execute(
         select(AgentLifecycleEvent)
         .where(AgentLifecycleEvent.correlation_id == correlation_id)

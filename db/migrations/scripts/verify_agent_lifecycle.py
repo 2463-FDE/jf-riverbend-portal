@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """Read-only diagnostic: reconstruct one draft's durable lifecycle trace
-(migration 036, W10 Final Stage 4) and report it against the existing
-successful-path grammar (`libs.agent_provenance.TraceRecorder`).
+(migration 036) and report it against the grammar in
+`libs.agent_provenance.TraceRecorder`.
 
 Usage:  DATABASE_URL=postgresql://... python3 verify_agent_lifecycle.py <correlation_id>
 
-Prints stage names, counts, and the grammar's own boolean verdicts
+Prints stage names, counts, and boolean verdicts
 (is_complete/is_ordered/is_grounded/is_acceptable) — never attribute
-VALUES. Those are already guaranteed metadata-only by
-libs.agent_provenance.assert_safe at the point every row was written, but
-this script stays conservative regardless, the same posture
-verify_audit_chain.py already takes for audit_logs.
-
-A fallback/error lifecycle is a genuinely SHORTER, different shape (see
-TraceRecorder's own module docstring) — reported as such, not scored
-against is_acceptable(), which only judges the real/grounded path.
+values, mirroring verify_audit_chain.py's posture for audit_logs.
 """
 import os
 import sys
@@ -60,9 +53,8 @@ def report(trace: TraceRecorder) -> str:
         lines.append(f"missing stages: {trace.missing_stages()}")
     if not trace.is_acceptable():
         lines.append(
-            "note: a fallback/error lifecycle is a genuinely shorter shape and is "
-            "not expected to satisfy is_acceptable() — judge it by whichever "
-            "minimal shape it actually needs (e.g. a labelled 'fallback' display)."
+            "note: a fallback/error lifecycle is a genuinely shorter shape "
+            "and is not expected to satisfy is_acceptable()."
         )
     return "\n".join(lines)
 

@@ -1429,13 +1429,10 @@ def generate_agent_draft(
         audit_action="agent_draft_generate",
     )
     actor_id = parse_user_id(x_actor_id)
-    # Review fix ALC-CORR-COLLISION: this is the draft's LIFECYCLE identity —
-    # always server-generated, never the caller-supplied X-Request-Id (that
-    # header stays request/audit correlation metadata only, passed to
-    # _authorize_or_deny/_write_audit above/below as before). A caller can
-    # send any X-Request-Id it likes, including the same one across
-    # unrelated requests; using it as the lifecycle key would let two
-    # different drafts' event streams collide into one.
+    # Review fix ALC-CORR-COLLISION: lifecycle identity is always server-
+    # generated, never the caller-supplied X-Request-Id (which stays
+    # request/audit metadata only) — a reused X-Request-Id must never let
+    # two drafts' event streams collide.
     correlation_id = new_correlation_id()
 
     try:
@@ -1520,9 +1517,7 @@ def decide_agent_draft(
             db, draft, approve=req.decision == agent_drafts.APPROVED, reviewed_by=actor_id,
             trace=review_trace,
         )
-        # W10 Final Stage 4: append the review stage to the same durable
-        # lifecycle stream generation already wrote to — same transaction
-        # as the decision and audit rows below.
+        # Append to the same durable stream generation already wrote to.
         agent_lifecycle.persist(db, draft.correlation_id, review_trace.events)
         _write_audit(
             db, actor=_actor_label(x_actor_name, x_actor_id),
@@ -1575,9 +1570,8 @@ def get_agent_summary(
         display_trace.display(
             draft_version=draft.version, label=ProvenanceLabel(draft.provenance_label),
         )
-        # W10 Final Stage 4: append to the same durable lifecycle stream
-        # generation/review already wrote to. This route was previously
-        # read-only; it now commits this one append.
+        # Append to the same durable stream generation/review already wrote
+        # to. This route was previously read-only; it now commits.
         agent_lifecycle.persist(db, draft.correlation_id, display_trace.events)
         db.commit()
         detail = _draft_out(db, draft)
@@ -1624,13 +1618,10 @@ def request_agent_summary(
         audit_action="agent_summary_request",
     )
     actor_id = parse_user_id(x_actor_id)
-    # Review fix ALC-CORR-COLLISION: this is the draft's LIFECYCLE identity —
-    # always server-generated, never the caller-supplied X-Request-Id (that
-    # header stays request/audit correlation metadata only, passed to
-    # _authorize_or_deny/_write_audit above/below as before). A caller can
-    # send any X-Request-Id it likes, including the same one across
-    # unrelated requests; using it as the lifecycle key would let two
-    # different drafts' event streams collide into one.
+    # Review fix ALC-CORR-COLLISION: lifecycle identity is always server-
+    # generated, never the caller-supplied X-Request-Id (which stays
+    # request/audit metadata only) — a reused X-Request-Id must never let
+    # two drafts' event streams collide.
     correlation_id = new_correlation_id()
 
     try:

@@ -198,9 +198,8 @@ class AgentDraftProvenance(Base):
     version = Column(Integer, nullable=False)
     status = Column(Text, nullable=False, default="draft")
     provenance_label = Column(Text, nullable=False)
-    # Server-generated (new_correlation_id()), never the caller-supplied
-    # X-Request-Id (migration 036, review fix ALC-CORR-COLLISION) — unique
-    # so a lifecycle key can never be shared by two drafts.
+    # Server-generated, never the caller's X-Request-Id (migration 036,
+    # ALC-CORR-COLLISION) — unique so two drafts can't share a lifecycle key.
     correlation_id = Column(Text, nullable=False, unique=True)
     model_id = Column(Text)
     validation_code = Column(Text)
@@ -238,44 +237,24 @@ class AgentDraftCitation(Base):
 
 
 class AgentLifecycleEvent(Base):
-    """One stage of one draft's durable lifecycle trace (migration 036,
-    W10 Final Stage 4) — see services/records-service/agent_lifecycle.py,
-    the only writer/reader.
-
-    Replaces three separate, per-request, in-memory-only TraceRecorder
-    instances (generation, review, display) with one persisted stream keyed
-    by correlation_id. `sequence` is assigned by a database trigger, never
-    supplied here — see migration 036 for why (concurrency-safe, monotonic
-    ordering per correlation_id). `attributes` only ever holds whatever
-    `libs.agent_provenance.assert_safe` already allowed through: never a
-    patient/user id, an actor name, a prompt, a response, draft/retrieved
-    text, a credential, or a raw provider error.
-    """
+    """One stage of one draft's durable lifecycle trace (migration 036) —
+    see agent_lifecycle.py, the only writer/reader."""
 
     __tablename__ = "agent_lifecycle_events"
 
     id = Column(Integer, primary_key=True)
     correlation_id = Column(Text, nullable=False)
-    # default=0 is a client-side placeholder ONLY — real Postgres's BEFORE
-    # INSERT trigger (migration 036) unconditionally overwrites it with the
-    # correctly computed value regardless of what's sent. It exists so a
-    # dialect with no trigger support (SQLite, in unit tests) still
-    # satisfies NOT NULL; those tests never depend on the real value.
+    # default=0 is a placeholder — Postgres's trigger (036) overwrites it;
+    # exists so SQLite (no trigger support) satisfies NOT NULL in tests.
     sequence = Column(Integer, nullable=False, default=0)
     stage = Column(Text, nullable=False)
-    # Real JSONB in Postgres; generic JSON elsewhere (SQLite in unit tests
-    # — this table's real DDL, including the Postgres-only trigger
-    # functions, is only ever exercised against a real Postgres in
-    # integration tests).
+    # Real JSONB in Postgres; generic JSON in SQLite (unit tests only).
     attributes = Column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, server_default="{}")
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("correlation_id", "sequence", name="agent_lifecycle_events_correlation_sequence_unique"),
-        # Review fix ALC-DISPLAY-REPEAT: at most one display row per
-        # correlation_id — see migration 036 for the full rationale. The
-        # WHERE clause is portable (both dialects support partial indexes),
-        # so SQLite unit tests enforce the same invariant as real Postgres.
+        # ALC-DISPLAY-REPEAT: at most one display row per correlation_id (036).
         Index(
             "agent_lifecycle_events_one_display_per_correlation", "correlation_id",
             unique=True,

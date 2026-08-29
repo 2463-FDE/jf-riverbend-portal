@@ -591,10 +591,8 @@ CREATE INDEX IF NOT EXISTS agent_draft_provenance_patient_idx
     ON agent_draft_provenance (patient_id);
 CREATE INDEX IF NOT EXISTS agent_draft_provenance_correlation_idx
     ON agent_draft_provenance (correlation_id);
--- 036 (review fix ALC-CORR-COLLISION): the draft's lifecycle identity is
--- always server-generated (new_correlation_id()), never a caller-supplied
--- X-Request-Id — unique so the database itself refuses a collision, not
--- just the application.
+-- 036 (ALC-CORR-COLLISION): lifecycle identity is always server-generated,
+-- never a caller-supplied X-Request-Id — unique at the DB level too.
 CREATE UNIQUE INDEX IF NOT EXISTS agent_draft_provenance_correlation_id_unique
     ON agent_draft_provenance (correlation_id);
 
@@ -634,12 +632,8 @@ CREATE INDEX IF NOT EXISTS agent_draft_citation_draft_idx
 CREATE INDEX IF NOT EXISTS agent_draft_citation_source_idx
     ON agent_draft_citation (source_id, source_version);
 
--- Durable, append-only lifecycle event stream (036) — replaces three
--- separate, per-request, in-memory-only TraceRecorder instances (generation,
--- review, display) with one persisted stream keyed by correlation_id.
--- attributes only ever holds what libs/agent_provenance/recorder.py's
--- FORBIDDEN_KEYS guard already allows — see that migration for the full
--- rationale, the sequence-assignment trigger, and the append-only guard.
+-- Durable, append-only lifecycle event stream (036) — see that migration
+-- for the full rationale, sequence-assignment trigger, and append-only guard.
 CREATE TABLE IF NOT EXISTS agent_lifecycle_events (
     id             BIGSERIAL PRIMARY KEY,
     correlation_id TEXT NOT NULL,
@@ -655,8 +649,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_sequence_un
     ON agent_lifecycle_events (correlation_id, sequence);
 CREATE INDEX IF NOT EXISTS agent_lifecycle_events_correlation_id_idx
     ON agent_lifecycle_events (correlation_id);
--- Review fix ALC-DISPLAY-REPEAT: at most one display row per
--- correlation_id — see migration 036 for the full rationale.
+-- ALC-DISPLAY-REPEAT: at most one display row per correlation_id (036).
 CREATE UNIQUE INDEX IF NOT EXISTS agent_lifecycle_events_one_display_per_correlation
     ON agent_lifecycle_events (correlation_id) WHERE stage = 'display';
 
