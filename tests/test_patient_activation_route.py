@@ -41,7 +41,7 @@ def env(monkeypatch):
     app_mod.app.dependency_overrides[app_mod.get_db] = fake_db
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TOKEN)
     monkeypatch.setattr(app_mod, "get_session",
-                        lambda t: {"user_id": "2", "username": "frontdesk", "role": "front_desk"} if t == VALID else None)
+                        lambda t: {"user_id": "2", "username": "frontdesk", "role": "front_desk", "security_version": "0"} if t == VALID else None)
     client = TestClient(app_mod.app)
     with Session() as s:
         s.add(app_mod.User(id=2, username="frontdesk", password_hash="x", role="front_desk"))
@@ -86,7 +86,7 @@ def test_the_code_is_returned_once_and_never_stored(env):
 def test_a_role_without_patients_write_cannot_issue(env, monkeypatch):
     client, _ = env
     monkeypatch.setattr(app_mod, "get_session",
-                        lambda t: {"user_id": "2", "username": "doc", "role": "clinician"} if t == VALID else None)
+                        lambda t: {"user_id": "2", "username": "doc", "role": "clinician", "security_version": "0"} if t == VALID else None)
 
     assert client.post("/patients/1042/invitation", headers=_auth()).status_code == 403
 
@@ -209,7 +209,7 @@ def test_revoking_requires_the_same_active_grant_as_issuing(env, monkeypatch):
     client.post("/patients/1042/invitation", headers=_auth())
     monkeypatch.setattr(
         app_mod, "get_session",
-        lambda t: {"user_id": "3", "username": "ungranted", "role": "front_desk"} if t == VALID else None,
+        lambda t: {"user_id": "3", "username": "ungranted", "role": "front_desk", "security_version": "0"} if t == VALID else None,
     )
     with Session() as s:
         s.add(app_mod.User(id=3, username="ungranted", password_hash="x", role="front_desk"))
@@ -289,7 +289,7 @@ def test_the_activated_account_can_sign_in(env, monkeypatch):
     # Session minting is stubbed — Redis mechanics are covered in
     # test_gateway_security.py; what matters here is that the account created
     # by activation is a real, sign-in-able credential.
-    monkeypatch.setattr(app_mod, "create_session", lambda uid, uname, role: f"session-{uid}")
+    monkeypatch.setattr(app_mod, "create_session", lambda uid, uname, role, security_version=0: f"session-{uid}")
     # w8-planner-2 MFA rollout: /login now rate-limits (security.rate_limit)
     # before anything else, which needs a Redis client — this test predates
     # that and never wired one up.

@@ -13,6 +13,14 @@ class Settings:
     payer_api_key = os.getenv("PAYER_API_KEY", "")
     payer_name = os.getenv("PAYER_NAME", "edi.example.com")
 
+    # W10 Final Stage 1 (RIV-088/141 follow-up): explicit mode, replacing the
+    # old inference of "PAYER_API_KEY is blank => simulate". 'simulation'
+    # (the default, and the only mode this training environment ever runs)
+    # makes zero outbound payer calls, ever — see check.py::check. 'live'
+    # requires a real endpoint and credential; payer_mode.validate() rejects
+    # a missing or placeholder one before any network access is attempted.
+    payer_integration_mode = os.getenv("PAYER_INTEGRATION_MODE", "simulation").strip().lower()
+
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
     # Shared secret proving a call came through the gateway. Defaults to

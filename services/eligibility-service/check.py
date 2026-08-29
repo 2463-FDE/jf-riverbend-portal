@@ -13,6 +13,7 @@ from typing import Callable, Optional
 
 import redis as redis_lib
 
+import payer_mode
 from breaker import CircuitBreaker
 from cache import LastKnownGoodCache
 from config import settings
@@ -66,6 +67,28 @@ async def check(
     client = client if client is not None else _client
     breaker = breaker if breaker is not None else _breaker
     cache_ = cache if cache is not None else _cache()
+
+    if settings.payer_integration_mode == "simulation":
+        # The entire simulation boundary: no client, breaker, or cache call —
+        # this training environment never has a real payer behind it, so no
+        # attempt is made to reach one.
+        return EligibilityResult(
+            insurance_id=insurance_id,
+            status=EligibilityStatus.UNKNOWN,
+            checked_at=now(),
+            error_type="SimulationMode",
+        )
+
+    mode_error = payer_mode.config_error(
+        settings.payer_integration_mode, api_key=settings.payer_api_key, api_url=settings.payer_api_url
+    )
+    if mode_error is not None:
+        # 'live' mode was selected but its credential/endpoint is missing or
+        # still the shipped placeholder — fail before any network access
+        # rather than run the real client against nothing real, or (worse)
+        # against another operator's endpoint left over from copy-pasted
+        # config. Never logs api_key/api_url values, only that this failed.
+        return _fallback(insurance_id, cache_, now, error_type="PayerModeConfigError")
 
     if not breaker.allow_request():
         return _fallback(insurance_id, cache_, now, error_type=CircuitOpenError.__name__)

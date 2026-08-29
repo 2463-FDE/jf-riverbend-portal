@@ -28,6 +28,7 @@ import redis as redis_lib
 from fastapi import Depends, FastAPI, HTTPException, Header, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import payer_mode
 from agent_wiring import bind_visit_context, handle_visit_message, stream_visit_message
 from check import check
 from config import settings
@@ -109,6 +110,19 @@ def _fail_fast_on_an_unusable_token() -> None:
             f"{_MIN_INTERNAL_TOKEN_LENGTH} chars) — refusing to start. Set a real "
             f"random value (e.g. `openssl rand -hex 32`) in .env; see .env.example."
         )
+
+
+@app.on_event("startup")
+def _fail_fast_on_an_unusable_payer_mode() -> None:
+    """W10 Final Stage 1: 'live' mode with a missing/placeholder credential
+    or endpoint must fail before ever accepting a request, the same "loud
+    and early" posture as the internal-token check above — not just on the
+    first /eligibility call that happens to hit it."""
+    error = payer_mode.config_error(
+        settings.payer_integration_mode, api_key=settings.payer_api_key, api_url=settings.payer_api_url
+    )
+    if error is not None:
+        raise RuntimeError(f"{error} — refusing to start.")
 
 
 _TRACER_NAME = "eligibility-service"

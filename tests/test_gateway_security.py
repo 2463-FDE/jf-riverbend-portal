@@ -66,14 +66,19 @@ def test_create_session_carries_user_id_and_sets_ttl(monkeypatch):
     monkeypatch.setattr(security, "_redis", lambda: fake)
     monkeypatch.setattr(security, "_now", lambda: 1000.0)
 
-    token = security.create_session(2, "frontdesk", "staff")
+    token = security.create_session(2, "frontdesk", "staff", 5)
 
     assert token
     key, mapping = fake.hset_calls[0]
     assert key == f"session:{token}"
     # The stable users.id is the principal; username/role are metadata;
-    # created_at anchors the absolute-lifetime cap checked in get_session.
-    assert mapping == {"user_id": "2", "username": "frontdesk", "role": "staff", "created_at": "1000.0"}
+    # created_at anchors the absolute-lifetime cap checked in get_session;
+    # security_version (034) is what require_session revalidates on every
+    # subsequent request.
+    assert mapping == {
+        "user_id": "2", "username": "frontdesk", "role": "staff",
+        "created_at": "1000.0", "security_version": "5",
+    }
     # Sessions no longer live forever — a TTL is set at creation.
     assert fake.expire_calls == [(f"session:{token}", security.settings.session_timeout_seconds)]
 

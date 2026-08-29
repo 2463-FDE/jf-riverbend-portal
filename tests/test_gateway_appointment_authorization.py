@@ -53,7 +53,8 @@ def env(monkeypatch):
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TOKEN)
     monkeypatch.setattr(
         app_mod, "get_session",
-        lambda t: {"user_id": str(GRANTED_USER_ID), "username": "frontdesk", "role": "front_desk"}
+        lambda t: {"user_id": str(GRANTED_USER_ID), "username": "frontdesk", "role": "front_desk",
+                   "security_version": "0"}
         if t == VALID else None,
     )
 

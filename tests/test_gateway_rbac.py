@@ -33,7 +33,10 @@ GRANTED_PATIENT_IDS = (1, 1042)
 
 
 def _session_for(role: str) -> dict:
-    return {"user_id": str(TEST_USER_ID), "username": "testuser", "role": role}
+    # security_version "0" matches the freshly-seeded User row's default
+    # (migration 034) — require_session now revalidates both against the DB
+    # on every request, so a fabricated session has to agree with it.
+    return {"user_id": str(TEST_USER_ID), "username": "testuser", "role": role, "security_version": "0"}
 
 
 @pytest.fixture
