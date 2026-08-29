@@ -74,12 +74,17 @@ class Settings:
     mfa_challenge_timeout_seconds = int(os.getenv("MFA_CHALLENGE_TIMEOUT_SECONDS") or "300")
 
     # W9.3 — the same variable eligibility-service's own config.py reads
-    # (shared via docker-compose's env_file: .env on every service). Blank
-    # here means the same thing it means there: no real payer key exists in
-    # this training environment, so the Coverage & Eligibility workspace
-    # labels every verification "Synthetic training — no payer contacted"
-    # and never places a real outbound call — see the verify route.
+    # (shared via docker-compose's env_file: .env on every service).
     payer_api_key = os.getenv("PAYER_API_KEY", "")
+
+    # W10 Final Stage 1: the same explicit, shared PAYER_INTEGRATION_MODE
+    # eligibility-service's config.py reads (its own payer_mode.py is the
+    # authoritative enforcement — see check.py::check). The gateway reads it
+    # too so the coverage-verify route below can short-circuit locally
+    # ("Synthetic training — no payer contacted") without a wasted round trip
+    # to eligibility-service, replacing the old inference from a blank
+    # PAYER_API_KEY.
+    payer_integration_mode = os.getenv("PAYER_INTEGRATION_MODE", "simulation").strip().lower()
 
     @property
     def db_url(self) -> str:

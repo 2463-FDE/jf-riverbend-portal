@@ -64,12 +64,16 @@ def _now() -> float:
     return time.time()
 
 
-def create_session(user_id: int, username: str, role: str) -> str:
+def create_session(user_id: int, username: str, role: str, security_version: int = 0) -> str:
     token = uuid.uuid4().hex
     key = f"session:{token}"
     # user_id is the stable authorization principal; username/role are display
     # + audit metadata. created_at anchors the absolute-lifetime cap enforced
-    # in get_session below. Redis values are strings (decode_responses=True).
+    # in get_session below. security_version is the users.security_version
+    # value at issuance (migration 034) — require_session compares it against
+    # the current row on every request, so disablement or a role change bumps
+    # it and kills this session immediately instead of waiting for the idle
+    # TTL. Redis values are strings (decode_responses=True).
     _redis().hset(
         key,
         mapping={
@@ -77,6 +81,7 @@ def create_session(user_id: int, username: str, role: str) -> str:
             "username": username,
             "role": role,
             "created_at": str(_now()),
+            "security_version": str(security_version),
         },
     )
     _redis().expire(key, settings.session_timeout_seconds)  # idle TTL, refreshed on read

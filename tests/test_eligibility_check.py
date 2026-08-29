@@ -29,6 +29,18 @@ check = check_mod.check
 NOW = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _live_payer_mode(monkeypatch):
+    # W10 Stage 1: check() now short-circuits entirely in the default
+    # 'simulation' mode (see test_payer_integration_mode.py for that
+    # boundary) — this file is about the resilience wrapper itself
+    # (retries/breaker/cache), so every test here needs 'live' mode with a
+    # non-placeholder credential/endpoint to actually reach that code.
+    monkeypatch.setattr(check_mod.settings, "payer_integration_mode", "live")
+    monkeypatch.setattr(check_mod.settings, "payer_api_key", "test-key-not-real")
+    monkeypatch.setattr(check_mod.settings, "payer_api_url", "https://payer.test/v1/eligibility")
+
+
 class _FakeRedis:
     def __init__(self):
         self.store = {}

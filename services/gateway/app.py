@@ -51,9 +51,10 @@ import mfa_config
 import mfa_crypto
 import mfa_totp
 import patient_invitations
+import production_guard
 import roles_config
 from config import settings
-from db import get_db
+from db import SessionLocal, get_db
 from logging_config import configure
 from models import (
     AuditLog,
@@ -186,6 +187,24 @@ async def lifespan(_app: FastAPI):
             f"cannot actually support. Check config/mfa.yaml and, if mode is not "
             f"'off', MFA_ACTIVE_KEY_VERSION/MFA_ENCRYPTION_KEY_V<n> in .env."
         )
+
+    # W10 Final Stage 1: a production deployment must not silently inherit
+    # local/demo defaults (MFA off, simulated payer, placeholder model,
+    # seeded demo accounts, unmigrated staff/MFA identities). Every other
+    # ENVIRONMENT value (the default, "development") is unaffected — this
+    # never runs against the compose/test stack.
+    if settings.environment == "production":
+        db = SessionLocal()
+        try:
+            problems = production_guard.check(db, settings)
+        finally:
+            db.close()
+        if problems:
+            raise RuntimeError(
+                "refusing to start in production with an unsafe posture:\n- "
+                + "\n- ".join(problems)
+            )
+
     yield
 
 
@@ -215,22 +234,42 @@ def _bearer(authorization: Optional[str]) -> str:
     return authorization[7:] if authorization.lower().startswith("bearer ") else authorization
 
 
-def require_session(authorization: Optional[str] = Header(default=None)) -> dict:
-    """Reject anonymous callers.
+def require_session(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Reject anonymous callers, then revalidate against the live account.
 
-    PR #23 review round 2 (2026-08-07): the session now carries the stable
+    PR #23 review round 2 (2026-08-07): the session carries the stable
     users.id (forwarded downstream as X-Actor-Id) and expires via a Redis idle
-    TTL that get_session refreshes on each read (security.py), so an abandoned
-    token no longer lives forever. Per-request re-validation of users.is_active
-    for chart data happens at the authorization boundary itself —
-    records-service's SqlPatientAccessGate joins users.is_active, so a disabled
-    account cannot read any patient chart even with a still-live session (login
-    also rejects inactive users up front). That join, not a DB round-trip on
-    every gateway call, is the central revocation point for PHI access.
+    TTL that get_session refreshes on each read (security.py).
+
+    W10 Stage 1: that TTL alone did not stop a still-live session from acting
+    after the account behind it was disabled or its role changed — Redis has
+    no way to know either happened. Every request now re-reads the account
+    and compares is_active and security_version (migration 034, bumped by
+    every repository path that changes either — see roster_migrate.py) against
+    what the session was issued with; a mismatch means the account changed
+    since login, the caller gets a clean 401 rather than continuing on stale
+    authorization state — the still-live Redis key is left for its own TTL to
+    reap rather than deleted here, so this check never depends on a second
+    Redis round-trip succeeding. The session's own `role` is left untouched
+    by this check — permission decisions still read it from Redis, unchanged
+    from before this fix.
     """
     sess = get_session(_bearer(authorization))
     if not sess:
         raise HTTPException(status_code=401, detail="not authenticated")
+
+    user_id = parse_user_id(sess.get("user_id"))
+    user = db.get(User, user_id) if user_id is not None else None
+    if (
+        user is None
+        or not user.is_active
+        or str(user.security_version) != sess.get("security_version")
+    ):
+        raise HTTPException(status_code=401, detail="not authenticated")
+
     return sess
 
 
@@ -445,7 +484,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
     user.last_login_at = func.now()
     db.commit()
-    token = create_session(user.id, user.username, user.role)
+    token = create_session(user.id, user.username, user.role, user.security_version)
     log.info("login ok user=%s mfa_requirement=%s", user.username, requirement)
     return {
         "token": token,
@@ -1169,7 +1208,7 @@ def confirm_mfa_enrollment(
     # no unaudited session exists.
     session_out = None
     if via_challenge:
-        session_out = create_session(user.id, user.username, user.role)
+        session_out = create_session(user.id, user.username, user.role, user.security_version)
         destroy_mfa_challenge(req.challenge_token)
     log.info("mfa: enrollment confirmed user=%s", user.username)
 
@@ -1293,7 +1332,7 @@ def verify_mfa_challenge(req: MfaVerifyRequest, db: Session = Depends(get_db)):
 
     # Do not create or consume Redis authentication state until the factor
     # claim and its audit row are durably committed together.
-    token = create_session(user.id, user.username, user.role)
+    token = create_session(user.id, user.username, user.role, user.security_version)
     destroy_mfa_challenge(req.challenge_token)
     log.info("mfa: verified user=%s method=%s", user.username, method)
 
@@ -1629,12 +1668,14 @@ def verify_patient_coverage(
     if not coverage.member_id:
         raise HTTPException(status_code=400, detail="this coverage has no member id on file")
 
-    if not settings.payer_api_key:
-        # No real payer key exists in this training environment (never will,
-        # per ADR/README) — make NO outbound call at all rather than run the
-        # real check pipeline with nothing behind it. This is the entire
-        # simulation boundary: one branch, taken before eligibility-service
-        # is ever contacted, not a flag threaded through it.
+    if settings.payer_integration_mode == "simulation":
+        # W10 Stage 1: explicit mode (PAYER_INTEGRATION_MODE), not an
+        # inference from a blank PAYER_API_KEY — make NO outbound call at all
+        # rather than run the real check pipeline with nothing behind it.
+        # This is the entire simulation boundary: one branch, taken before
+        # eligibility-service is ever contacted, not a flag threaded through
+        # it. eligibility-service enforces the same mode independently
+        # (payer_mode.py) for any caller that reaches it directly.
         return {"category": "simulated", "message": "Synthetic training — no payer contacted", "can_retry": False}
 
     headers = _correlation_headers()

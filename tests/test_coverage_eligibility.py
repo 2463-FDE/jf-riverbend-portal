@@ -71,7 +71,8 @@ def env(monkeypatch):
 def _session_for(monkeypatch, user_id, role):
     monkeypatch.setattr(
         app_mod, "get_session",
-        lambda t: {"user_id": str(user_id), "username": "x", "role": role} if t == VALID else None,
+        lambda t: {"user_id": str(user_id), "username": "x", "role": role, "security_version": "0"}
+        if t == VALID else None,
     )
 
 
@@ -152,6 +153,7 @@ def test_a_real_verification_creates_a_job_and_status_maps_the_result(env, monke
     client, Session = env
     _session_for(monkeypatch, BILLING_USER_ID, "billing")
     monkeypatch.setattr(app_mod.settings, "payer_api_key", "test-key-not-actually-real")
+    monkeypatch.setattr(app_mod.settings, "payer_integration_mode", "live")
 
     monkeypatch.setattr(
         app_mod.httpx, "post",
@@ -191,6 +193,7 @@ def test_a_second_verify_while_one_is_in_flight_reuses_it(env, monkeypatch):
     client, Session = env
     _session_for(monkeypatch, BILLING_USER_ID, "billing")
     monkeypatch.setattr(app_mod.settings, "payer_api_key", "test-key-not-actually-real")
+    monkeypatch.setattr(app_mod.settings, "payer_integration_mode", "live")
 
     with Session() as s:
         coverage = s.get(app_mod.InsuranceCoverage, 1)

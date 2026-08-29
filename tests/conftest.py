@@ -61,6 +61,42 @@ def load_module(relpath: str, name: str):
     return module
 
 
+def install_sqlite_users_db(app_mod, users):
+    """Override a loaded gateway app_mod's `get_db` with an in-memory SQLite
+    database seeded with `users` (app_mod.User rows).
+
+    W10 Stage 1: require_session now re-reads the account on every request
+    (is_active/security_version — migration 034), so any gateway route test
+    that only faked the Redis session dict via get_session, and never needed
+    a real `db` dependency before, now needs one anyway. This is that one
+    line instead of the create_engine/sessionmaker/dependency_overrides
+    boilerplate repeated in every such file.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    app_mod.User.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as s:
+        for u in users:
+            s.add(u)
+        s.commit()
+
+    def fake_db():
+        db = Session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app_mod.app.dependency_overrides[app_mod.get_db] = fake_db
+    return Session
+
+
 _PHI_NAMES = (
     "get_key_provider",
     "decrypt_patient_field",

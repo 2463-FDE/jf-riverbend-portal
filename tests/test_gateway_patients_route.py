@@ -9,12 +9,12 @@ page looks like success), so this test locks the forwarding in.
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import load_module
+from conftest import install_sqlite_users_db, load_module
 
 app_mod = load_module("services/gateway/app.py", "gateway_app_patients_list")
 
 VALID_TOKEN = "valid-token-abc"
-_VALID_SESSION = {"user_id": "2", "username": "frontdesk", "role": "staff"}
+_VALID_SESSION = {"user_id": "2", "username": "frontdesk", "role": "staff", "security_version": "0"}
 TEST_INTERNAL_TOKEN = "test-internal-token-abc123-well-over-the-32-char-floor"
 
 
@@ -24,7 +24,11 @@ def client(monkeypatch):
         app_mod, "get_session", lambda t: _VALID_SESSION if t == VALID_TOKEN else None
     )
     monkeypatch.setattr(app_mod.settings, "internal_service_token", TEST_INTERNAL_TOKEN)
-    return TestClient(app_mod.app)
+    install_sqlite_users_db(app_mod, [
+        app_mod.User(id=2, username="frontdesk", password_hash="x", role="staff", is_active=True),
+    ])
+    yield TestClient(app_mod.app)
+    app_mod.app.dependency_overrides.clear()
 
 
 def _auth():

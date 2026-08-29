@@ -90,7 +90,8 @@ def env(monkeypatch):
 def _session_for(monkeypatch, user_id, role="patient"):
     monkeypatch.setattr(
         app_mod, "get_session",
-        lambda t: {"user_id": str(user_id), "username": "x", "role": role} if t == "tok" else None,
+        lambda t: {"user_id": str(user_id), "username": "x", "role": role, "security_version": "0"}
+        if t == "tok" else None,
     )
 
 
@@ -119,15 +120,14 @@ def test_a_different_patient_sees_only_their_own_identity_through_the_same_route
 
 
 def test_an_inactive_account_receives_no_identity_data(env, monkeypatch):
-    # require_permission's role check does not by itself inspect is_active —
-    # the session is what the gateway trusts was issued to a real account.
-    # User 3's grant for 1042 is otherwise perfectly live (unrevoked,
-    # unexpired) — is_active=False on the account itself is the only thing
-    # wrong here, and has_active_grant's join on User.is_active is what must
-    # catch a disabled account whose session somehow outlives it (B1).
+    # W10 Stage 1: require_session itself now revalidates is_active against
+    # the DB on every request and kills the session outright (401) before
+    # require_permission or has_active_grant's own is_active join ever run —
+    # user 3's otherwise-live grant for 1042 no longer matters, because the
+    # session never gets that far.
     _session_for(monkeypatch, 3)
     resp = env.get("/patient/me/identity", headers=_auth())
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 def test_a_patient_with_no_active_grant_receives_no_identity_data(env, monkeypatch):
@@ -153,7 +153,8 @@ def test_a_staff_role_cannot_reach_the_patient_identity_route(env, monkeypatch):
     the same gate /patient/me/summary already uses."""
     monkeypatch.setattr(
         app_mod, "get_session",
-        lambda t: {"user_id": "1", "username": "frontdesk", "role": "front_desk"} if t == "tok" else None,
+        lambda t: {"user_id": "1", "username": "frontdesk", "role": "front_desk", "security_version": "0"}
+        if t == "tok" else None,
     )
     resp = env.get("/patient/me/identity", headers=_auth())
     assert resp.status_code == 403

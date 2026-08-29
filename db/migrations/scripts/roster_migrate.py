@@ -172,8 +172,8 @@ def apply_plan(conn, migrations, deactivations, approved_by):
         for f in migrations:
             from_role = _lock_and_read_role(cur, f.subject)
             cur.execute(
-                "UPDATE users SET role = %s, is_active = TRUE, disabled_reason = NULL "
-                "WHERE username = %s",
+                "UPDATE users SET role = %s, is_active = TRUE, disabled_reason = NULL, "
+                "security_version = security_version + 1 WHERE username = %s",
                 (f.proposed_role, f.subject),
             )
             if cur.rowcount != 1:
@@ -186,7 +186,8 @@ def apply_plan(conn, migrations, deactivations, approved_by):
         for f, reason in deactivations:
             from_role = _lock_and_read_role(cur, f.subject)
             cur.execute(
-                "UPDATE users SET is_active = FALSE, disabled_reason = %s WHERE username = %s",
+                "UPDATE users SET is_active = FALSE, disabled_reason = %s, "
+                "security_version = security_version + 1 WHERE username = %s",
                 (reason, f.subject),
             )
             if cur.rowcount != 1:

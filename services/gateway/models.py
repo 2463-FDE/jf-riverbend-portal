@@ -45,6 +45,12 @@ class User(Base):
     mfa_shared_account = Column(Boolean, nullable=False, default=True)
     mfa_pilot = Column(Boolean, nullable=False, default=False)
 
+    # Monotonic revocation counter (migration 034). require_session compares
+    # this against the value stamped into a Redis session at login; bumped by
+    # any path that changes is_active/role so a live session dies immediately
+    # rather than continuing on stale authorization state.
+    security_version = Column(BigInteger, nullable=False, default=0)
+
 
 class Patient(Base):
     """Minimal read-only mirror of records-service's `patients` table — the

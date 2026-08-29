@@ -88,7 +88,12 @@ CREATE TABLE IF NOT EXISTS users (
     mfa_shared_account BOOLEAN NOT NULL DEFAULT TRUE,
     -- Explicit pilot-scope opt-in. FALSE (default) = out of scope while
     -- config/mfa.yaml scope=pilot. Never inferred from role or username.
-    mfa_pilot BOOLEAN NOT NULL DEFAULT FALSE
+    mfa_pilot BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Monotonic revocation counter (034). Copied into a Redis session at
+    -- login; require_session compares the live value against it on every
+    -- request and kills the session on a mismatch. Bumped by any repository
+    -- path that changes is_active/role (see roster_migrate.py::apply_plan).
+    security_version INTEGER NOT NULL DEFAULT 0
 );
 
 -- One-time MFA recovery codes — see migration 033 for the full column

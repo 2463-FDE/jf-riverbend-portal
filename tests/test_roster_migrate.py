@@ -251,6 +251,26 @@ def test_apply_records_the_role_it_migrated_FROM():
     assert conn.committed
 
 
+def test_migrate_and_deactivate_writes_bump_security_version():
+    """W10 Stage 1: require_session revalidates users.security_version
+    (migration 034) on every request — a role migration or deactivation
+    that didn't bump it would leave any already-issued session for that
+    account valid after the change, defeating the whole point."""
+    conn = _FakeConn({"drpatel": "staff", "someone": "staff"})
+
+    migrate.apply_plan(
+        conn,
+        [_f(dry_run.MIGRATE, "drpatel", "clinician")],
+        [(_f(dry_run.UNMAPPED_FUNCTION, "someone"), "role_migration_unmapped")],
+        "Jorge",
+    )
+
+    update_statements = [sql for sql, _ in conn.cur.statements if sql.startswith("UPDATE users")]
+    assert len(update_statements) == 2
+    for sql in update_statements:
+        assert "security_version = security_version + 1" in sql
+
+
 def test_a_missing_account_aborts_everything_and_logs_nothing():
     """R1-MAJOR-001. The plan comes from the committed seed and is written to
     whatever DATABASE_URL points at; those can diverge. A log row claiming a
