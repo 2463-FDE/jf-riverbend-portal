@@ -149,8 +149,7 @@ def _fallback(retriever, *, scope, ledger, limits, trace, error_type, terminatio
     if not ledger.citation_ids:
         # The failure came before any retrieval, so the fallback fetches its own
         # evidence — deterministically, through the same bounded call.
-        retrieve(retriever, scope=scope, query=_FALLBACK_QUERY, category=None,
-                 limits=limits, ledger=ledger, trace=trace)
+        retrieve(retriever, scope=scope, query=_FALLBACK_QUERY, limits=limits, ledger=ledger, trace=trace)
     draft = deterministic_draft(ledger)
     return AgentRunResult(
         draft=draft, label=ProvenanceLabel.FALLBACK, ledger=ledger,

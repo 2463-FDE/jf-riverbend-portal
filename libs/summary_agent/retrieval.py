@@ -1,9 +1,20 @@
 """The one bounded, read-only tool the agent is given.
 
-THE SCOPE IS NOT A PARAMETER. `scope`'s audiences/workflows are closed over
-from the request and never reach the model's tool schema — the model may
-only choose a search `query` and, optionally, narrow further with
-`category` (mapped to `RetrievalScope.topic`). Document text reaches the
+THE SCOPE IS NOT A PARAMETER, AND NEITHER IS ITS TOPIC. `scope` — audiences,
+workflows, and any topic narrowing within them — is closed over from the
+trusted caller and passed to `PolicyRetriever` completely unchanged; nothing
+the model supplies ever reaches it. The model may only choose a free-text
+search `query`; the vector search itself already ranks relevant approved
+chunks, and review fix SA-TOPIC-MISMATCH removed the one-time `category`
+tool argument this module used to map onto `RetrievalScope.topic` — corpus
+topics are manifest-defined and may change, and an invalid model-selected
+one could only ever suppress valid evidence, never add any (a false
+no-evidence refusal, not a widened scope, but still not worth the risk for
+a control that added no real narrowing PolicyRetriever's own semantic
+ranking didn't already do). `PolicyRetriever` itself keeps a general
+optional topic capability — this module simply never exercises it; other
+trusted callers may still pass a real manifest topic like
+`laboratory_results` through `scope` directly. Document text reaches the
 model and the in-memory `RetrievalLedger` (so quotes can be checked against
 their source) but is never persisted or traced.
 
@@ -52,7 +63,6 @@ def retrieve(
     *,
     scope: RetrievalScope,
     query: str,
-    category: Optional[str],
     limits: RetrievalLimits,
     ledger: RetrievalLedger,
     trace: Optional[TraceRecorder] = None,
@@ -60,16 +70,19 @@ def retrieve(
     """The retrieval itself, callable without LangChain — which is what lets the
     deterministic fallback reach the same evidence with no agent loop.
 
+    `scope` reaches `PolicyRetriever` completely unchanged — review fix
+    SA-TOPIC-MISMATCH: this module no longer narrows it by any model
+    argument (see module docstring for why).
+
     `retriever=None` (retrieval infrastructure unavailable — see
     summary_agent_path._build_retriever) and any exception the retriever
     itself raises both degrade to zero chunks rather than propagating: a
     retrieval problem must never crash the fallback path, which has no
     other safety net once `_default_model()` has already failed."""
-    narrowed = replace(scope, topic=category or None)
     chunks = []
     if retriever is not None:
         try:
-            chunks = retriever.retrieve(query, narrowed, limits.max_documents)
+            chunks = retriever.retrieve(query, scope, limits.max_documents)
         except Exception as exc:
             log.warning("summary agent retrieval failed (error_type=%s)", type(exc).__name__)
 
@@ -96,10 +109,9 @@ def retrieve(
         trace.retrieval(
             document_count=len(payload),
             citation_ids=[d["citation_id"] for d in payload],
-            # A retrieved chunk carries no category of its own (unlike the
-            # retired embedded manifest) — this records the caller-narrowed
-            # topic filter itself, a bounded low-cardinality value.
-            categories=(category,) if category else (),
+            # A retrieved chunk carries no category of its own, and
+            # SA-TOPIC-MISMATCH removed the only other source of one.
+            categories=(),
             excluded_count=excluded,
         )
     return {
@@ -114,17 +126,15 @@ def build_retrieval_tool(*, retriever, scope: RetrievalScope, ledger: RetrievalL
     from langchain_core.tools import tool  # lazy — see runtime.py
 
     @tool(TOOL_NAME)
-    def retrieve_approved_documents(query: str, category: str = "") -> str:
-        """Retrieve approved Riverbend policy and training documents relevant to `query`.
+    def retrieve_approved_documents(query: str) -> str:
+        """Retrieve approved Riverbend documents relevant to `query`.
 
         Only approved documents for the current reader are ever returned and
         that scope cannot be changed. Pass a short search query describing
-        what you need, and optionally a category ("policy" or "training") to
-        narrow the results. Returns JSON with each document's citation_id,
+        what you need. Returns JSON with each document's citation_id,
         source_id, source_version, title, section_id and text. Cite a
         document by its exact citation_id.
         """
-        return json.dumps(retrieve(retriever, scope=scope, query=query, category=category or None,
-                                   limits=limits, ledger=ledger, trace=trace))
+        return json.dumps(retrieve(retriever, scope=scope, query=query, limits=limits, ledger=ledger, trace=trace))
 
     return retrieve_approved_documents
