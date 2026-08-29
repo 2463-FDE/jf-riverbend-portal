@@ -1,11 +1,17 @@
 """The synthetic training corpus, loaded from `manifest.json`.
 
+W10 Final Stage 5: the runtime path (`runtime.py`, `retrieval.py`) no longer
+uses this module — it now retrieves from the same pgvector-approved policy
+corpus `libs/policy_navigator` uses. This module is KEPT as an explicitly
+fixture-labelled test resource only (its own `notice` field already says
+"SYNTHETIC TRAINING CORPUS... authored for the Week 8 agent demo").
+
 Four short documents, three approved and one deliberately not. None of it is
-real Riverbend policy and none of it is PHI — the manifest's own `notice` field
-says so, so a demo can show that claim rather than assert it verbally.
+real Riverbend policy and none of it is PHI.
 
 `approved` is a property of the DOCUMENT, never a parameter a caller or a model
-can pass. `retrieval.py` explains why that distinction is the whole defence.
+can pass — this property is retired from the real runtime path, but any test
+still using this fixture keeps that same invariant.
 """
 import json
 import os

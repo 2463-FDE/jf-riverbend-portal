@@ -93,6 +93,42 @@ def test_retrieve_narrows_by_topic_only_when_given():
     assert "laboratory_results" in params
 
 
+# --- SA-TOPIC-MISMATCH regression: patient-summary's untrusted-topic-free
+# call shape ------------------------------------------------------------------
+
+
+def test_summary_style_retrieval_with_no_trusted_topic_has_no_topic_predicate():
+    """The patient-summary tool (libs/summary_agent/retrieval.py) never
+    supplies a topic — this proves what PolicyRetriever itself does with
+    that exact call shape: no `ANY(d.topics)` predicate is added at all,
+    the same as any other caller that passes no topic. PolicyRetriever's
+    own general topic capability is untouched (see the test above) — this
+    only confirms the absence of one when the caller supplies none."""
+    embedding_client = _FakeEmbeddingClient()
+    conn = _FakeConnection(rows_to_return=[_ROW])
+    retriever = PolicyRetriever(conn, embedding_client, provider="bedrock", model="titan-v2")
+    scope = RetrievalScope(audiences=("patient",), workflows=("patient_summary",))
+
+    retriever.retrieve("approved guidance for a patient-facing chart summary", scope, limit=3)
+
+    sql, params = conn.executed[0]
+    assert "ANY(d.topics)" not in sql
+    assert "policy" not in params
+    assert "training" not in params
+
+
+def test_a_returned_approved_row_remains_retrievable_with_no_trusted_topic():
+    embedding_client = _FakeEmbeddingClient()
+    conn = _FakeConnection(rows_to_return=[_ROW])
+    retriever = PolicyRetriever(conn, embedding_client, provider="bedrock", model="titan-v2")
+    scope = RetrievalScope(audiences=("patient",), workflows=("patient_summary",))
+
+    [chunk] = retriever.retrieve("approved guidance", scope, limit=3)
+
+    assert chunk.citation_id == "POL-1@1.0#overview"
+    assert chunk.text == "chunk text"
+
+
 def test_retrieve_rolls_back_after_a_pure_read():
     embedding_client = _FakeEmbeddingClient()
     conn = _FakeConnection(rows_to_return=[])

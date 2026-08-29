@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from conftest import load_module, phi_globals_of
 from libs.phi_crypto import EnvKeyProvider
+from libs.policy_corpus import RetrievedChunk
 
 app_mod = load_module("services/records-service/app.py", "records_app_agent_portal")
 drafts = app_mod.agent_drafts
@@ -56,9 +57,28 @@ CLINICIAN_ID, PATIENT_USER_ID, OTHER_PATIENT_USER_ID = 900, 901, 902
 V1_TEXT = "Version one, approved."
 V2_TEXT = "Version two, still pending."
 
+# W10 Final Stage 5: real generation now retrieves through a pgvector-backed
+# PolicyRetriever, unavailable in this plain-pytest environment (no
+# `make up`, no POLICY_EMBEDDING_MODEL_ID). Every test in this file that
+# actually calls POST /patients/{id}/agent-draft needs SOME evidence for the
+# deterministic fallback to validate — this fixture-labelled retriever
+# supplies it, the same role the retired embedded manifest used to play.
+_FIXTURE_CHUNK = RetrievedChunk(
+    citation_id="LAB-REL-001@1.2#overview", source_id="LAB-REL-001", source_version="1.2",
+    title="Release of Laboratory Results", effective_date="2026-08-01", section_id="overview",
+    heading_path=("Release of Laboratory Results",), score=0.9,
+    text="Results are shown exactly as the laboratory reported them.",
+)
+
+
+class _FixtureRetriever:
+    def retrieve(self, query, scope, limit):
+        return [_FIXTURE_CHUNK]
+
 
 @pytest.fixture
 def client(monkeypatch):
+    monkeypatch.setattr(app_mod.summary_agent_path, "_build_retriever", lambda: (_FixtureRetriever(), None))
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
                            poolclass=StaticPool)
     app_mod.AgentDraftProvenance.metadata.create_all(engine)
