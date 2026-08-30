@@ -82,18 +82,26 @@ def test_every_db_client_service_receives_the_runtime_db_password():
         assert env.get("DB_USER") == "riverbend_app"
 
 
-def test_missing_db_password_fails_compose_for_every_db_client_service():
+def test_every_db_client_service_requires_db_password_in_its_own_definition():
+    """Review fix: the prior version of this test only proved that compose
+    AS A WHOLE fails with no DB_PASSWORD set — true even if none of the
+    five services below required it themselves, since postgres's own
+    POSTGRES_PASSWORD (${DB_PASSWORD:?...}) already fails compose on its
+    own. This inspects each service's OWN raw `environment:` mapping in
+    docker-compose.yml directly, so a service whose guard was ever removed
+    or weakened (e.g. given a silent `:-` default) fails THIS test
+    specifically, not just "compose fails for some unspecified reason"."""
+    compose_text = (REPO / "docker-compose.yml").read_text()
+    yaml = pytest.importorskip("yaml")
+    compose = yaml.safe_load(compose_text)
     for name in _DB_CLIENT_SERVICES:
-        env = dict(_VALID_ENV)
-        del env["DB_PASSWORD"]
-        full_env = {"PATH": os.environ.get("PATH", "")}
-        full_env.update(env)
-        result = subprocess.run(
-            ["docker", "compose", "--env-file", "/dev/null", "config", "-q"],
-            cwd=REPO, env=full_env, capture_output=True, text=True,
+        env = compose["services"][name].get("environment", {}) or {}
+        assert "DB_PASSWORD" in env, f"{name}'s own environment: mapping does not declare DB_PASSWORD at all"
+        value = str(env["DB_PASSWORD"])
+        assert value.startswith("${DB_PASSWORD:?"), (
+            f"{name}'s DB_PASSWORD is {value!r} — expected a required guard "
+            f"(${{DB_PASSWORD:?...}}), not an optional/defaulted/hardcoded value"
         )
-        assert result.returncode != 0, f"expected a missing DB_PASSWORD to fail compose config for {name}"
-        assert "DB_PASSWORD" in result.stderr
 
 
 def _raw_service_environment_keys(service_name):

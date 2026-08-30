@@ -266,6 +266,7 @@ jobs:
       - name: Minimal authorized path across every service
         env:
           GATEWAY_URL: http://localhost:8070
+          FRONTEND_URL: http://localhost:3070
         run: pytest -m integration -q tests/integration/test_full_stack_smoke.py
       - name: Sanitized diagnostics on failure
         if: failure()
