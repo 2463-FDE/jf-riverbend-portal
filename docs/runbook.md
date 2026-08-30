@@ -660,19 +660,20 @@ make demo-reset
 Review decisions are durable by design: a rejected record is never re-queued
 and an approved one stays released. So every rehearsal, and every run of the
 integration suite, consumes demo state. `make demo-reset` (2026-08-22, covers
-all four canonical patients) returns 1042 and 1737 to invite-ready (no portal
-account — the demo starts from "front desk issues a code"), restores 1738's
-and 1739's pre-activated accounts to active if a rehearsal deactivated one,
-and re-asserts every staff/clinician grant the four charts need. It prints one
-row per patient:
+all four canonical patients; extended W10 Final 2 Stage 3 to also cover
+coverage/eligibility, messaging, and ROI — see below) returns 1042 and 1737
+to invite-ready (no portal account — the demo starts from "front desk issues
+a code"), restores 1738's and 1739's pre-activated accounts to active if a
+rehearsal deactivated one, and re-asserts every staff/clinician grant the
+four charts need. It prints one row per patient:
 
 ```
- patient_id |      name      | portal_account | coverage | encounters | records | trend_results | appointments | pending_reviews | active_reviewers |       other_active_grants
-------------+----------------+----------------+----------+------------+---------+---------------+--------------+-----------------+------------------+----------------------------------
-       1042 | Maria Gonzalez | none           | active   |          4 |       4 |             2 |            3 |               0 | drkim            | frontdesk, rdelgado
-       1737 | Priya Khan     | none           | active   |          3 |       5 |             2 |            2 |               0 | drkim            | frontdesk
-       1738 | Thomas Johnson | patient-1738   | stale    |          3 |       3 |             2 |            2 |               0 | drkim, drnguyen  | drpatel, frontdesk, patient-1738
-       1739 | Aisha Taylor   | patient-1739   | unknown  |          3 |       4 |             2 |            2 |               0 | drnguyen         | frontdesk, patient-1739
+ patient_id |      name      | portal_account | coverage | encounters | records | trend_results | appointments | pending_reviews | active_reviewers |       other_active_grants        |   thread   | pending_roi
+------------+----------------+----------------+----------+------------+---------+---------------+--------------+-----------------+------------------+-----------------------------------+------------+-------------
+       1042 | Maria Gonzalez | none           | active   |          4 |       4 |             2 |            3 |               0 | drkim            | frontdesk, rdelgado               | none       |           0
+       1737 | Priya Khan     | none           | active   |          3 |       5 |             2 |            2 |               0 | drkim            | frontdesk                          | none       |           0
+       1738 | Thomas Johnson | patient-1738   | stale    |          3 |       3 |             2 |            2 |               0 | drkim, drnguyen  | drpatel, frontdesk, patient-1738   | open/1msgs |           0
+       1739 | Aisha Taylor   | patient-1739   | unknown  |          3 |       4 |             2 |            2 |               0 | drnguyen         | frontdesk, patient-1739            | open/2msgs |           0
 ```
 
 `active_reviewers` and `other_active_grants` are the columns to read for each
@@ -684,12 +685,27 @@ because a revoked or expired grant leaves the relevant queue/chart empty
 while the account looks perfectly fine. A missing expected name in either
 column, `portal_account` reading `none` for 1738/1739, or `trend_results`
 under 2 for any row, means the database predates the current seed: re-seed
-with `docker compose down -v && make up`. `coverage` reflects whatever the
-last real eligibility check set it to and is not reset by `make demo-reset`
-— the values above are one observed snapshot, not a fixed guarantee. A
-real Bedrock call against 1737 also writes an immutable `agent_draft_provenance`
-row that this reset never deletes (by design) — a genuinely virgin agent-draft
-demonstration needs that fresh-volume re-seed, not merely a reset.
+with `docker compose down -v && make up`.
+
+`coverage` is now restored to seed.sql's own curated per-patient baseline by
+this reset (1042/1737 `active`, 1738 `stale`, 1739 `unknown`) and any
+in-flight `verification_job_id` is cleared — it no longer merely reflects
+whatever the last real eligibility check happened to leave behind. `thread`
+reads `none` for 1042/1737 (no seeded thread — the messaging demo is
+1738/1739-only, migration 022) or `open/<n>msgs` for 1738/1739, restored to
+the seeded message count and open status regardless of a rehearsal's
+replies/reads/closes. `pending_roi` is the count of non-fulfilled ROI
+requests for that patient and should always read 0 immediately after a
+reset — a fulfilled request (and its disclosure accounting row) is never
+touched, by design; see `db/seed/demo_reset.sql`'s own comment on why. The
+script also fails closed (nonzero exit, no output past the error) if the
+message-thread/coverage fixtures it depends on are not the current seed's
+shape, rather than silently completing a partial reset.
+
+A real Bedrock call against 1737 also writes an immutable
+`agent_draft_provenance` row that this reset never deletes (by design) — a
+genuinely virgin agent-draft demonstration needs that fresh-volume re-seed,
+not merely a reset.
 
 ### Keep these two OFF the primary demo path
 

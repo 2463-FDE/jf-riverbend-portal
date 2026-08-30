@@ -58,6 +58,17 @@
 --
 -- Safe to run repeatedly, and safe to run when nothing exists yet.
 
+-- W10 Final 2 Stage 3: without this, psql's default behavior on a failing
+-- statement (including the fail-closed guard below) is to print the error,
+-- roll back only the current transaction, and keep running every remaining
+-- statement in the file anyway — each one erroring against the now-aborted
+-- transaction, then the verification queries below running as fresh,
+-- separate (successful) statements against STALE data, exiting 0 as if
+-- nothing had gone wrong. Setting this turns any error into an immediate,
+-- whole-script stop with a nonzero exit code — the actual "fail closed"
+-- this file's guard depends on.
+\set ON_ERROR_STOP on
+
 \set canonical_patients '(1042, 1737, 1738, 1739)'
 
 -- Dedicated demo-booking pool (w9-fixes P0 4.2 follow-up), ids 95001-95016 —
@@ -78,6 +89,32 @@
 \set demo_slot_hi 95016
 
 BEGIN;
+
+-- W10 Final 2 Stage 3 — fail closed if the fixtures this reset depends on
+-- are not the exact shape the current seed establishes, rather than
+-- silently completing a partial reset (e.g. updating 0 coverage rows, or
+-- restoring a thread's read-state against the wrong patient) and reporting
+-- success anyway. Mirrors the existing "predates the current seed, re-seed
+-- with docker compose down -v && make up" guidance at the bottom of this
+-- file, but stops the transaction instead of only printing a warning.
+DO $$
+DECLARE
+    coverage_patients INTEGER;
+    thread_1738_patient INTEGER;
+    thread_1739_patient INTEGER;
+BEGIN
+    SELECT count(DISTINCT patient_id) INTO coverage_patients
+      FROM insurance_coverages WHERE patient_id IN (1042, 1737, 1738, 1739);
+    IF coverage_patients != 4 THEN
+        RAISE EXCEPTION 'demo_reset: expected an insurance_coverages row for all four canonical patients (1042, 1737, 1738, 1739), found %  — database predates the current seed; re-seed with docker compose down -v && make up', coverage_patients;
+    END IF;
+
+    SELECT patient_id INTO thread_1738_patient FROM message_threads WHERE id = 1;
+    SELECT patient_id INTO thread_1739_patient FROM message_threads WHERE id = 2;
+    IF thread_1738_patient IS DISTINCT FROM 1738 OR thread_1739_patient IS DISTINCT FROM 1739 THEN
+        RAISE EXCEPTION 'demo_reset: expected message_threads id 1 for patient 1738 and id 2 for patient 1739 (seed.sql''s W9.2 fixtures), found patient_id % and % — database predates the current seed; re-seed with docker compose down -v && make up', thread_1738_patient, thread_1739_patient;
+    END IF;
+END $$;
 
 -- Review decisions, all four patients. Removing these returns any refused
 -- result to `pending` on the patient's next read, because the summary path
@@ -192,6 +229,65 @@ SELECT u.id, p.patient_id
          WHERE g.user_id = u.id AND g.patient_id = p.patient_id
        );
 
+-- --- Coverage/eligibility — restore to seed.sql's own curated baseline -----
+-- docs/runbook.md used to warn that coverage "reflects whatever the last
+-- real eligibility check set it to and is NOT reset by make demo-reset" —
+-- true before this stage, and a real gap: the Coverage & Eligibility
+-- workspace's three deliberately-distinct starting states (1737 active,
+-- 1738 stale, 1739 unknown — see db/seed/generate_seed.py's own comment on
+-- why those three, not a random draw) silently drifted after the first
+-- "Request verification" call and stayed drifted for every rehearsal after.
+-- Restores status/verified_at and clears any in-flight verification_job_id
+-- (migration 023) — never touches payer_name/member_id/group_number/
+-- plan_type, which the app never mutates itself.
+UPDATE insurance_coverages
+   SET status = v.status, verified_at = v.verified_at, verification_job_id = NULL
+  FROM (VALUES
+            (1042, 'active', TIMESTAMPTZ '2026-06-22 09:14:30'),
+            (1737, 'active', TIMESTAMPTZ '2026-03-05 08:55:00'),
+            (1738, 'stale',  TIMESTAMPTZ '2026-03-18 09:25:00'),
+            (1739, 'unknown', NULL::TIMESTAMPTZ)
+       ) AS v(patient_id, status, verified_at)
+ WHERE insurance_coverages.patient_id = v.patient_id;
+
+-- --- Messaging — restore seed.sql's two curated threads (W9.2) -------------
+-- thread 1 (patient 1738): unread by both of its granted clinicians.
+-- thread 2 (patient 1739): a patient-asks/clinician-replies exchange the
+-- PATIENT has already read, drnguyen has not. Neither status carries any
+-- delete route at the application layer (thread_messages has none by
+-- design — see migration 022's own comment), so a rehearsal that sends a
+-- follow-up, marks a thread read, or closes one leaves that behind for the
+-- next rehearsal without this reset.
+DELETE FROM thread_messages WHERE thread_id IN (1, 2) AND id NOT IN (1, 2, 3);
+DELETE FROM thread_read_state WHERE thread_id IN (1, 2);
+INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id, updated_at)
+SELECT 2, u.id, 3, TIMESTAMPTZ '2026-08-18 15:00:00'
+  FROM users u WHERE u.patient_id = 1739 AND u.role = 'patient';
+UPDATE message_threads SET status = 'open', updated_at = v.updated_at
+  FROM (VALUES
+            (1, TIMESTAMPTZ '2026-08-20 09:00:00'),
+            (2, TIMESTAMPTZ '2026-08-18 14:32:00')
+       ) AS v(id, updated_at)
+ WHERE message_threads.id = v.id;
+
+-- --- ROI — clear, never prepopulate (same discipline as review decisions) --
+-- Unlike coverage/messaging, seed.sql has no curated per-canonical-patient
+-- ROI fixture to restore TO (its 16 roi_requests rows are drawn from the
+-- FULL random patient pool, W10 Final 2's own scope note on "documented
+-- baseline" doesn't apply here) — so a demo-ready canonical patient's ROI
+-- state is simply "no leftover pending request/authorization from a prior
+-- rehearsal", the same CLEAR-not-prepopulate pattern this file already uses
+-- for patient_summary_reviews above. A FULFILLED request/authorization is
+-- never touched: disclosures.roi_request_id/authorization_id reference them
+-- with no ON DELETE CASCADE (by design — 45 CFR 164.508 accounting must
+-- survive), so attempting to delete one Postgres still protects would abort
+-- this whole transaction rather than silently orphaning the disclosure log.
+DELETE FROM roi_requests WHERE patient_id IN :canonical_patients AND status != 'fulfilled';
+DELETE FROM roi_authorizations
+ WHERE patient_id IN :canonical_patients
+   AND id NOT IN (SELECT authorization_id FROM disclosures WHERE authorization_id IS NOT NULL);
+DELETE FROM roi_disclosure_restrictions WHERE patient_id IN :canonical_patients;
+
 COMMIT;
 
 \echo ''
@@ -214,6 +310,15 @@ SELECT count(*) AS available_demo_slots
 -- design (see the note at the top of this file). Open each patient's
 -- deterministic results/summary path to populate it; the demo script names
 -- exactly which request does that for which patient.
+--
+-- `coverage` is now restored to seed.sql's own curated per-patient baseline
+-- by this reset (W10 Final 2 Stage 3) — it no longer merely reflects
+-- whatever the last real eligibility check happened to leave behind.
+-- `thread` and `pending_roi` are new the same stage: `thread` reads 'none'
+-- for 1042/1737 (no seeded thread — the messaging demo path is
+-- 1738/1739-only, see migration 022) or `open/1msgs`/`open/2msgs` for 1738
+-- and 1739 respectively immediately after a reset; `pending_roi` should
+-- always be 0.
 --
 -- A REAL Bedrock call against any of these charts also writes an
 -- agent_draft_provenance row, and that row is IMMUTABLE once validated
@@ -238,7 +343,9 @@ SELECT
     coalesce(appt.n, 0) AS appointments,
     coalesce(rev.n, 0) AS pending_reviews,
     coalesce(reviewers.names, 'NONE — re-seed: docker compose down -v && make up') AS active_reviewers,
-    coalesce(other_grants.names, 'none') AS other_active_grants
+    coalesce(other_grants.names, 'none') AS other_active_grants,
+    coalesce(thread.summary, 'none') AS thread,
+    coalesce(roi.n, 0) AS pending_roi
 FROM patients p
 LEFT JOIN users u ON u.patient_id = p.id AND u.role = 'patient'
 LEFT JOIN LATERAL (
@@ -280,5 +387,15 @@ LEFT JOIN LATERAL (
        AND g.revoked_at IS NULL
        AND (g.expires_at IS NULL OR g.expires_at > now())
 ) other_grants ON true
+LEFT JOIN LATERAL (
+    SELECT mt.status || '/' || count(tm.id) || 'msgs' AS summary
+      FROM message_threads mt
+      LEFT JOIN thread_messages tm ON tm.thread_id = mt.id
+     WHERE mt.patient_id = p.id
+     GROUP BY mt.id, mt.status
+) thread ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS n FROM roi_requests WHERE patient_id = p.id AND status = 'pending'
+) roi ON true
 WHERE p.id IN :canonical_patients
 ORDER BY p.id;
