@@ -83,6 +83,22 @@ def _bare_connection():
     )
 
 
+def _admin_connection():
+    """CREATE/DROP SCHEMA needs the admin role — since P3 role separation
+    (migration 028), the runtime role (riverbend_app, used by
+    _bare_connection above for everything else) has no database-level
+    CREATE privilege at all. Schema setup/teardown is the one place this
+    file needs elevated access; every other connection here still uses the
+    ordinary runtime role, matching production. Discovered and fixed the
+    same way in tests/integration/test_policy_corpus_prepare_idempotency.py
+    (W10 Final 2 Stage 2) — this file predates that fix."""
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"), port=os.getenv("DB_PORT", "5432"),
+        dbname=os.getenv("DB_NAME", "riverbend"), user=os.getenv("DB_ADMIN_USER", "riverbend_admin"),
+        password=os.getenv("DB_ADMIN_PASSWORD", "changeme"),
+    )
+
+
 def _connection():
     """Every connection this module hands out is pinned to the isolated
     test schema first, `public` second — so an unqualified `policy_documents`
@@ -109,7 +125,8 @@ def _require_isolated_schema(cur):
 
 @pytest.fixture(scope="module", autouse=True)
 def _isolated_schema():
-    setup_conn = _bare_connection()
+    app_role = os.getenv("DB_USER", "riverbend_app")
+    setup_conn = _admin_connection()
     setup_conn.autocommit = True
     with setup_conn.cursor() as cur:
         cur.execute(f"CREATE SCHEMA {_TEST_SCHEMA}")
@@ -117,11 +134,19 @@ def _isolated_schema():
         for path in _MIGRATION_PATHS:
             with open(path, encoding="utf-8") as f:
                 cur.execute(f.read())
+        # The runtime role's table/sequence privileges (migration 028) are
+        # scoped to `IN SCHEMA public` only — a schema this test creates on
+        # the fly needs its own explicit grant, or every _connection() below
+        # (the ordinary app role, matching production) could create the
+        # schema's TABLES but never read/write rows in them.
+        cur.execute(f"GRANT USAGE ON SCHEMA {_TEST_SCHEMA} TO {app_role}")
+        cur.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {_TEST_SCHEMA} TO {app_role}")
+        cur.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {_TEST_SCHEMA} TO {app_role}")
     setup_conn.close()
 
     yield
 
-    teardown_conn = _bare_connection()
+    teardown_conn = _admin_connection()
     teardown_conn.autocommit = True
     with teardown_conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {_TEST_SCHEMA} CASCADE")
