@@ -324,7 +324,11 @@ services:
   # and logs), not a production monitoring deployment: no remote write, no
   # long-term storage, no alert routing/paging.
   prometheus:
-    image: prom/prometheus:v2.54.1
+    # OBS-B01 review fix: version pin corrected. Keep this version in sync
+    # with docs/runbook.md and
+    # observability/promtool_tests/alert_rules_test.yml's header comment —
+    # see tests/test_observability_prometheus_version.py.
+    image: prom/prometheus:v2.55.1
     profiles: ["observability"]
     environment:
       # Prometheus's own config parser does not substitute env vars, so the
@@ -364,6 +368,14 @@ services:
   alloy:
     image: grafana/alloy:v1.4.3
     profiles: ["observability"]
+    environment:
+      # OBS-M01 review fix: not a secret — the resolved Compose project
+      # name, used by observability/alloy/config.alloy's discovery.relabel
+      # "keep" rule to scope Docker-socket discovery to this project's own
+      # containers only. Compose always resolves this (from -p, the
+      # COMPOSE_PROJECT_NAME env var, or the project directory name) even
+      # when nothing sets it explicitly.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
     volumes:
       - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro

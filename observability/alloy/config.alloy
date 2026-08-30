@@ -1,10 +1,21 @@
 // W10 Final Stage 7 (sub-slice 2) — Grafana Alloy log pipeline for the
-// local observability POC. Discovers every container on the compose
-// network via the Docker socket, tails its stdout/stderr, and ships to
-// Loki. Every backend service's logging_config.py emits the same plain-text
-// format: "%(asctime)s %(levelname)s [<service>] %(message)s", with
-// correlation ids interpolated into the message as "correlation_id=<id>"
-// (see services/gateway/logging_config.py) — never structured JSON.
+// local observability POC. Discovers containers via the Docker socket,
+// tails their stdout/stderr, and ships to Loki. Every backend service's
+// logging_config.py emits the same plain-text format:
+// "%(asctime)s %(levelname)s [<service>] %(message)s", with correlation
+// ids interpolated into the message as "correlation_id=<id>" (see
+// services/gateway/logging_config.py) — never structured JSON.
+//
+// OBS-M01 review fix: the Docker socket is host-wide — without filtering,
+// this component would discover and tail EVERY container on the host, not
+// just this project's, on a shared dev machine. The `keep` rule below
+// scopes discovery to containers Compose itself labeled as belonging to
+// THIS project (`com.docker.compose.project`, surfaced by discovery.docker
+// as `__meta_docker_container_label_com_docker_compose_project`), compared
+// against the resolved project name Compose passes into this container as
+// COMPOSE_PROJECT_NAME (see docker-compose.yml's `alloy` service). This is
+// a discovery-time filter, not a redaction step — application logging
+// remains the PHI redaction boundary (see below).
 //
 // `service` is pulled out of the bracketed token and kept as a LABEL
 // (bounded: one value per service, ~8 total). `correlation_id` is pulled
@@ -25,6 +36,12 @@ discovery.relabel "containers" {
   targets = discovery.docker.containers.targets
 
   rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = env("COMPOSE_PROJECT_NAME")
+    action        = "keep"
+  }
+
+  rule {
     source_labels = ["__meta_docker_container_name"]
     regex         = "/(.*)"
     target_label  = "container"
@@ -33,7 +50,7 @@ discovery.relabel "containers" {
 
 loki.source.docker "containers" {
   host          = "unix:///var/run/docker.sock"
-  targets       = discovery.docker.containers.targets
+  targets       = discovery.relabel.containers.output
   relabel_rules = discovery.relabel.containers.rules
   forward_to    = [loki.process.riverbend.receiver]
 }

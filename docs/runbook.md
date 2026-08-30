@@ -340,7 +340,7 @@ Endpoints once up:
   scheduling-conflict rate. Run their unit tests with:
   ```bash
   docker run --rm -v "$(pwd)/observability:/etc/observability:ro" \
-    --entrypoint promtool prom/prometheus:v2.54.1 \
+    --entrypoint promtool prom/prometheus:v2.55.1 \
     test rules /etc/observability/promtool_tests/alert_rules_test.yml
   ```
 - Logs are searchable in Grafana's Loki datasource by `service` (one of the

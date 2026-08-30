@@ -3,7 +3,7 @@
 # under the condition it names, and does NOT fire when that condition isn't
 # met. Run with:
 #   docker run --rm -v "$(pwd)/observability:/etc/observability:ro" \
-#     --entrypoint promtool prom/prometheus:v2.54.1 \
+#     --entrypoint promtool prom/prometheus:v2.55.1 \
 #     test rules /etc/observability/promtool_tests/alert_rules_test.yml
 rule_files:
   - ../prometheus/alert_rules.yml
