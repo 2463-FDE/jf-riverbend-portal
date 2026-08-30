@@ -205,6 +205,35 @@ jobs:
               raise SystemExit(f'{len(unhealthy)} service(s) not healthy — see above')
           print('all health-checked services are healthy')
           "
+      - name: Warm up — confirm the gateway's real DB-backed path is live, not just its process
+        # Every service's own /healthz only proves the process answers HTTP —
+        # it never touches the database (see each service's healthz route).
+        # postgres's own healthcheck can report ready moments before its own
+        # two-phase startup (initdb, then one internal restart) has fully
+        # settled from a fresh volume, and a constrained CI runner starting
+        # every service at once can leave an app service's first real DB
+        # query racing that window — observed here as a transient
+        # OperationalError on gateway's first /login attempt even though
+        # `--wait` had already reported every container healthy. Retries a
+        # real DB-backed request (deliberately wrong credentials — this
+        # proves the query path works without needing a real account) for a
+        # bounded time before any of the steps below run.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            http_status="$(curl -s -o /tmp/warmup-response.json -w '%{http_code}' \
+              -X POST http://localhost:8070/login -H 'Content-Type: application/json' \
+              -d '{"username":"fsv-warmup-probe","password":"fsv-warmup-probe"}')"
+            if [ "$http_status" = "401" ]; then
+              echo "gateway's DB-backed login path is live (attempt $i)"
+              exit 0
+            fi
+            echo "attempt $i: got HTTP $http_status, expected 401 (wrong-credential rejection) — retrying"
+            sleep 3
+          done
+          echo "gateway's DB-backed login path never became live within the bounded retry window"
+          cat /tmp/warmup-response.json
+          exit 1
       - name: Verify fresh schema/bootstrap and role separation
         # Proves the auto-seed-on-a-fresh-volume path (docker-entrypoint-
         # initdb.d, see docs/runbook.md "First-boot data") actually ran, and
