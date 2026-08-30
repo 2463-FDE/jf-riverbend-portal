@@ -205,34 +205,32 @@ jobs:
               raise SystemExit(f'{len(unhealthy)} service(s) not healthy — see above')
           print('all health-checked services are healthy')
           "
-      - name: Warm up — confirm the gateway's real DB-backed path is live, not just its process
+      - name: Warm up — confirm Postgres actually serves real queries, not just pg_isready
         # Every service's own /healthz only proves the process answers HTTP —
-        # it never touches the database (see each service's healthz route).
-        # postgres's own healthcheck can report ready moments before its own
-        # two-phase startup (initdb, then one internal restart) has fully
-        # settled from a fresh volume, and a constrained CI runner starting
-        # every service at once can leave an app service's first real DB
-        # query racing that window — observed here as a transient
-        # OperationalError on gateway's first /login attempt even though
-        # `--wait` had already reported every container healthy. Retries a
-        # real DB-backed request (deliberately wrong credentials — this
-        # proves the query path works without needing a real account) for a
-        # bounded time before any of the steps below run.
+        # it never touches the database — and postgres's own healthcheck
+        # (pg_isready) can report ready moments before its two-phase startup
+        # (initdb, then one internal restart) has fully settled from a fresh
+        # volume, on a resource-constrained CI runner starting every service
+        # at once. Observed here as a sustained (30+ second) OperationalError
+        # on gateway's first real query even though `--wait` had already
+        # reported every container healthy. A first attempt at probing this
+        # via gateway's own POST /login instead hit its login rate limiter
+        # (10 attempts per username per 5 minutes) well before the DB
+        # settled, self-defeating the retry — this probes Postgres directly
+        # instead, with a real query (not just a liveness ping), so it can
+        # retry as many times as it needs without side effects.
         run: |
           set -euo pipefail
-          for i in $(seq 1 20); do
-            http_status="$(curl -s -o /tmp/warmup-response.json -w '%{http_code}' \
-              -X POST http://localhost:8070/login -H 'Content-Type: application/json' \
-              -d '{"username":"fsv-warmup-probe","password":"fsv-warmup-probe"}')"
-            if [ "$http_status" = "401" ]; then
-              echo "gateway's DB-backed login path is live (attempt $i)"
+          for i in $(seq 1 30); do
+            if docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT 1" >/tmp/warmup.log 2>&1; then
+              echo "postgres is serving real queries (attempt $i)"
               exit 0
             fi
-            echo "attempt $i: got HTTP $http_status, expected 401 (wrong-credential rejection) — retrying"
-            sleep 3
+            echo "attempt $i: postgres not yet serving real queries — retrying"
+            sleep 2
           done
-          echo "gateway's DB-backed login path never became live within the bounded retry window"
-          cat /tmp/warmup-response.json
+          echo "postgres never started serving real queries within the bounded retry window"
+          cat /tmp/warmup.log
           exit 1
       - name: Verify fresh schema/bootstrap and role separation
         # Proves the auto-seed-on-a-fresh-volume path (docker-entrypoint-
