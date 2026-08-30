@@ -219,3 +219,198 @@ def test_reset_leaves_the_chart_alone():
     assert _one(
         "SELECT count(*) FROM records WHERE patient_id = %s AND title = 'A1c'", (DEMO_PATIENT,)
     ) == 2, "the demo A1c pair must survive a reset"
+
+
+# --- W10 Final 2 Stage 3: coverage/eligibility, messaging, ROI readiness ----
+
+
+def test_reset_restores_coverage_to_the_documented_baseline():
+    """docs/runbook.md used to warn coverage "reflects whatever the last real
+    eligibility check set it to and is NOT reset" — closed this stage: it now
+    restores 1738's documented stale baseline and clears any in-flight
+    verification_job_id."""
+    _run(
+        "UPDATE insurance_coverages SET status = 'active', verified_at = now(),"
+        " verification_job_id = 'test-job-123' WHERE patient_id = 1738"
+    )
+
+    _demo_reset()
+
+    row = _one(
+        "SELECT status || '|' || coalesce(verification_job_id, '') FROM insurance_coverages"
+        " WHERE patient_id = 1738"
+    )
+    assert row == "stale|", f"expected the documented stale baseline with no job id, got {row!r}"
+
+
+def test_reset_restores_messaging_to_the_documented_baseline():
+    """Thread 1 (patient 1738) is unread-by-both-clinicians and open in
+    seed.sql — a rehearsal that replies, marks it read, or closes it must
+    not carry over into the next one."""
+    thomas_user_id = _one("SELECT id FROM users WHERE patient_id = 1738 AND role = 'patient'")
+    follow_up_id = _one(
+        "INSERT INTO thread_messages (thread_id, sender_user_id, body, idempotency_key)"
+        " VALUES (1, %s, 'a rehearsal follow-up', 'test-followup-stage3') RETURNING id",
+        (thomas_user_id,),
+    )
+    _run(
+        "INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id) VALUES (1, %s, %s)",
+        (thomas_user_id, follow_up_id),
+    )
+    _run("UPDATE message_threads SET status = 'closed' WHERE id = 1")
+
+    _demo_reset()
+
+    assert _one("SELECT status FROM message_threads WHERE id = 1") == "open"
+    assert _one("SELECT count(*) FROM thread_messages WHERE thread_id = 1") == 1, (
+        "the extra follow-up must be cleared, leaving only the one seeded message"
+    )
+    assert _one("SELECT count(*) FROM thread_read_state WHERE thread_id = 1") == 0, (
+        "1738's thread has no read state at all in the documented baseline"
+    )
+
+
+def test_reset_clears_a_pending_roi_request_for_a_canonical_patient():
+    # Counts only 'pending' rows for 1042, not the total — a fulfilled
+    # request (see test_reset_never_deletes_a_fulfilled_roi_requests_row_or_
+    # its_disclosure, which also uses 1042) legitimately survives a reset
+    # and may already exist from an earlier test in this same run.
+    _run(
+        "INSERT INTO roi_requests (patient_id, requested_by, recipient, recipient_type, purpose, status)"
+        " VALUES (1042, 'frontdesk', 'Dr. Chen', 'provider', 'test', 'pending')"
+    )
+
+    _demo_reset()
+
+    assert _one("SELECT count(*) FROM roi_requests WHERE patient_id = 1042 AND status = 'pending'") == 0
+
+
+def test_reset_never_deletes_a_fulfilled_roi_requests_row_or_its_disclosure():
+    """A fulfilled request/authorization has a real disclosures row pointing
+    at it (45 CFR 164.508 accounting) — deleting either would either violate
+    the foreign key Postgres itself enforces, or silently orphan the
+    accounting log if it somehow didn't. Proven end to end through the real
+    API, the same way the request would actually get fulfilled."""
+    staff = _token("frontdesk")
+    request_id = httpx.post(
+        f"{GATEWAY}/roi/requests",
+        headers=_auth(staff),
+        json={"patient_id": 1042, "requested_by": "frontdesk", "recipient": "Dr. Chen, Stage3 Test",
+              "recipient_type": "provider", "purpose": "continuity of care"},
+        timeout=10,
+    ).json()["id"]
+    auth_id = httpx.post(
+        f"{GATEWAY}/roi/authorizations",
+        headers=_auth(staff),
+        json={"patient_id": 1042, "recipient": "Dr. Chen, Stage3 Test", "purpose": "continuity of care",
+              "signature_evidence_reference": "stage3-test-signed-form", "signed_by": "Maria Gonzalez",
+              "signed_at": "2026-08-30T06:00:00Z"},
+        timeout=10,
+    ).json()["id"]
+    httpx.post(
+        f"{GATEWAY}/roi/authorizations/{auth_id}/review",
+        headers=_auth(staff), json={"decision": "valid", "reviewed_by": "supervisor-stage3-test"}, timeout=10,
+    )
+    fulfill = httpx.post(
+        f"{GATEWAY}/roi/requests/{request_id}/fulfill",
+        headers=_auth(staff), json={"authorization_id": auth_id}, timeout=10,
+    )
+    assert fulfill.status_code == 200, fulfill.text
+    disclosure_id = fulfill.json()["disclosure_id"]
+
+    _demo_reset()
+
+    assert _one("SELECT status FROM roi_requests WHERE id = %s", (request_id,)) == "fulfilled"
+    assert _one("SELECT status FROM roi_authorizations WHERE id = %s", (auth_id,)) is not None
+    assert _one("SELECT id FROM disclosures WHERE id = %s", (disclosure_id,)) == disclosure_id, (
+        "the disclosure accounting row must survive a reset unconditionally"
+    )
+
+
+def test_reset_leaves_non_canonical_patients_and_non_reserved_rows_unchanged():
+    roi_before = _one("SELECT count(*) FROM roi_requests WHERE patient_id NOT IN (1042, 1737, 1738, 1739)")
+    threads_before = _one("SELECT count(*) FROM message_threads")
+    non_demo_appts_before = _one("SELECT count(*) FROM appointments WHERE slot_id NOT BETWEEN 95001 AND 95016")
+
+    _demo_reset()
+
+    assert _one(
+        "SELECT count(*) FROM roi_requests WHERE patient_id NOT IN (1042, 1737, 1738, 1739)"
+    ) == roi_before
+    assert _one("SELECT count(*) FROM message_threads") == threads_before, (
+        "reset must not create or delete a whole thread, only its content beyond the seeded baseline"
+    )
+    assert _one(
+        "SELECT count(*) FROM appointments WHERE slot_id NOT BETWEEN 95001 AND 95016"
+    ) == non_demo_appts_before
+
+
+def test_reset_never_touches_the_immutable_audit_and_disclosure_logs():
+    audit_before = _one("SELECT count(*) FROM audit_logs")
+    disclosures_before = _one("SELECT count(*) FROM disclosures")
+
+    _demo_reset()
+
+    assert _one("SELECT count(*) FROM audit_logs") == audit_before
+    assert _one("SELECT count(*) FROM disclosures") == disclosures_before
+
+
+def test_reset_leaves_the_approved_policy_corpus_alone():
+    docs_before = _one("SELECT count(*) FROM policy_documents")
+    embeddings_before = _one("SELECT count(*) FROM policy_chunk_embeddings")
+
+    _demo_reset()
+
+    assert _one("SELECT count(*) FROM policy_documents") == docs_before
+    assert _one("SELECT count(*) FROM policy_chunk_embeddings") == embeddings_before
+
+
+def test_reset_fails_closed_when_a_relied_on_fixture_is_missing():
+    """The exact regression this stage's guard exists to prevent: a reset
+    that reports success next to a broken/predates-the-seed database. Runs
+    the SQL file directly (not `make demo-reset`, which would `pytest.skip`
+    on a nonzero exit) so the failure itself can be asserted on."""
+    thread_1_message_ids = [
+        row[0] for row in _rows("SELECT id FROM thread_messages WHERE thread_id = 1")
+    ]
+    _run("DELETE FROM thread_read_state WHERE thread_id = 1")
+    _run("DELETE FROM thread_messages WHERE thread_id = 1")
+    _run("DELETE FROM message_threads WHERE id = 1")
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "postgres", "psql",
+             "-U", os.getenv("DB_USER", "riverbend_app"), "-d", os.getenv("DB_NAME", "riverbend"), "-q"],
+            cwd=REPO, input=open(os.path.join(REPO, "db", "seed", "demo_reset.sql")).read(),
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0, (
+            "a missing relied-on fixture must stop the script, not exit 0 next to stale output"
+        )
+        assert "predates the current seed" in result.stdout + result.stderr
+    finally:
+        # Restore the fixture this test deleted so the autouse teardown's
+        # own _demo_reset() call (which expects it) succeeds normally.
+        thomas_user_id = _one("SELECT id FROM users WHERE patient_id = 1738 AND role = 'patient'")
+        _run(
+            "INSERT INTO message_threads (id, patient_id, subject, status, created_by, created_at, updated_at)"
+            " VALUES (1, 1738, 'Question about my blood pressure readings', 'open', %s,"
+            " '2026-08-20 09:00:00', '2026-08-20 09:00:00')",
+            (thomas_user_id,),
+        )
+        for message_id in thread_1_message_ids:
+            _run(
+                "INSERT INTO thread_messages (id, thread_id, sender_user_id, body, idempotency_key, created_at)"
+                " VALUES (%s, 1, %s, 'My home readings have been running a bit high this week,"
+                " should I be concerned?', 'seed-1738-msg-1', '2026-08-20 09:00:00')",
+                (message_id, thomas_user_id),
+            )
+        # No setval() here: the runtime role lacks sequence-modification
+        # privilege (by design, migration 028), and it is not needed for
+        # correctness — the restored rows use their own captured original
+        # ids, and the sequence was already past them before this test ran.
+
+
+def _rows(sql, params=()):
+    with psycopg2.connect(DB_DSN) as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
