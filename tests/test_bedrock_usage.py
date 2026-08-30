@@ -6,6 +6,7 @@ tests/integration/test_bedrock_usage_events_migration.py.
 """
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -60,6 +61,17 @@ def test_persist_is_idempotent_for_a_repeated_turn(db):
 
     rows = bedrock_usage.usage_for(db, model_id="model-x")
     assert len(rows) == 1
+
+
+def test_persist_reraises_a_non_duplicate_integrity_violation(db):
+    """Review fix BU-ERR-SWALLOW: only the exact idempotency_key UNIQUE
+    violation is a no-op — a NOT NULL violation (model_id missing here) is
+    a real bug and must propagate, never be silently treated like a
+    harmless retry."""
+    bad_event = UsageEvent(provider="bedrock", model_id=None, use_case="summary_agent_chat", sequence=1)
+
+    with pytest.raises(IntegrityError):
+        bedrock_usage.persist(db, "corr-bad", [bad_event])
 
 
 def test_usage_for_filters_by_model_id_and_use_case(db):

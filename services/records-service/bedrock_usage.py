@@ -5,6 +5,7 @@ libs/policy_navigator) accumulates in memory and returns to its caller
 here directly; only what each already returns (provider, model id, a
 bounded use-case category, token counts) ever reaches this table.
 """
+import sqlite3
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -13,6 +14,33 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models import BedrockUsageEvent
+
+_IDEMPOTENCY_KEY_CONSTRAINT = "bedrock_usage_events_idempotency_key_unique"
+_POSTGRES_UNIQUE_VIOLATION_SQLSTATE = "23505"
+_SQLITE_IDEMPOTENCY_KEY_MESSAGE = "UNIQUE constraint failed: bedrock_usage_events.idempotency_key"
+
+
+def _is_idempotency_key_duplicate(exc: IntegrityError) -> bool:
+    """Review fix BU-ERR-SWALLOW: True ONLY for the exact idempotency_key
+    UNIQUE violation persist() already expects as an idempotent retry —
+    never a CHECK, NOT NULL, foreign-key, or any other integrity failure,
+    all of which are real bugs and must propagate, not be silently
+    swallowed alongside the one case that is genuinely a no-op."""
+    orig = exc.orig
+    diag = getattr(orig, "diag", None)
+    if diag is not None:
+        # PostgreSQL: pin to BOTH the unique_violation SQLSTATE and this
+        # exact constraint's name, never any other unique constraint this
+        # (or another) table might carry.
+        return (
+            getattr(diag, "sqlstate", None) == _POSTGRES_UNIQUE_VIOLATION_SQLSTATE
+            and getattr(diag, "constraint_name", None) == _IDEMPOTENCY_KEY_CONSTRAINT
+        )
+    if isinstance(orig, sqlite3.IntegrityError):
+        # SQLite carries no SQLSTATE or constraint name — only its own
+        # fixed message shape naming the exact table.column.
+        return _SQLITE_IDEMPOTENCY_KEY_MESSAGE in str(orig)
+    return False
 
 
 @dataclass(frozen=True)
@@ -45,8 +73,9 @@ def persist(db: Session, correlation_id: str, events: Iterable[UsageEvent]) -> N
             with db.begin_nested():
                 db.add(row)
                 db.flush()
-        except IntegrityError:
-            continue
+        except IntegrityError as exc:
+            if not _is_idempotency_key_duplicate(exc):
+                raise
     db.flush()
 
 
