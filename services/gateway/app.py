@@ -64,7 +64,15 @@ from models import (
     Patient,
     PatientAccessGrant,
     PatientInvitation,
+    RoiAuthorization,
+    RoiDisclosureRestriction,
+    RoiRequest,
     User,
+)
+from roi_authorization import (
+    roi_authorization_patient_id,
+    roi_request_patient_id,
+    roi_restriction_patient_id,
 )
 from security import (
     create_mfa_challenge,
@@ -2228,70 +2236,152 @@ def proxy_cancel(
 # --------------------------------------------------------------------------- #
 # release of information
 # --------------------------------------------------------------------------- #
+# W10 Final 2 Stage 1: every route below that concerns a SPECIFIC patient now
+# (a) requires the session's own actor to hold an active patient_access_grants
+# row for that patient — role permission alone (roi.write/disclosures.read)
+# used to be the only gate, so any roi_clerk/legacy-staff account could
+# request, review, revoke, or fulfill a release for a patient they have no
+# relationship to; and (b) derives requested_by/reviewed_by/revoked_by from
+# the session, never the caller's JSON body, which used to let a caller claim
+# to be anyone. Every call also forwards forward_status=True so a downstream
+# 4xx/5xx (e.g. an invalid/expired authorization, a restriction block) reaches
+# the browser as itself instead of being flattened into a false 200 — see
+# _post/_get's own docstrings for what forward_status controls.
+
+
+def _require_roi_patient_grant(db: Session, session: dict, patient_id: int | None) -> None:
+    """Raises 403 unless the session's actor holds an active grant for
+    patient_id. patient_id=None (an id that resolved to no row at all) is
+    treated identically to "no grant" — a denial here never confirms or
+    denies whether the underlying roi_requests/roi_authorizations row
+    exists, matching visit_authorization.py's own no-existence-oracle rule."""
+    actor_id = parse_user_id(session.get("user_id"))
+    if actor_id is None or patient_id is None or not has_active_grant(db, user_id=actor_id, patient_id=patient_id):
+        raise HTTPException(status_code=403, detail="not authorized")
+
+
+def _roi_actor_label(session: dict) -> str:
+    actor_id = parse_user_id(session.get("user_id"))
+    return session.get("username") or f"user_id={actor_id}"
+
+
 @app.get("/roi/requests")
-def proxy_roi_list(session: dict = Depends(require_permission("disclosures.read")), patient_id: Optional[int] = None):
-    return _get("roi", "/roi/requests", params={"patient_id": patient_id})
+def proxy_roi_list(
+    session: dict = Depends(require_permission("disclosures.read")),
+    patient_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    # Grant-checked only when a specific patient is named. An unscoped call
+    # (no patient_id) is the roi_clerk's own operational queue view across
+    # many patients they process releases for without ever holding a
+    # treatment-style grant — the same reasoning config/roles.yaml gives
+    # roi_clerk roi.write/disclosures.read without requiring patients.read
+    # to imply chart access. It is not "viewing one patient's records" the
+    # way every other route below is.
+    if patient_id is not None:
+        _require_roi_patient_grant(db, session, patient_id)
+    return _get("roi", "/roi/requests", params={"patient_id": patient_id}, forward_status=True)
 
 
 @app.post("/roi/requests")
-def proxy_roi_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
-    return _post("roi", "/roi/requests", payload)
+def proxy_roi_create(
+    payload: dict, session: dict = Depends(require_permission("roi.write")), db: Session = Depends(get_db)
+):
+    try:
+        patient_id = int(payload.get("patient_id"))
+    except (TypeError, ValueError):
+        patient_id = None
+    _require_roi_patient_grant(db, session, patient_id)
+    payload = {**payload, "requested_by": _roi_actor_label(session)}
+    return _post("roi", "/roi/requests", payload, forward_status=True)
 
 
 @app.post("/roi/requests/{request_id}/fulfill")
 def proxy_roi_fulfill(
-    request_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
+    request_id: int, payload: dict, session: dict = Depends(require_permission("roi.write")),
+    db: Session = Depends(get_db),
 ):
+    _require_roi_patient_grant(db, session, roi_request_patient_id(db, request_id=request_id))
     # w8-planner-2: `payload` used to be hardcoded to {} here, discarding
     # whatever the caller sent. P4 (030) changed the payload shape again —
     # it's now just {"authorization_id": N}, a reference to a persisted,
     # human-reviewed roi_authorizations row that roi-service loads and
     # revalidates itself. The gateway forwards the payload as-is either
     # way; it has no opinion on its shape.
-    return _post("roi", f"/roi/requests/{request_id}/fulfill", payload)
+    return _post("roi", f"/roi/requests/{request_id}/fulfill", payload, forward_status=True)
 
 
 @app.post("/roi/authorizations")
-def proxy_roi_authorization_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
-    return _post("roi", "/roi/authorizations", payload)
+def proxy_roi_authorization_create(
+    payload: dict, session: dict = Depends(require_permission("roi.write")), db: Session = Depends(get_db)
+):
+    try:
+        patient_id = int(payload.get("patient_id"))
+    except (TypeError, ValueError):
+        patient_id = None
+    _require_roi_patient_grant(db, session, patient_id)
+    return _post("roi", "/roi/authorizations", payload, forward_status=True)
 
 
 @app.get("/roi/authorizations/{authorization_id}")
 def proxy_roi_authorization_get(
-    authorization_id: int, session: dict = Depends(require_permission("disclosures.read"))
+    authorization_id: int, session: dict = Depends(require_permission("disclosures.read")),
+    db: Session = Depends(get_db),
 ):
-    return _get("roi", f"/roi/authorizations/{authorization_id}")
+    _require_roi_patient_grant(db, session, roi_authorization_patient_id(db, authorization_id=authorization_id))
+    return _get("roi", f"/roi/authorizations/{authorization_id}", forward_status=True)
 
 
 @app.post("/roi/authorizations/{authorization_id}/review")
 def proxy_roi_authorization_review(
-    authorization_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
+    authorization_id: int, payload: dict, session: dict = Depends(require_permission("roi.write")),
+    db: Session = Depends(get_db),
 ):
-    return _post("roi", f"/roi/authorizations/{authorization_id}/review", payload)
+    _require_roi_patient_grant(db, session, roi_authorization_patient_id(db, authorization_id=authorization_id))
+    payload = {**payload, "reviewed_by": _roi_actor_label(session)}
+    return _post("roi", f"/roi/authorizations/{authorization_id}/review", payload, forward_status=True)
 
 
 @app.post("/roi/authorizations/{authorization_id}/revoke")
 def proxy_roi_authorization_revoke(
-    authorization_id: int, payload: dict, session: dict = Depends(require_permission("roi.write"))
+    authorization_id: int, payload: dict, session: dict = Depends(require_permission("roi.write")),
+    db: Session = Depends(get_db),
 ):
-    return _post("roi", f"/roi/authorizations/{authorization_id}/revoke", payload)
+    _require_roi_patient_grant(db, session, roi_authorization_patient_id(db, authorization_id=authorization_id))
+    payload = {**payload, "revoked_by": _roi_actor_label(session)}
+    return _post("roi", f"/roi/authorizations/{authorization_id}/revoke", payload, forward_status=True)
 
 
 @app.post("/roi/restrictions")
-def proxy_roi_restriction_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
-    return _post("roi", "/roi/restrictions", payload)
+def proxy_roi_restriction_create(
+    payload: dict, session: dict = Depends(require_permission("roi.write")), db: Session = Depends(get_db)
+):
+    # Review fix ROI-RESTRICT-GRANT: a restriction blocks/unblocks future
+    # disclosures for a specific patient just as directly as an ROI
+    # request/authorization does — left ungated in the original PR, which
+    # named "request creation, authorization review/revocation, request
+    # viewing, and fulfillment" but not restrictions.
+    try:
+        patient_id = int(payload.get("patient_id"))
+    except (TypeError, ValueError):
+        patient_id = None
+    _require_roi_patient_grant(db, session, patient_id)
+    return _post("roi", "/roi/restrictions", payload, forward_status=True)
 
 
 @app.post("/roi/restrictions/{restriction_id}/revoke")
 def proxy_roi_restriction_revoke(
-    restriction_id: int, session: dict = Depends(require_permission("roi.write"))
+    restriction_id: int, session: dict = Depends(require_permission("roi.write")),
+    db: Session = Depends(get_db),
 ):
-    return _post("roi", f"/roi/restrictions/{restriction_id}/revoke", {})
+    _require_roi_patient_grant(db, session, roi_restriction_patient_id(db, restriction_id=restriction_id))
+    return _post("roi", f"/roi/restrictions/{restriction_id}/revoke", {}, forward_status=True)
 
 
 @app.get("/roi/patients/{patient_id}/accounting")
 def proxy_roi_accounting(
-    patient_id: int, session: dict = Depends(require_permission("disclosures.read"))
+    patient_id: int, session: dict = Depends(require_permission("disclosures.read")),
+    db: Session = Depends(get_db),
 ):
     # An internal disclosure log, NOT a 45 CFR 164.528 accounting of
     # disclosures on its own — see roi-service/models.py::Disclosure for
@@ -2299,7 +2389,8 @@ def proxy_roi_accounting(
     # all this ever contains). Same disclosures.read permission
     # proxy_roi_list already requires; no new RBAC entry needed
     # (config/roles.yaml already grants this to roi_clerk and management).
-    return _get("roi", f"/roi/patients/{patient_id}/accounting")
+    _require_roi_patient_grant(db, session, patient_id)
+    return _get("roi", f"/roi/patients/{patient_id}/accounting", forward_status=True)
 
 
 # --------------------------------------------------------------------------- #

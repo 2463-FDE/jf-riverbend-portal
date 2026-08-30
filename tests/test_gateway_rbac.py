@@ -357,6 +357,12 @@ def test_roi_fulfill_forwards_the_authorization_payload_downstream(client, monke
     # a caller-asserted signer/reference/timestamp; the gateway still just
     # forwards whatever it's given.
     monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
+    # W10 Final 2 Stage 1: proxy_roi_fulfill now resolves request_id=1's
+    # patient via a real RoiRequest row before checking the caller's grant —
+    # patient 1042 is already granted to TEST_USER_ID by this file's fixture.
+    db = next(app_mod.app.dependency_overrides[app_mod.get_db]())
+    db.add(app_mod.RoiRequest(id=1, patient_id=1042))
+    db.commit()
     captured = {}
 
     def fake_post(url, json=None, **kwargs):
@@ -373,11 +379,17 @@ def test_roi_fulfill_forwards_the_authorization_payload_downstream(client, monke
 
 
 def test_roi_clerk_can_create_and_review_an_authorization(client, monkeypatch):
-    # Gateway proxy routes don't forward the downstream status code by
-    # default (see _post's forward_status flag, unused here) — matches the
-    # existing proxy_roi_create convention, which also returns 200 for a
-    # downstream 201.
+    # W10 Final 2 Stage 1: proxy_roi_authorization_create/review now forward
+    # the real downstream status code (forward_status=True) instead of
+    # always answering 200 — a downstream 201/422/etc. must reach the caller
+    # as itself. review_authorization also needs a real RoiAuthorization(id=7)
+    # row in the fake DB now, so the new patient-grant check (patient 1042,
+    # already granted to TEST_USER_ID by this file's fixture) has something
+    # to resolve authorization_id=7 against.
     monkeypatch.setattr(app_mod, "get_session", lambda t: _session_for("roi_clerk") if t == VALID_TOKEN else None)
+    db = next(app_mod.app.dependency_overrides[app_mod.get_db]())
+    db.add(app_mod.RoiAuthorization(id=7, patient_id=1042))
+    db.commit()
     _stub_downstream(monkeypatch, payload={"id": 7, "patient_id": 1042, "status": "pending"}, status_code=201)
 
     create_resp = client.post(
@@ -391,7 +403,7 @@ def test_roi_clerk_can_create_and_review_an_authorization(client, monkeypatch):
         },
         headers=_auth(),
     )
-    assert create_resp.status_code == 200
+    assert create_resp.status_code == 201
 
     _stub_downstream(monkeypatch, payload={"id": 7, "patient_id": 1042, "status": "valid"})
     review_resp = client.post(
