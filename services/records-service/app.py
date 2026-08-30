@@ -248,8 +248,9 @@ app = FastAPI(title="Riverbend records-service", lifespan=lifespan)
 install_http_metrics(app, "records")
 
 # W10 Final Stage 6 sub-slice 4: RECORDS_LEGACY_N_PLUS_ONE_CHART_READS
-# (imported above) is incremented once per call to get_patient_records
-# below (DEBT D8) — counted, not batched or deprecated in this stage.
+# (imported above) is incremented once per COMPLETED, audited call to
+# get_patient_records below (DEBT D8) — counted, not batched or
+# deprecated in this stage.
 
 
 @app.get("/healthz")
@@ -640,12 +641,17 @@ def get_patient_records(
         log.error("get_patient_records: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")
 
-    RECORDS_LEGACY_N_PLUS_ONE_CHART_READS.inc()
     _write_audit(
         db,
         actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient_records outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
+    # Review fix RECORDS-COUNTER-BEFORE-AUDIT: this counts a COMPLETED,
+    # auditable chart read, not merely an assembly attempt — incremented
+    # only after _write_audit() has actually committed. An audit-write
+    # failure (503, above) must not still count this as a legacy-path
+    # read that happened.
+    RECORDS_LEGACY_N_PLUS_ONE_CHART_READS.inc()
     return PatientChart(patient_id=patient_id, encounters=chart)
 
 

@@ -27,7 +27,8 @@ REQUEST_COUNT = Counter(
     "http_requests_total", "Total HTTP requests handled", ["service", "method", "route", "status_class"],
 )
 REQUEST_LATENCY_SECONDS = Histogram(
-    "http_request_duration_seconds", "HTTP request latency in seconds", ["service", "method", "route"],
+    "http_request_duration_seconds", "HTTP request latency in seconds",
+    ["service", "method", "route", "status_class"],
 )
 REQUESTS_IN_FLIGHT = Gauge(
     "http_requests_in_flight", "HTTP requests currently being handled", ["service"],
@@ -58,21 +59,20 @@ def _dispatch_for(service: str):
                 response = await call_next(request)
             except Exception:
                 route = _route_template(request)
-                REQUEST_LATENCY_SECONDS.labels(service=service, method=request.method, route=route).observe(
-                    monotonic() - started
-                )
+                REQUEST_LATENCY_SECONDS.labels(
+                    service=service, method=request.method, route=route, status_class="5xx",
+                ).observe(monotonic() - started)
                 REQUEST_COUNT.labels(service=service, method=request.method, route=route, status_class="5xx").inc()
                 raise
         finally:
             REQUESTS_IN_FLIGHT.labels(service=service).dec()
 
         route = _route_template(request)
-        REQUEST_LATENCY_SECONDS.labels(service=service, method=request.method, route=route).observe(
-            monotonic() - started
-        )
-        REQUEST_COUNT.labels(
-            service=service, method=request.method, route=route, status_class=_status_class(response.status_code),
-        ).inc()
+        status_class = _status_class(response.status_code)
+        REQUEST_LATENCY_SECONDS.labels(
+            service=service, method=request.method, route=route, status_class=status_class,
+        ).observe(monotonic() - started)
+        REQUEST_COUNT.labels(service=service, method=request.method, route=route, status_class=status_class).inc()
         return response
 
     return dispatch

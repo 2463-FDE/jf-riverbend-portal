@@ -46,12 +46,21 @@ def _counter_value(counter, **labels):
         return 0.0
 
 
+def _histogram_observation_count(histogram, **labels):
+    child = histogram.labels(**labels)
+    return next(s.value for s in child._child_samples() if s.name == "_count")
+
+
 def test_only_the_bounded_label_set_is_ever_used():
     assert set(REQUEST_COUNT._labelnames) <= _ALLOWED_LABEL_NAMES
     assert set(REQUEST_LATENCY_SECONDS._labelnames) <= _ALLOWED_LABEL_NAMES
     assert set(REQUESTS_IN_FLIGHT._labelnames) <= _ALLOWED_LABEL_NAMES
     assert "patient_id" not in REQUEST_COUNT._labelnames
     assert "correlation_id" not in REQUEST_COUNT._labelnames
+    # Review fix METRICS-LATENCY-STATUS: latency must carry status_class too
+    # (not merely a subset of the allow-list) — otherwise error-rate and
+    # error-latency can't be derived together per route.
+    assert "status_class" in REQUEST_LATENCY_SECONDS._labelnames
 
 
 def test_the_route_label_is_the_template_not_the_raw_resolved_path():
@@ -104,13 +113,31 @@ def test_an_unhandled_exception_is_still_recorded_as_5xx_and_still_propagates():
 def test_latency_is_observed_for_a_successful_request():
     client = TestClient(_app(), raise_server_exceptions=False)
     before = REQUEST_LATENCY_SECONDS.labels(
-        service="test-service", method="GET", route="/items/{item_id}"
+        service="test-service", method="GET", route="/items/{item_id}", status_class="2xx",
     )._sum.get()
 
     client.get("/items/1")
 
-    after = REQUEST_LATENCY_SECONDS.labels(service="test-service", method="GET", route="/items/{item_id}")._sum.get()
+    after = REQUEST_LATENCY_SECONDS.labels(
+        service="test-service", method="GET", route="/items/{item_id}", status_class="2xx",
+    )._sum.get()
     assert after >= before  # a real, non-negative observation was recorded
+
+
+def test_an_unhandled_exception_records_exactly_one_5xx_latency_observation():
+    client = TestClient(_app(), raise_server_exceptions=False)
+    before = _histogram_observation_count(
+        REQUEST_LATENCY_SECONDS, service="test-service", method="GET", route="/boom", status_class="5xx",
+    )
+
+    resp = client.get("/boom")
+
+    assert resp.status_code == 500
+    after = _histogram_observation_count(
+        REQUEST_LATENCY_SECONDS, service="test-service", method="GET", route="/boom", status_class="5xx",
+    )
+    assert after - before == 1
+    assert _counter_value(REQUESTS_IN_FLIGHT, service="test-service") == 0
 
 
 def test_in_flight_gauge_returns_to_zero_after_every_request_including_a_failed_one():

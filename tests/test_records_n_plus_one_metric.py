@@ -69,3 +69,20 @@ def test_a_denied_read_never_increments_the_counter(client):
 
     assert resp.status_code == 403
     assert RECORDS_LEGACY_N_PLUS_ONE_CHART_READS._value.get() - before == 0
+
+
+def test_an_audit_write_failure_returns_503_and_never_increments_the_counter(client, monkeypatch):
+    """Review fix RECORDS-COUNTER-BEFORE-AUDIT: the counter represents a
+    COMPLETED, auditable read — an audit-write failure must still surface
+    its own 503 (unchanged) and must not have already counted the read as
+    having happened."""
+    def _raise(*a, **k):
+        raise app_mod.HTTPException(status_code=503, detail="database unavailable")
+
+    monkeypatch.setattr(app_mod, "_write_audit", _raise)
+    before = RECORDS_LEGACY_N_PLUS_ONE_CHART_READS._value.get()
+
+    resp = client.get(f"/patients/{PATIENT}/records", headers=_headers())
+
+    assert resp.status_code == 503
+    assert RECORDS_LEGACY_N_PLUS_ONE_CHART_READS._value.get() - before == 0
