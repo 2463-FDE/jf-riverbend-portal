@@ -102,6 +102,21 @@ def parse_draft(payload: str) -> StructuredDraft:
         raise DraftParseError("a claim did not match its schema") from exc
 
 
+@dataclass(frozen=True)
+class UsageTurn:
+    """One successful model round-trip's token usage — in memory only.
+    W10 Final Stage 5 sub-slice 3: `provider`/`use_case` are the caller's
+    (summary_agent_path.py) to attach at persistence time, not this
+    library's; this carries only what the provider response itself
+    reported. Never recorded for a failed call — no legitimate token count
+    exists for one."""
+
+    model_id: str
+    turn: int
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+
 @dataclass
 class AgentRunResult:
     """One run: the draft, where it came from, and the evidence behind it.
@@ -121,3 +136,4 @@ class AgentRunResult:
     provider_error_type: Optional[str] = None
     termination_reason: Optional[str] = None
     citations: list = field(default_factory=list)
+    usage: tuple = ()

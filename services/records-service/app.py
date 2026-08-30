@@ -56,6 +56,7 @@ from patient_access_gate import (
 )
 import agent_drafts
 import agent_lifecycle
+import bedrock_usage
 import messaging
 import patient_summary
 import policy_navigator_path
@@ -1965,7 +1966,15 @@ def ask_policy_navigator(
     caller's own role-derived audience/workflow scope
     (libs/policy_navigator.scope_for_role). No patient_id, no grant check —
     this never touches patient data, only the scope-filtered corpus. Not
-    persisted; nothing here writes an audit_logs row or a draft."""
+    persisted; nothing here writes an audit_logs row or a draft.
+
+    Review fix PN-FLUSH-ESCAPE: the one exception (W10 Final Stage 5
+    sub-slice 3, durable token-usage accounting) is a fully SEPARATE step,
+    below, after the navigator has already returned its answer — never
+    inside policy_navigator_path.ask_policy_navigator, and never rerunning
+    Bedrock/retrieval if this step fails. An accounting failure rolls back
+    and is logged by TYPE only; the caller still gets the answer already
+    produced."""
     _verify_internal_token(x_internal_token)
     question = (req.question or "").strip()
     if not question:
@@ -1975,6 +1984,21 @@ def ask_policy_navigator(
 
     actor_role = _actor_role(db, parse_user_id(x_actor_id))
     result = policy_navigator_path.ask_policy_navigator(question, actor_role=actor_role)
+
+    if result.usage:
+        try:
+            bedrock_usage.persist(db, new_correlation_id(), [
+                bedrock_usage.UsageEvent(
+                    provider="bedrock", model_id=turn.model_id, use_case="policy_navigator_chat",
+                    sequence=turn.turn, input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                )
+                for turn in result.usage
+            ])
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            log.error("policy navigator: usage accounting failed error_type=%s", type(exc).__name__)
+
     return PolicyAnswerOut(
         answer=result.answer,
         citations=[

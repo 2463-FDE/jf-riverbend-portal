@@ -4,8 +4,13 @@ records-service hosts this for the same reason it hosts the patient-summary
 agent (summary_agent_path.py): it already carries the LangChain v1 +
 Bedrock dependency set (requirements.txt) and Postgres access. Unlike that
 agent, this path is stateless — no patient, no grant, no draft, no persisted
-trace; a caller's ROLE alone (never a patient id) determines what policy
-text they may see, via libs/policy_navigator.scope_for_role.
+trace, no question/answer/retrieved text ever written anywhere, and (review
+fix PN-FLUSH-ESCAPE) no database session at all: this function ONLY
+generates the answer. Durable token-usage accounting (W10 Final Stage 5
+sub-slice 3) is a SEPARATE step the caller (app.py's /policy/ask route)
+performs after this function has already returned — never inside it, so a
+usage-accounting failure can never prevent the already-produced answer from
+reaching the caller. See app.py::ask_policy_navigator for that step.
 """
 import os
 
@@ -59,6 +64,10 @@ def ask_policy_navigator(question: str, *, actor_role: str, model=None) -> Polic
     reached. A connection is now only ever opened once the provider is
     already known-good, and its own construction failure returns before
     `conn` exists at all.
+
+    Review fix PN-FLUSH-ESCAPE: this function takes no `db` and persists
+    nothing — `result.usage` is the caller's to account for, entirely after
+    this call has already returned the answer.
     """
     scope = scope_for_role(actor_role)
     model_id = os.getenv("POLICY_EMBEDDING_MODEL_ID", "")

@@ -4,6 +4,11 @@ retrieval-infrastructure fallback path `run_policy_navigator` itself never
 covers (a Postgres/embedding-provider construction failure), so this never
 raises out of the route, and (review fix PN-CONN-LEAK) never opens a
 Postgres connection it fails to close.
+
+Review fix PN-FLUSH-ESCAPE: this module takes no `db` and persists no
+usage accounting at all — that is entirely app.py's /policy/ask route's
+job, after this function has already returned. See
+tests/test_records_policy_route.py for that coverage.
 """
 from conftest import load_module
 

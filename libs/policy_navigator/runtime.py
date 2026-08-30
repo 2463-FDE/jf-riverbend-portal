@@ -1,10 +1,15 @@
 """The policy navigator agent loop: LangChain v1 `create_agent` over Bedrock
 Converse (w-9-2-planner P3). Mirrors libs/summary_agent/runtime.py's shape
 (lazy langchain imports, real/fixture/fallback provenance, never raises for
-a provider problem) but is stateless — no draft, no review gate, nothing
-persisted. Read-only: it can only explain approved synthetic policy, never
-book/cancel, change eligibility, approve summaries, release records, send
-messages, or modify accounts (agents.md).
+a provider problem) but is stateless — no draft, no review gate, no
+question/answer/retrieved text ever persisted. Read-only: it can only
+explain approved synthetic policy, never book/cancel, change eligibility,
+approve summaries, release records, send messages, or modify accounts
+(agents.md). The one exception (W10 Final Stage 5 sub-slice 3): this run's
+`usage` field carries in-memory-only token counts for the caller
+(policy_navigator_path.py) to persist as durable usage accounting — never
+by this module itself, and never anything beyond provider/model/token
+counts.
 
 CITATION VALIDATION IS THE SAFETY NET, NOT THE PROMPT. The system prompt
 asks the model to cite only what retrieve_policy actually returned, but
@@ -24,7 +29,7 @@ from libs.metrics import record_counter
 from libs.policy_corpus import PolicyRetriever, RetrievalLedger, RetrievalScope
 from libs.safe_logging import get_safe_logger
 
-from .contracts import CitedSource, PolicyNavigatorResult
+from .contracts import CitedSource, PolicyNavigatorResult, UsageTurn
 from .tool import build_policy_tool
 
 log = get_safe_logger(__name__)
@@ -97,6 +102,38 @@ def _model_id_of(model) -> Optional[str]:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _usage_middleware(model_id: Optional[str], label: ProvenanceLabel, usage_events: list):
+    """W10 Final Stage 5 sub-slice 3: records each REAL turn's token usage
+    in-memory only — never for a fixture/scripted test model, even one
+    that happens to set usage_metadata itself. No trace/error handling
+    here (unlike summary_agent's middleware): a failed call is caught by
+    this run's own outer try/except, which already re-raises/classifies it
+    without this middleware's help."""
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.messages import AIMessage
+
+    class _UsageMiddleware(AgentMiddleware):
+        def __init__(self):
+            super().__init__()
+            self.turn = 0
+
+        def wrap_model_call(self, request, handler):
+            self.turn += 1
+            response = handler(request)
+            if label is ProvenanceLabel.REAL:
+                messages = getattr(response, "result", None) or [response]
+                ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+                usage = getattr(ai, "usage_metadata", None) if ai else None
+                if usage:
+                    usage_events.append(UsageTurn(
+                        model_id=model_id, turn=self.turn,
+                        input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                    ))
+            return response
+
+    return _UsageMiddleware()
 
 
 def _citations_from(ledger: RetrievalLedger, citation_ids) -> tuple:
@@ -198,8 +235,10 @@ def _run_policy_navigator(
         resolved = label or ProvenanceLabel.FIXTURE
 
     model_id = _model_id_of(model)
+    usage_events = []
     policy_tool = build_policy_tool(retriever=retriever, scope=scope, ledger=ledger)
-    agent = create_agent(model, [policy_tool], system_prompt=SYSTEM_PROMPT)
+    agent = create_agent(model, [policy_tool], system_prompt=SYSTEM_PROMPT,
+                         middleware=[_usage_middleware(model_id, resolved, usage_events)])
 
     try:
         state = agent.invoke(
@@ -217,13 +256,13 @@ def _run_policy_navigator(
         log.warning("policy navigator hit its turn limit (error_type=%s)", type(exc).__name__)
         return PolicyNavigatorResult(
             answer=_SAFE_MAX_TURNS_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
-            model_id=None, termination_reason="max_turns",
+            model_id=None, termination_reason="max_turns", usage=tuple(usage_events),
         )
     except Exception as exc:
         log.warning("policy navigator run failed (error_type=%s)", type(exc).__name__)
         return PolicyNavigatorResult(
             answer=_SAFE_PROVIDER_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
-            model_id=model_id, termination_reason="provider_error",
+            model_id=model_id, termination_reason="provider_error", usage=tuple(usage_events),
         )
 
     cited_ids = _CITATION_RE.findall(answer_text)
@@ -231,7 +270,7 @@ def _run_policy_navigator(
         log.warning("policy navigator cited an id never retrieved for this request")
         return PolicyNavigatorResult(
             answer=_SAFE_CITATION_INVALID_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
-            model_id=model_id, termination_reason="citation_invalid",
+            model_id=model_id, termination_reason="citation_invalid", usage=tuple(usage_events),
         )
 
     if not cited_ids:
@@ -248,10 +287,10 @@ def _run_policy_navigator(
         log.info("policy navigator produced no grounded citation; returning a safe refusal")
         return PolicyNavigatorResult(
             answer=_SAFE_NO_EVIDENCE_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
-            model_id=model_id, termination_reason="no_evidence",
+            model_id=model_id, termination_reason="no_evidence", usage=tuple(usage_events),
         )
 
     return PolicyNavigatorResult(
         answer=answer_text, citations=_citations_from(ledger, cited_ids), label=resolved.value,
-        model_id=model_id, termination_reason="answered",
+        model_id=model_id, termination_reason="answered", usage=tuple(usage_events),
     )

@@ -19,6 +19,7 @@ from libs.summary_agent.runtime import run_summary_agent
 
 import agent_drafts
 import agent_lifecycle
+import bedrock_usage
 from config import settings
 from logging_config import configure
 
@@ -27,6 +28,7 @@ log = configure(settings.service_name)
 DEFAULT_AUDIENCE = "patient"
 _WORKFLOW = "patient_summary"
 _PROVIDER = "bedrock"
+_USE_CASE = "summary_agent_chat"
 
 
 @dataclass
@@ -142,6 +144,16 @@ def generate_draft(
     # validation) to the durable lifecycle stream, in the SAME transaction
     # as the draft/validation rows above — commits or rolls back together.
     agent_lifecycle.persist(db, correlation_id, trace.events)
+    # W10 Final Stage 5 sub-slice 3: durable usage accounting for whichever
+    # turns genuinely called a real Bedrock model — empty whenever no real
+    # model was ever configured/reached, never invented.
+    bedrock_usage.persist(db, correlation_id, [
+        bedrock_usage.UsageEvent(
+            provider=_PROVIDER, model_id=turn.model_id, use_case=_USE_CASE, sequence=turn.turn,
+            input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+        )
+        for turn in result.usage
+    ])
     log.info(
         "summary agent draft (correlation_id=%s patient_id=%s version=%s label=%s passed=%s code=%s)",
         correlation_id, patient_id, draft.version, result.label.value, outcome.passed,

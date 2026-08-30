@@ -1,5 +1,5 @@
 """ORM models records-service touches. (Copy-paste per service — no shared lib yet, ADR 0001.)"""
-from sqlalchemy import JSON, Boolean, Column, ForeignKey, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, Column, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.sql import func
 
@@ -262,6 +262,28 @@ class AgentLifecycleEvent(Base):
             sqlite_where=text("stage = 'display'"),
         ),
     )
+
+
+class BedrockUsageEvent(Base):
+    """Durable Bedrock chat usage accounting (migration 037) — see
+    services/records-service/bedrock_usage.py, the only writer. Never a
+    prompt, response, caller question, retrieved text, patient/user id,
+    credential, or raw error — no column here could hold any of those.
+    `cost_usd`/`rate_version` stay NULL together until a real, versioned
+    rate configuration exists (none does yet)."""
+
+    __tablename__ = "bedrock_usage_events"
+
+    id = Column(Integer, primary_key=True)
+    idempotency_key = Column(Text, nullable=False, unique=True)
+    provider = Column(Text, nullable=False)
+    model_id = Column(Text, nullable=False)
+    use_case = Column(Text, nullable=False)
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
+    rate_version = Column(Text)
+    cost_usd = Column(Numeric(12, 6))
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
 class MessageThread(Base):

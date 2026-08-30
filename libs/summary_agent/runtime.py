@@ -24,7 +24,7 @@ from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from libs.policy_corpus import RetrievalScope
 from libs.safe_logging import get_safe_logger
 
-from .contracts import AgentRunResult, QuoteClaim, StructuredDraft, parse_draft
+from .contracts import AgentRunResult, QuoteClaim, StructuredDraft, UsageTurn, parse_draft
 from .retrieval import RetrievalLedger, RetrievalLimits, build_retrieval_tool, citations_for_persistence, retrieve
 
 log = get_safe_logger(__name__)
@@ -89,7 +89,7 @@ def _model_id_of(model) -> Optional[str]:
     return None
 
 
-def _trace_middleware(trace: TraceRecorder, model_id: Optional[str], label: ProvenanceLabel):
+def _trace_middleware(trace: TraceRecorder, model_id: Optional[str], label: ProvenanceLabel, usage_events: list):
     from langchain.agents.middleware import AgentMiddleware
     from langchain_core.messages import AIMessage
 
@@ -116,6 +116,15 @@ def _trace_middleware(trace: TraceRecorder, model_id: Optional[str], label: Prov
             calls = list(getattr(ai, "tool_calls", None) or []) if ai else []
             trace.agent_decision(tool_name=calls[0]["name"] if calls else None, turn=self.turn,
                                  stop_reason="tool_use" if calls else "end_turn")
+            # W10 Final Stage 5 sub-slice 3: only ever record usage for a
+            # REAL provider call — never a fixture/scripted test model, even
+            # one that happens to set usage_metadata itself.
+            usage = getattr(ai, "usage_metadata", None) if ai else None
+            if label is ProvenanceLabel.REAL and usage:
+                usage_events.append(UsageTurn(
+                    model_id=model_id, turn=self.turn,
+                    input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                ))
             return response
 
     return _TraceMiddleware()
@@ -145,7 +154,8 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
 _FALLBACK_QUERY = "approved Riverbend guidance for a patient-facing chart summary"
 
 
-def _fallback(retriever, *, scope, ledger, limits, trace, error_type, termination_reason) -> AgentRunResult:
+def _fallback(retriever, *, scope, ledger, limits, trace, error_type, termination_reason,
+              usage_events=()) -> AgentRunResult:
     if not ledger.citation_ids:
         # The failure came before any retrieval, so the fallback fetches its own
         # evidence — deterministically, through the same bounded call.
@@ -159,6 +169,10 @@ def _fallback(retriever, *, scope, ledger, limits, trace, error_type, terminatio
         model_id=None, prompt_version=None, provider_error_type=error_type,
         termination_reason=termination_reason,
         citations=citations_for_persistence(ledger, draft.citation_ids()),
+        # A turn or more may have genuinely succeeded (and used real tokens)
+        # before the run ultimately fell back (e.g. max_turns) — those turns'
+        # usage is still real and still worth recording.
+        usage=tuple(usage_events),
     )
 
 
@@ -191,9 +205,11 @@ def run_summary_agent(
 
     limits = limits or RetrievalLimits()
     ledger = RetrievalLedger()
+    usage_events = []
     trace.request(actor_role=actor_role)
     fallback = lambda err, reason: _fallback(retriever, scope=scope, ledger=ledger, limits=limits,
-                                             trace=trace, error_type=err, termination_reason=reason)
+                                             trace=trace, error_type=err, termination_reason=reason,
+                                             usage_events=usage_events)
 
     if model is None:
         resolved = label or ProvenanceLabel.REAL
@@ -210,7 +226,7 @@ def run_summary_agent(
     tool = build_retrieval_tool(retriever=retriever, scope=scope, ledger=ledger,
                                 limits=limits, trace=trace)
     agent = create_agent(model, [tool], system_prompt=SYSTEM_PROMPT,
-                         middleware=[_trace_middleware(trace, model_id, resolved)])
+                         middleware=[_trace_middleware(trace, model_id, resolved, usage_events)])
     try:
         state = agent.invoke(
             {"messages": [HumanMessage(content="Summarise the approved guidance for this reader.")]},
@@ -236,4 +252,5 @@ def run_summary_agent(
         draft=draft, label=resolved, ledger=ledger, model_id=model_id,
         prompt_version=PROMPT_VERSION, termination_reason="answered",
         citations=citations_for_persistence(ledger, draft.citation_ids()),
+        usage=tuple(usage_events),
     )

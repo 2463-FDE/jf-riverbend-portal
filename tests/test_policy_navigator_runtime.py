@@ -380,3 +380,45 @@ def test_the_retrieval_tool_never_exposes_audiences_or_workflows_as_arguments():
     schema_fields = set(tool.args_schema.model_fields) if hasattr(tool, "args_schema") else set(tool.args)
     assert "audiences" not in schema_fields
     assert "workflows" not in schema_fields
+
+
+# --- W10 Final Stage 5 sub-slice 3: durable usage accounting ---------------
+
+
+def _final_with_usage(text, input_tokens, output_tokens):
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=text,
+        usage_metadata={"input_tokens": input_tokens, "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens},
+    )
+
+
+def test_a_fixture_labeled_run_never_records_usage_even_if_the_response_sets_it():
+    chunk = _chunk("SRC-001@1.0#overview", "Coverage stays active for the plan year.")
+    retriever = _FakeRetriever([[chunk]])
+    model = ScriptedChatModel([
+        _tool_call(), _final_with_usage("Coverage stays active [SRC-001@1.0#overview].", 100, 20),
+    ])
+
+    result = run_policy_navigator("A question", scope=_SCOPE, retriever=retriever, model=model)
+
+    assert result.usage == ()
+
+
+def test_a_real_labeled_run_records_usage_from_the_response():
+    from libs.agent_provenance import ProvenanceLabel
+
+    chunk = _chunk("SRC-001@1.0#overview", "Coverage stays active for the plan year.")
+    retriever = _FakeRetriever([[chunk]])
+    model = ScriptedChatModel([
+        _tool_call(), _final_with_usage("Coverage stays active [SRC-001@1.0#overview].", 150, 30),
+    ])
+
+    result = run_policy_navigator("A question", scope=_SCOPE, retriever=retriever, model=model,
+                                  label=ProvenanceLabel.REAL)
+
+    # Only the FINAL turn's response set usage_metadata.
+    assert len(result.usage) == 1
+    assert result.usage[0].input_tokens == 150 and result.usage[0].output_tokens == 30

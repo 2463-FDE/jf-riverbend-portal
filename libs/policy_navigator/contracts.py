@@ -23,9 +23,23 @@ class CitedSource:
 
 
 @dataclass(frozen=True)
+class UsageTurn:
+    """One successful model round-trip's token usage, in memory only —
+    mirrors libs.summary_agent.contracts.UsageTurn (kept separate per
+    ADR 0001: no shared lib between agent packages yet). Never recorded
+    for a failed call — no legitimate token count exists for one."""
+
+    model_id: str
+    turn: int
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class PolicyNavigatorResult:
     answer: str
     citations: Tuple[CitedSource, ...]
     label: str  # "real" | "fixture" | "fallback"
     model_id: Optional[str]
     termination_reason: str  # "answered" | "no_evidence" | "provider_error" | "citation_invalid" | "max_turns"
+    usage: Tuple[UsageTurn, ...] = ()

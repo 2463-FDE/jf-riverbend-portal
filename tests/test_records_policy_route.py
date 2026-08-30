@@ -8,9 +8,14 @@ HTTP boundary only.
 """
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from conftest import load_module
 from libs.policy_navigator import CitedSource, PolicyNavigatorResult
+from libs.policy_navigator.contracts import UsageTurn
 
 app_mod = load_module("services/records-service/app.py", "records_app_policy_route")
 
@@ -101,3 +106,81 @@ def test_an_unresolvable_actor_still_gets_a_role_derived_response_not_an_error(c
 
     assert resp.status_code == 200
     assert resp.json()["termination_reason"] == "no_evidence"
+
+
+# --- W10 Final Stage 5 sub-slice 3 / review fix PN-FLUSH-ESCAPE ------------
+# Usage accounting is a SEPARATE step, after ask_policy_navigator has
+# already returned — proven here at the route, since that is where the
+# step now lives (policy_navigator_path.py itself takes no `db` at all).
+
+
+@pytest.fixture
+def client_with_db(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    app_mod.bedrock_usage.BedrockUsageEvent.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    monkeypatch.setattr(app_mod, "settings", app_mod.settings)
+    app_mod.settings.internal_service_token = TEST_TOKEN
+    app_mod.app.dependency_overrides[app_mod.get_db] = lambda: db
+    monkeypatch.setattr(app_mod, "_actor_role", lambda db, actor_id: "clinician")
+    yield TestClient(app_mod.app), db
+    app_mod.app.dependency_overrides.clear()
+    db.close()
+
+
+def _fake_ask_with_usage(*, calls=None):
+    def fake_ask(question, *, actor_role, model=None):
+        if calls is not None:
+            calls.append(1)
+        return PolicyNavigatorResult(
+            answer="Coverage stays active [SRC-001@1.0#overview].",
+            citations=(), label="real", model_id="model-x", termination_reason="answered",
+            usage=(UsageTurn(model_id="model-x", turn=1, input_tokens=80, output_tokens=15),),
+        )
+    return fake_ask
+
+
+def test_successful_policy_usage_is_stored_exactly_once(client_with_db, monkeypatch):
+    client, db = client_with_db
+    monkeypatch.setattr(app_mod.policy_navigator_path, "ask_policy_navigator", _fake_ask_with_usage())
+
+    resp = client.post("/policy/ask", json={"question": "How long does coverage last?"}, headers=_headers())
+
+    assert resp.status_code == 200
+    rows = app_mod.bedrock_usage.usage_for(db, use_case="policy_navigator_chat")
+    assert len(rows) == 1
+    assert rows[0].input_tokens == 80 and rows[0].output_tokens == 15
+
+
+def test_the_navigator_executes_exactly_once_even_when_accounting_fails(client_with_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_mod.policy_navigator_path, "ask_policy_navigator", _fake_ask_with_usage(calls=calls))
+    monkeypatch.setattr(
+        app_mod.bedrock_usage, "persist",
+        lambda *a, **k: (_ for _ in ()).throw(SQLAlchemyError("boom")),
+    )
+    client, db = client_with_db
+
+    resp = client.post("/policy/ask", json={"question": "How long does coverage last?"}, headers=_headers())
+
+    assert resp.status_code == 200
+    assert len(calls) == 1, "the navigator must never be rerun after an accounting failure"
+
+
+def test_a_policy_accounting_failure_rolls_back_but_still_returns_the_original_answer(client_with_db, monkeypatch):
+    monkeypatch.setattr(app_mod.policy_navigator_path, "ask_policy_navigator", _fake_ask_with_usage())
+    monkeypatch.setattr(
+        app_mod.bedrock_usage, "persist",
+        lambda *a, **k: (_ for _ in ()).throw(SQLAlchemyError("boom")),
+    )
+    client, db = client_with_db
+
+    resp = client.post("/policy/ask", json={"question": "How long does coverage last?"}, headers=_headers())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Coverage stays active [SRC-001@1.0#overview]."
+    assert body["termination_reason"] == "answered"
+    # The failed accounting attempt must not leave a half-written row behind.
+    assert app_mod.bedrock_usage.usage_for(db, use_case="policy_navigator_chat") == []

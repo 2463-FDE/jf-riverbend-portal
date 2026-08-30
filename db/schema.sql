@@ -686,6 +686,44 @@ CREATE TRIGGER agent_lifecycle_events_no_delete
     BEFORE DELETE ON agent_lifecycle_events
     FOR EACH ROW EXECUTE FUNCTION agent_lifecycle_events_reject_mutation();
 
+-- Durable, append-only Bedrock chat usage accounting (037) — see that
+-- migration for the full rationale (no prompts/responses/PHI, cost stays
+-- NULL until a real rate config exists, idempotency_key dedups retries).
+CREATE TABLE IF NOT EXISTS bedrock_usage_events (
+    id              BIGSERIAL PRIMARY KEY,
+    idempotency_key TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    model_id        TEXT NOT NULL,
+    use_case        TEXT NOT NULL
+                    CHECK (use_case IN ('summary_agent_chat', 'policy_navigator_chat')),
+    input_tokens    INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    output_tokens   INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    rate_version    TEXT,
+    cost_usd        NUMERIC(12, 6) CHECK (cost_usd IS NULL OR cost_usd >= 0),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((rate_version IS NULL) = (cost_usd IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bedrock_usage_events_idempotency_key_unique
+    ON bedrock_usage_events (idempotency_key);
+CREATE INDEX IF NOT EXISTS bedrock_usage_events_model_use_case_created_idx
+    ON bedrock_usage_events (model_id, use_case, created_at);
+
+CREATE OR REPLACE FUNCTION bedrock_usage_events_reject_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'bedrock_usage_events is append-only: % is not permitted', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bedrock_usage_events_no_update ON bedrock_usage_events;
+CREATE TRIGGER bedrock_usage_events_no_update
+    BEFORE UPDATE ON bedrock_usage_events
+    FOR EACH ROW EXECUTE FUNCTION bedrock_usage_events_reject_mutation();
+
+DROP TRIGGER IF EXISTS bedrock_usage_events_no_delete ON bedrock_usage_events;
+CREATE TRIGGER bedrock_usage_events_no_delete
+    BEFORE DELETE ON bedrock_usage_events
+    FOR EACH ROW EXECUTE FUNCTION bedrock_usage_events_reject_mutation();
+
 -- IDENTITY, EVIDENCE AND LIFECYCLE GUARD. A CHECK constraint only sees one
 -- row's final state; these guarantees each compare OLD to NEW, or must
 -- run on DELETE (which no CHECK ever sees), so they must be a trigger:
