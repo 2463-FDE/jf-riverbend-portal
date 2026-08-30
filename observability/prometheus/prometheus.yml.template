@@ -1,0 +1,49 @@
+# W10 Final Stage 7 (sub-slice 2) — Prometheus scrape config for the local
+# observability profile. `${INTERNAL_SERVICE_TOKEN}` below is a literal
+# placeholder, NOT compose/shell interpolation: Prometheus's own config
+# parser has no env-var substitution, so the prometheus container's startup
+# command (see docker-compose.yml's `prometheus` service) renders this
+# template into /tmp/prometheus.yml with `sed` before starting, substituting
+# the real value from its own environment. Never commit a rendered copy.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # Unauthenticated, matching gateway's own /healthz precedent (see
+  # services/gateway/app.py::metrics and libs/metrics/http.py).
+  - job_name: gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway:8070"]
+
+  # records-service, scheduling-service, and roi-service all guard /metrics
+  # with the same internal-service-token check every other non-healthcheck
+  # route uses — Prometheus must present it as a custom request header,
+  # which is why this is `http_headers`, not `bearer_token`/`basic_auth`.
+  - job_name: records-service
+    metrics_path: /metrics
+    http_headers:
+      X-Internal-Token:
+        values: ["${INTERNAL_SERVICE_TOKEN}"]
+    static_configs:
+      - targets: ["records-service:8073"]
+
+  - job_name: scheduling-service
+    metrics_path: /metrics
+    http_headers:
+      X-Internal-Token:
+        values: ["${INTERNAL_SERVICE_TOKEN}"]
+    static_configs:
+      - targets: ["scheduling-service:8074"]
+
+  - job_name: roi-service
+    metrics_path: /metrics
+    http_headers:
+      X-Internal-Token:
+        values: ["${INTERNAL_SERVICE_TOKEN}"]
+    static_configs:
+      - targets: ["roi-service:8076"]

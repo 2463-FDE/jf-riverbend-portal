@@ -41,6 +41,11 @@ _MUST_NOT_PUBLISH = (
     # here because nothing depended on the host port at all — every consumer
     # resolves redis://redis:6379 by service name.
     "redis",
+    # W10 Final Stage 7 (observability profile): neither is a human-facing UI.
+    # Loki is only ever queried by Grafana over the compose network
+    # (http://loki:3100); Alloy only ships logs to Loki and reads the Docker
+    # socket — nothing outside the network has a reason to reach either.
+    "loki", "alloy",
 )
 
 # Deliberately reachable: the gateway is the entry point, the frontend is the
@@ -56,7 +61,14 @@ _MUST_NOT_PUBLISH = (
 # all five ERROR — loud rather than silent, but broken. Rerouting them through
 # `docker compose exec -T postgres` is real work and belongs in its own change,
 # so it is not smuggled in here.
-_MAY_PUBLISH = ("gateway", "frontend", "intake-service", "records-service", "postgres")
+_MAY_PUBLISH = (
+    "gateway", "frontend", "intake-service", "records-service", "postgres",
+    # W10 Final Stage 7 (observability profile): local, human-facing debug/
+    # dashboard UIs for this POC — Prometheus's own web UI and Grafana's
+    # dashboards. Both are behind the `observability` compose profile, so
+    # neither is published unless that profile is explicitly selected.
+    "prometheus", "grafana",
+)
 
 
 def _services():

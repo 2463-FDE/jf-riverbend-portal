@@ -315,5 +315,82 @@ services:
     depends_on:
       - gateway
 
+  # --- Observability profile (W10 Final Stage 7) --------------------------
+  # Everything below is tagged `profiles: ["observability"]`, so a plain
+  # `docker compose up` / `make up` is completely unaffected — these only
+  # start with `docker compose --profile observability up` (or
+  # `make up-observability`; see Makefile and docs/runbook.md). This is a
+  # local observability POC (dashboards + 3 alert rules over real metrics
+  # and logs), not a production monitoring deployment: no remote write, no
+  # long-term storage, no alert routing/paging.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["observability"]
+    environment:
+      # Prometheus's own config parser does not substitute env vars, so the
+      # command below renders observability/prometheus/prometheus.yml.template
+      # into a writable path with `sed` before starting the real binary —
+      # see that template's header comment.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        sed "s#\$${INTERNAL_SERVICE_TOKEN}#$$INTERNAL_SERVICE_TOKEN#g" /etc/prometheus/prometheus.yml.template > /tmp/prometheus.yml
+        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      gateway:
+        condition: service_started
+      records-service:
+        condition: service_started
+      scheduling-service:
+        condition: service_started
+      roi-service:
+        condition: service_started
+
+  loki:
+    image: grafana/loki:3.1.1
+    profiles: ["observability"]
+    volumes:
+      - ./observability/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+
+  alloy:
+    image: grafana/alloy:v1.4.3
+    profiles: ["observability"]
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "/etc/alloy/config.alloy"
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   pgdata:
+  prometheus_data:
+  loki_data:

@@ -1,0 +1,44 @@
+# W10 Final Stage 7 (sub-slice 3) — 3 alert rules for the local
+# observability POC. No production paging is implied by these rules; they
+# exist so `promtool test rules` has something real to prove, and so the
+# provisioned Grafana/Prometheus stack demonstrates end-to-end alerting.
+groups:
+  - name: riverbend-observability-poc
+    rules:
+      - alert: ElevatedHttp5xxRate
+        expr: |
+          (
+            sum(rate(http_requests_total{status_class="5xx"}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated 5xx rate across Riverbend services"
+          description: "More than 5% of HTTP requests have returned 5xx over the last 5 minutes."
+
+      - alert: RoiFulfillmentFailureSpike
+        expr: |
+          sum(rate(roi_fulfillment_outcomes_total{outcome="failure"}[15m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ROI fulfillment failures detected"
+          description: "roi-service has recorded fulfillment failures continuously for at least 10 minutes."
+
+      - alert: BookingConflictAnomaly
+        expr: |
+          (
+            sum(rate(scheduling_booking_outcomes_total{outcome="conflict"}[15m]))
+            /
+            sum(rate(scheduling_booking_outcomes_total[15m]))
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusually high scheduling conflict rate"
+          description: "More than 20% of booking attempts have resulted in a conflict outcome over the last 15 minutes."

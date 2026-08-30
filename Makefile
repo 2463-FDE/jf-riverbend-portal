@@ -1,4 +1,4 @@
-.PHONY: up down logs ps build seed seed-gen demo-reset psql test frontend-dev config phi-backfill
+.PHONY: up down logs ps build seed seed-gen demo-reset psql test frontend-dev config phi-backfill up-observability down-observability
 
 up:            ## start the whole stack
 	docker compose up -d
@@ -60,3 +60,10 @@ frontend-dev:  ## run the Next.js dev server
 
 config:        ## validate the compose file
 	docker compose config -q && echo "compose OK"
+
+up-observability:  ## start the whole stack PLUS Prometheus/Grafana/Loki/Alloy (local observability POC — see docs/runbook.md)
+	docker compose --profile observability up -d
+	@$(MAKE) phi-backfill
+
+down-observability: ## stop the stack including the observability profile's containers
+	docker compose --profile observability down

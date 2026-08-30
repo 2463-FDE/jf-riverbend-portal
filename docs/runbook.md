@@ -315,6 +315,50 @@ Endpoints once up:
 - Gateway + OpenAPI docs: http://localhost:8070/docs
 - Per-service health: `GET http://localhost:807N/healthz`
 
+## Observability profile (local POC only — W10 Final Stage 7)
+
+A local observability stack — Prometheus, Grafana, Loki, and Grafana Alloy
+(log shipping) — is available as a Compose `profiles: ["observability"]`
+group, so `make up`/`docker compose up` is unaffected unless you opt in:
+
+```bash
+make up-observability     # starts everything `make up` does, PLUS the observability stack
+make down-observability   # stops all of it, including the observability containers
+```
+
+Endpoints once up:
+- Grafana (anonymous viewer access, no login required): http://localhost:3000
+  — the "Riverbend Services" dashboard is provisioned automatically
+  (request rate, p95 latency, 5xx rate, in-flight requests, ROI fulfillment
+  outcomes, appointment booking outcomes).
+- Prometheus: http://localhost:9090 — scrapes `gateway`, `records-service`,
+  `scheduling-service`, and `roi-service`'s `/metrics`. `intake-service`,
+  `eligibility-service`, and `interop-service` do not expose `/metrics` and
+  are out of scope.
+- 3 alert rules are provisioned (`observability/prometheus/alert_rules.yml`):
+  elevated 5xx rate, a sustained ROI fulfillment failure, and an anomalous
+  scheduling-conflict rate. Run their unit tests with:
+  ```bash
+  docker run --rm -v "$(pwd)/observability:/etc/observability:ro" \
+    --entrypoint promtool prom/prometheus:v2.54.1 \
+    test rules /etc/observability/promtool_tests/alert_rules_test.yml
+  ```
+- Logs are searchable in Grafana's Loki datasource by `service` (one of the
+  fixed service names, extracted from each log line's own
+  `[service]` prefix — see `services/*/logging_config.py`) and by
+  `correlation_id` (attached as structured metadata, not a label, to avoid
+  an unbounded label series). Loki has no host-published port; query it
+  through Grafana's Explore view or from another container on the compose
+  network.
+
+This is a **local observability POC**, not production monitoring: no
+remote-write, no long-term retention policy beyond local disk, no alert
+routing/paging, and Prometheus's scrape config is rendered from
+`observability/prometheus/prometheus.yml.template` at container startup
+(substituting `INTERNAL_SERVICE_TOKEN` via `sed`, since Prometheus's own
+config parser has no env-var interpolation) — never edit the rendered
+`/tmp/prometheus.yml` inside the container directly.
+
 ## First-boot data
 
 On a fresh volume Postgres runs three steps automatically (mounted into
