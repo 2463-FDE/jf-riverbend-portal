@@ -10,10 +10,11 @@ policy-navigator retrieval contract (scope_for_role, all cases) and the
 patient-summary retrieval contract (the fixed patient/patient_summary scope
 services/records-service/summary_agent_path.py actually authorizes,
 evaluated against this gold set's patient-role cases). Also fails if the
-gold set or its alias/override file has drifted from the provenance hash
-recorded for each in docs/client-inputs/2026-08-24/{SHA256SUMS.txt,
-ADOPTION-NOTES.md} — evidence of an edit nobody re-verified against the
-client package.
+gold set or its alias/override file has drifted from the PINNED, reviewed
+baseline hash below (see _APPROVED_ARTIFACT_HASHES) — checked against both
+the artifact itself and its provenance record in
+docs/client-inputs/2026-08-24/{SHA256SUMS.txt, ADOPTION-NOTES.md}
+independently, so a coordinated edit to both cannot pass silently.
 
 Thresholds below are the measured baseline for the current corpus/gold set,
 not aspirational — a value regressing below its recorded floor means a real
@@ -49,6 +50,28 @@ _ALIASES = os.path.join(_CLIENT_INPUT_DIR, "evaluations", "citation-aliases.json
 _SHA256SUMS = os.path.join(_CLIENT_INPUT_DIR, "SHA256SUMS.txt")
 _ADOPTION_NOTES = os.path.join(_CLIENT_INPUT_DIR, "ADOPTION-NOTES.md")
 
+# Review fix GATE-PROVENANCE-BYPASS: comparing an artifact only against the
+# hash RECORDED IN a provenance document is not tamper-resistant — both the
+# artifact and that document live in this same repo, so a single coordinated
+# edit (change the file, update its recorded hash to match) would sail
+# through unnoticed. These two digests are the actual reviewed baseline,
+# pinned here as CODE, not read from any document this gate also checks —
+# every artifact's real hash AND its provenance-recorded hash must each
+# independently equal the pinned value below, or the gate fails, no matter
+# how internally consistent the artifact and its provenance document are
+# with EACH OTHER.
+#
+# An intentional gold-set or alias update requires a reviewed code change
+# to this constant, updating the artifact and its provenance record
+# TOGETHER, then rerunning this gate and tests/test_policy_retrieval_gate.py
+# — never an automatic rewrite, an environment-variable override, a
+# warning-only path, or a CI bypass flag. This gate never edits or accepts
+# a new baseline on its own.
+_APPROVED_ARTIFACT_HASHES = {
+    "evaluations/retrieval-evaluations.jsonl": "23dc4079170e98441784df9ae9296083cc239551c59ba5b57c7826165f115fc1",
+    "evaluations/citation-aliases.json": "aea4be298e97f795fe993e538d8b7de44da6e50e5f9a720054603b1620c3c92f",
+}
+
 # Measured against the current docs/RagDocs corpus + the 28-case gold set —
 # see this module's own docstring for why a drop here means a regression.
 _NAV_THRESHOLDS = {"recall_at_k": 1.0, "citation_target_accuracy": 1.0, "case_coverage": 0.80}
@@ -78,19 +101,37 @@ def _recorded_hash_in_adoption_notes(basename: str) -> str:
     return match.group(1)
 
 
+def _check_one_artifact(relative_path: str, actual_path: str, recorded: str) -> list:
+    """GATE-PROVENANCE-BYPASS: the artifact's real hash and its provenance
+    document's recorded hash are each checked against the PINNED baseline
+    independently — never against each other. A coordinated edit that
+    keeps the artifact and its provenance document mutually consistent
+    still fails here the moment either one no longer matches the pinned
+    value. Never prints artifact content, only hashes and paths."""
+    approved = _APPROVED_ARTIFACT_HASHES[relative_path]
+    problems = []
+    actual = _sha256(actual_path)
+    if actual != approved:
+        problems.append(f"{relative_path}: artifact hash {actual} does not match the pinned baseline {approved}")
+    if recorded != approved:
+        problems.append(
+            f"{relative_path}: provenance-recorded hash {recorded} does not match the pinned baseline {approved}"
+        )
+    return problems
+
+
 def _check_artifact_drift() -> list:
     """Every mismatch found, never raised individually — the caller reports
     all of them together rather than stopping at the first."""
     problems = []
-    actual = _sha256(_EVALUATIONS)
-    recorded = _recorded_hash_in_sha256sums("evaluations/retrieval-evaluations.jsonl")
-    if actual != recorded:
-        problems.append(f"retrieval-evaluations.jsonl drifted from SHA256SUMS.txt ({actual} != {recorded})")
-
-    actual = _sha256(_ALIASES)
-    recorded = _recorded_hash_in_adoption_notes("citation-aliases.json")
-    if actual != recorded:
-        problems.append(f"citation-aliases.json drifted from ADOPTION-NOTES.md ({actual} != {recorded})")
+    problems.extend(_check_one_artifact(
+        "evaluations/retrieval-evaluations.jsonl", _EVALUATIONS,
+        _recorded_hash_in_sha256sums("evaluations/retrieval-evaluations.jsonl"),
+    ))
+    problems.extend(_check_one_artifact(
+        "evaluations/citation-aliases.json", _ALIASES,
+        _recorded_hash_in_adoption_notes("citation-aliases.json"),
+    ))
     return problems
 
 
