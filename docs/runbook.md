@@ -359,6 +359,51 @@ routing/paging, and Prometheus's scrape config is rendered from
 config parser has no env-var interpolation) — never edit the rendered
 `/tmp/prometheus.yml` inside the container directly.
 
+## Policy RAG corpus preparation (W10 Final 2 Stage 2)
+
+The approved synthetic policy corpus (`docs/RagDocs/manifest.json` + its
+markdown documents) needs to be chunked, embedded, and persisted before the
+policy navigator or patient-summary retrieval paths have anything real to
+retrieve. One idempotent command does this on any clean environment:
+
+```bash
+make rag-prepare
+```
+
+This runs `db/policy_corpus_prepare.py` **inside records-service's own
+container** (`docker compose exec records-service ...`) — that container
+already carries the pinned `boto3`/`pgvector`/`psycopg2-binary`
+dependencies this needs (see `services/records-service/requirements.txt`);
+there is no host Python environment to set up.
+
+- **Needs `make up` already running**, plus real `POLICY_EMBEDDING_MODEL_ID`
+  and AWS Bedrock credentials in `.env` (same ones the policy navigator and
+  patient-summary agent already use) — configuration is validated by
+  presence/non-placeholder status only, before any database connection;
+  values are never printed.
+- **Checks freshness first** (a database-only comparison against the
+  current manifest — no AWS call). An already-fresh corpus is reported and
+  skipped immediately, making zero Bedrock embedding calls, not merely zero
+  *unnecessary* ones.
+- **Only ingests when the manifest and database actually disagree** —
+  missing/stale documents or chunks. Ingestion itself
+  (`libs.policy_corpus.ingest_corpus`, the same contract
+  `db/policy_corpus_ingest.py` already uses) is separately idempotent per
+  chunk, and only ever deactivates documents that left the *current*
+  manifest — it never deletes anything, and never touches another
+  environment's corpus.
+- Prints one concise categorical line, e.g.
+  `status=fresh action=skipped corpus_id=... documents=16 chunks=207` or
+  `status=ready action=ingested corpus_id=... documents_upserted=... chunks_written=...`.
+  Exit code 0 means ready; a nonzero exit (2) means the corpus is still
+  stale after ingestion — a real problem to investigate, not a skip.
+- Never run as part of CI — real Bedrock calls stay confined to this local,
+  credentialed operator command. CI instead exercises the same
+  `ingest_corpus`/`check_corpus_freshness` contracts against a disposable
+  Postgres schema with a deterministic non-Bedrock embedding provider (see
+  `tests/integration/test_policy_corpus_pipeline.py` and
+  `tests/integration/test_policy_corpus_prepare_idempotency.py`).
+
 ## First-boot data
 
 On a fresh volume Postgres runs three steps automatically (mounted into

@@ -30,6 +30,19 @@ COPY libs/ ./libs/
 # records-service ...` instead of standing up a separate runner.
 COPY db/migrations/scripts/encrypt_agent_draft_text.py ./db/migrations/scripts/encrypt_agent_draft_text.py
 
+# W10 Final 2 Stage 2: this service already has libs.policy_corpus's
+# dependencies (boto3, pgvector, psycopg2-binary — see requirements.txt
+# above) for the patient-summary/policy-navigator retrieval paths, so it is
+# the natural host for `make rag-prepare`'s idempotent corpus preparation
+# too, run via `docker compose exec records-service python3
+# db/policy_corpus_prepare.py` instead of requiring an undocumented host
+# Python environment. docs/RagDocs/ is the manifest + actual document
+# content that script's ingestion path reads (content_root-relative), not
+# rendered/generated — the same directory db/policy_corpus_ingest.py and
+# db/policy_corpus_evaluate.py already read from a host checkout.
+COPY db/policy_corpus_prepare.py ./db/policy_corpus_prepare.py
+COPY docs/RagDocs/ ./docs/RagDocs/
+
 # roles_config.py resolves <module dir>/../../config/roles.yaml, so the signed
 # permission matrix must sit two levels above /app/roles_config.py — i.e.
 # /config/roles.yaml. Without it every authorized route would fail at request

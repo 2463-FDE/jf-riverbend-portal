@@ -18,7 +18,18 @@
 .github/
 frontend/
 node_modules/
-docs/
+# W10 Final 2 Stage 2: `docs/*` (not a bare `docs/`) excludes only docs/'s
+# DIRECT children, so docs/RagDocs — the approved synthetic policy corpus's
+# actual source content records-service's Dockerfile now COPYs for
+# db/policy_corpus_prepare.py — can be individually re-included below
+# without bringing back the rest of docs/ (planning/handover/analysis/
+# client-inputs, none of which any service build needs). A bare `!docs/`
+# re-inclusion was tried and rejected: it un-ignores the whole docs/ tree,
+# not just RagDocs, since nothing else re-excludes those other
+# subdirectories once the parent itself is un-ignored.
+docs/*
+!docs/RagDocs
+!docs/RagDocs/**
 adr/
 tests/
 .claude/
@@ -47,3 +58,8 @@ db/
 !db/migrations/scripts/
 !db/migrations/scripts/encrypt_existing_phi.py
 !db/migrations/scripts/encrypt_agent_draft_text.py
+# W10 Final 2 Stage 2: same reasoning — records-service's Dockerfile COPYs
+# this single idempotent RAG-preparation wrapper so `make rag-prepare` can
+# run it via `docker compose exec`, without needing the sibling CLI scripts
+# (policy_corpus_ingest.py/policy_corpus_evaluate.py) it does not import.
+!db/policy_corpus_prepare.py

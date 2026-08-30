@@ -1,4 +1,4 @@
-.PHONY: up down logs ps build seed seed-gen demo-reset psql test frontend-dev config phi-backfill up-observability down-observability
+.PHONY: up down logs ps build seed seed-gen demo-reset psql test frontend-dev config phi-backfill up-observability down-observability rag-prepare
 
 up:            ## start the whole stack
 	docker compose up -d
@@ -44,6 +44,9 @@ demo-reset:    ## return all four canonical demo patients (1042, 1737, 1738, 173
 	@# integration run consumes demo state. Run this before each rehearsal.
 	@# Does not re-seed: the charts, trends, and staff/clinician grants come from seed.sql.
 	docker compose exec -T postgres psql -U $${DB_USER:-riverbend_app} -d $${DB_NAME:-riverbend} -q < db/seed/demo_reset.sql
+
+rag-prepare:   ## idempotently make the approved synthetic policy corpus ready (needs `make up` + real AWS credentials in .env — runs Bedrock embedding calls if the corpus is missing/stale, none if already fresh)
+	docker compose exec -T records-service python3 db/policy_corpus_prepare.py
 
 seed-gen:      ## regenerate db/seed/seed.sql from the generator (deterministic)
 	python3 db/seed/generate_seed.py > db/seed/seed.sql
