@@ -55,6 +55,8 @@ def client(monkeypatch):
         s.add(app_mod.RoiRequest(id=2, patient_id=UNGRANTED_PATIENT_ID))
         s.add(app_mod.RoiAuthorization(id=1, patient_id=GRANTED_PATIENT_ID))
         s.add(app_mod.RoiAuthorization(id=2, patient_id=UNGRANTED_PATIENT_ID))
+        s.add(app_mod.RoiDisclosureRestriction(id=1, patient_id=GRANTED_PATIENT_ID))
+        s.add(app_mod.RoiDisclosureRestriction(id=2, patient_id=UNGRANTED_PATIENT_ID))
         s.commit()
 
     yield TestClient(app_mod.app)
@@ -271,3 +273,76 @@ def test_a_downstream_503_reaches_the_caller_as_503_not_a_false_200(client, monk
     )
 
     assert resp.status_code == 503
+
+
+# --- review fix ROI-RESTRICT-GRANT: restrictions grant-gated too -----------
+
+
+def test_creating_a_restriction_for_an_ungranted_patient_is_denied_before_downstream(client, monkeypatch):
+    captured = _stub_downstream(monkeypatch, payload={"id": 3, "patient_id": UNGRANTED_PATIENT_ID}, status_code=201)
+
+    resp = client.post(
+        "/roi/restrictions",
+        json={"patient_id": UNGRANTED_PATIENT_ID, "reason": "family request"},
+        headers=_auth(),
+    )
+
+    assert resp.status_code == 403
+    # Denied before any downstream call was made — not merely denied after.
+    assert "post_json" not in captured
+
+
+def test_creating_a_restriction_for_a_granted_patient_succeeds(client, monkeypatch):
+    _stub_downstream(monkeypatch, payload={"id": 3, "patient_id": GRANTED_PATIENT_ID}, status_code=201)
+
+    resp = client.post(
+        "/roi/restrictions",
+        json={"patient_id": GRANTED_PATIENT_ID, "reason": "family request"},
+        headers=_auth(),
+    )
+
+    assert resp.status_code == 201
+
+
+def test_revoking_an_ungranted_patients_restriction_and_a_nonexistent_one_return_the_same_403(client, monkeypatch):
+    """No existence oracle: restriction_id=2 exists (for an ungranted
+    patient) and restriction_id=999999 doesn't exist at all — both must be
+    indistinguishable to the caller."""
+    _stub_downstream(monkeypatch, payload={})
+
+    ungranted_resp = client.post("/roi/restrictions/2/revoke", headers=_auth())
+    nonexistent_resp = client.post("/roi/restrictions/999999/revoke", headers=_auth())
+
+    assert ungranted_resp.status_code == 403
+    assert nonexistent_resp.status_code == 403
+    assert ungranted_resp.json() == nonexistent_resp.json()
+
+
+def test_revoking_a_granted_patients_restriction_succeeds(client, monkeypatch):
+    _stub_downstream(monkeypatch, payload={"id": 1, "patient_id": GRANTED_PATIENT_ID, "active": False})
+
+    resp = client.post("/roi/restrictions/1/revoke", headers=_auth())
+
+    assert resp.status_code == 200
+
+
+def test_a_downstream_non_2xx_status_and_detail_are_preserved_for_restriction_create(client, monkeypatch):
+    _stub_downstream(monkeypatch, payload={"detail": "patient not found"}, status_code=404)
+
+    resp = client.post(
+        "/roi/restrictions",
+        json={"patient_id": GRANTED_PATIENT_ID, "reason": "family request"},
+        headers=_auth(),
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "patient not found"
+
+
+def test_a_downstream_non_2xx_status_and_detail_are_preserved_for_restriction_revoke(client, monkeypatch):
+    _stub_downstream(monkeypatch, payload={"detail": "restriction is already inactive"}, status_code=409)
+
+    resp = client.post("/roi/restrictions/1/revoke", headers=_auth())
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "restriction is already inactive"

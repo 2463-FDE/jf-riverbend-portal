@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from models import RoiAuthorization, RoiRequest
+from models import RoiAuthorization, RoiDisclosureRestriction, RoiRequest
 
 
 def roi_request_patient_id(db: Session, *, request_id: int) -> int | None:
@@ -44,3 +44,11 @@ def roi_authorization_patient_id(db: Session, *, authorization_id: int) -> int |
     such row exists — same no-existence-oracle rule as roi_request_patient_id."""
     auth = db.get(RoiAuthorization, authorization_id)
     return auth.patient_id if auth is not None else None
+
+
+def roi_restriction_patient_id(db: Session, *, restriction_id: int) -> int | None:
+    """The patient_id a roi_disclosure_restrictions row belongs to, or None
+    if no such row exists — review fix ROI-RESTRICT-GRANT, same
+    no-existence-oracle rule as the two lookups above."""
+    restriction = db.get(RoiDisclosureRestriction, restriction_id)
+    return restriction.patient_id if restriction is not None else None

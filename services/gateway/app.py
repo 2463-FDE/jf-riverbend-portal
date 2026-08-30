@@ -65,10 +65,15 @@ from models import (
     PatientAccessGrant,
     PatientInvitation,
     RoiAuthorization,
+    RoiDisclosureRestriction,
     RoiRequest,
     User,
 )
-from roi_authorization import roi_authorization_patient_id, roi_request_patient_id
+from roi_authorization import (
+    roi_authorization_patient_id,
+    roi_request_patient_id,
+    roi_restriction_patient_id,
+)
 from security import (
     create_mfa_challenge,
     create_session,
@@ -2348,15 +2353,29 @@ def proxy_roi_authorization_revoke(
 
 
 @app.post("/roi/restrictions")
-def proxy_roi_restriction_create(payload: dict, session: dict = Depends(require_permission("roi.write"))):
-    return _post("roi", "/roi/restrictions", payload)
+def proxy_roi_restriction_create(
+    payload: dict, session: dict = Depends(require_permission("roi.write")), db: Session = Depends(get_db)
+):
+    # Review fix ROI-RESTRICT-GRANT: a restriction blocks/unblocks future
+    # disclosures for a specific patient just as directly as an ROI
+    # request/authorization does — left ungated in the original PR, which
+    # named "request creation, authorization review/revocation, request
+    # viewing, and fulfillment" but not restrictions.
+    try:
+        patient_id = int(payload.get("patient_id"))
+    except (TypeError, ValueError):
+        patient_id = None
+    _require_roi_patient_grant(db, session, patient_id)
+    return _post("roi", "/roi/restrictions", payload, forward_status=True)
 
 
 @app.post("/roi/restrictions/{restriction_id}/revoke")
 def proxy_roi_restriction_revoke(
-    restriction_id: int, session: dict = Depends(require_permission("roi.write"))
+    restriction_id: int, session: dict = Depends(require_permission("roi.write")),
+    db: Session = Depends(get_db),
 ):
-    return _post("roi", f"/roi/restrictions/{restriction_id}/revoke", {})
+    _require_roi_patient_grant(db, session, roi_restriction_patient_id(db, restriction_id=restriction_id))
+    return _post("roi", f"/roi/restrictions/{restriction_id}/revoke", {}, forward_status=True)
 
 
 @app.get("/roi/patients/{patient_id}/accounting")

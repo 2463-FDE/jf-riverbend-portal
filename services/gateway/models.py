@@ -147,6 +147,22 @@ class RoiAuthorization(Base):
     patient_id = Column(Integer, nullable=False)
 
 
+class RoiDisclosureRestriction(Base):
+    """Minimal read-only mirror of roi-service's own table (030) — review
+    fix ROI-RESTRICT-GRANT: restriction creation/revocation were the only
+    ROI routes left ungated by a patient_access_grants check (PR #113's
+    original scope named "request creation, authorization review/
+    revocation, request viewing, and fulfillment" but not restrictions,
+    which touch a patient's disclosure-blocking preferences just as
+    directly). Same reasoning as RoiRequest/RoiAuthorization above, for a
+    bare `restriction_id`."""
+
+    __tablename__ = "roi_disclosure_restrictions"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, nullable=False)
+
+
 class InsuranceCoverage(Base):
     __tablename__ = "insurance_coverages"
 
