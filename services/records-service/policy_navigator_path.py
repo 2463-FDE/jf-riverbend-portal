@@ -4,21 +4,29 @@ records-service hosts this for the same reason it hosts the patient-summary
 agent (summary_agent_path.py): it already carries the LangChain v1 +
 Bedrock dependency set (requirements.txt) and Postgres access. Unlike that
 agent, this path is stateless — no patient, no grant, no draft, no persisted
-trace; a caller's ROLE alone (never a patient id) determines what policy
-text they may see, via libs/policy_navigator.scope_for_role.
+trace, no question/answer/retrieved text ever written anywhere; a caller's
+ROLE alone (never a patient id) determines what policy text they may see,
+via libs/policy_navigator.scope_for_role. The one deliberate exception (W10
+Final Stage 5 sub-slice 3): a `db` session, when the caller provides one,
+persists durable token-usage accounting for whichever turns genuinely
+called a real Bedrock model — never a draft, an audit row, or anything
+else this path's own docstring already forbids.
 """
 import os
 
+import bedrock_usage
 from config import settings
 from libs.agent_provenance import ProvenanceLabel
 from libs.embedding_client import EmbeddingClient, EmbeddingConfig
 from libs.policy_corpus import BedrockPolicyEmbeddingProvider, PolicyRetriever
 from libs.policy_navigator import PolicyNavigatorResult, run_policy_navigator, scope_for_role
+from libs.tracing.spans import new_correlation_id
 from logging_config import configure
 
 log = configure(settings.service_name)
 
 _PROVIDER = "bedrock"
+_USE_CASE = "policy_navigator_chat"
 _SAFE_UNAVAILABLE_REPLY = "The policy navigator isn't available right now. Please try again shortly."
 
 
@@ -44,7 +52,7 @@ def _unavailable() -> PolicyNavigatorResult:
     )
 
 
-def ask_policy_navigator(question: str, *, actor_role: str, model=None) -> PolicyNavigatorResult:
+def ask_policy_navigator(question: str, *, actor_role: str, model=None, db=None) -> PolicyNavigatorResult:
     """One stateless navigator turn, scoped to `actor_role`. Never raises —
     a retrieval-infrastructure problem (unconfigured embedding model,
     unreachable Postgres) degrades exactly like a Bedrock chat-model problem
@@ -59,6 +67,12 @@ def ask_policy_navigator(question: str, *, actor_role: str, model=None) -> Polic
     reached. A connection is now only ever opened once the provider is
     already known-good, and its own construction failure returns before
     `conn` exists at all.
+
+    `db=None` (the default, and every existing test's call shape) skips
+    usage persistence entirely — a caller (app.py's /policy/ask route) that
+    wants durable usage accounting passes its own request-scoped session.
+    The correlation id minted here exists ONLY as this one write's
+    idempotency key; nothing else about this stateless path uses it.
     """
     scope = scope_for_role(actor_role)
     model_id = os.getenv("POLICY_EMBEDDING_MODEL_ID", "")
@@ -83,6 +97,16 @@ def ask_policy_navigator(question: str, *, actor_role: str, model=None) -> Polic
         retriever = PolicyRetriever(
             conn, embedding_client, provider=_PROVIDER, model=model_id, vector_cast=Vector,
         )
-        return run_policy_navigator(question, scope=scope, retriever=retriever, model=model)
+        result = run_policy_navigator(question, scope=scope, retriever=retriever, model=model)
     finally:
         conn.close()
+
+    if db is not None and result.usage:
+        bedrock_usage.persist(db, new_correlation_id(), [
+            bedrock_usage.UsageEvent(
+                provider=_PROVIDER, model_id=turn.model_id, use_case=_USE_CASE, sequence=turn.turn,
+                input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+            )
+            for turn in result.usage
+        ])
+    return result

@@ -57,7 +57,7 @@ def test_derives_role_from_the_database_and_delegates_to_the_navigator(client, m
     monkeypatch.setattr(app_mod, "_actor_role", lambda db, actor_id: "roi_clerk")
     captured = {}
 
-    def fake_ask(question, *, actor_role, model=None):
+    def fake_ask(question, *, actor_role, model=None, db=None):
         captured["question"] = question
         captured["actor_role"] = actor_role
         return PolicyNavigatorResult(
@@ -91,7 +91,7 @@ def test_an_unresolvable_actor_still_gets_a_role_derived_response_not_an_error(c
     monkeypatch.setattr(app_mod, "_actor_role", lambda db, actor_id: "unknown")
     monkeypatch.setattr(
         app_mod.policy_navigator_path, "ask_policy_navigator",
-        lambda question, *, actor_role, model=None: PolicyNavigatorResult(
+        lambda question, *, actor_role, model=None, db=None: PolicyNavigatorResult(
             answer="No approved policy evidence was found.", citations=(), label="real",
             model_id="m", termination_reason="no_evidence",
         ),

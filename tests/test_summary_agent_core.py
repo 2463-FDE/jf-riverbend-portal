@@ -422,3 +422,71 @@ def test_no_retriever_configured_degrades_to_zero_chunks_not_an_exception(db):
     assert outcome.label == ProvenanceLabel.FALLBACK.value
     assert not outcome.accepted, "no evidence available means nothing to ground a claim in"
     assert outcome.validation.code == V.CODE_NO_CLAIMS
+
+
+# --- W10 Final Stage 5 sub-slice 3: durable usage accounting ---------------
+
+
+def _final_with_usage(summary, claims, input_tokens, output_tokens):
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=json.dumps({"summary": summary, "claims": claims}),
+        usage_metadata={"input_tokens": input_tokens, "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens},
+    )
+
+
+def test_a_fixture_labeled_run_never_records_usage_even_if_the_response_sets_it():
+    """Usage accounting must only ever reflect a REAL Bedrock call — a
+    scripted test model happening to set usage_metadata must not leak into
+    what would be persisted as real usage."""
+    from libs.summary_agent.runtime import run_summary_agent
+
+    trace = TraceRecorder("corr-fixture-usage")
+    model = ScriptedChatModel([_tool_call(), _final_with_usage(GROUNDED_SUMMARY, GROUNDED_CLAIMS, 100, 20)])
+
+    result = run_summary_agent(
+        scope=_SCOPE, retriever=_default_retriever(), actor_role="clinician", trace=trace, model=model,
+        label=ProvenanceLabel.FIXTURE,
+    )
+
+    assert result.usage == ()
+
+
+def test_a_real_labeled_run_records_usage_from_the_response():
+    """The middleware's own capture logic, proven directly: a run labelled
+    REAL (an injected model standing in for the real one, for this test)
+    with a response that carries usage_metadata must record it."""
+    from libs.summary_agent.runtime import run_summary_agent
+
+    trace = TraceRecorder("corr-real-usage")
+    model = ScriptedChatModel([_tool_call(), _final_with_usage(GROUNDED_SUMMARY, GROUNDED_CLAIMS, 150, 30)])
+
+    result = run_summary_agent(
+        scope=_SCOPE, retriever=_default_retriever(), actor_role="clinician", trace=trace, model=model,
+        label=ProvenanceLabel.REAL,
+    )
+
+    # Only the FINAL turn's response set usage_metadata — the tool_call
+    # turn's script entry did not, so it recorded nothing.
+    assert len(result.usage) == 1
+    final_turn = result.usage[0]
+    assert final_turn.model_id == "scripted-model-v0"
+    assert final_turn.input_tokens == 150 and final_turn.output_tokens == 30
+
+
+def test_generate_draft_persists_usage_for_a_real_labeled_generation(db):
+    """End to end: a REAL-labeled generation's usage reaches a durable
+    bedrock_usage_events row, queryable after the call returns."""
+    path.generate_draft(
+        db, patient_id=PATIENT, actor_role="clinician", correlation_id="corr-usage-persist",
+        model=ScriptedChatModel([_tool_call(), _final_with_usage(GROUNDED_SUMMARY, GROUNDED_CLAIMS, 200, 40)]),
+        label=ProvenanceLabel.REAL, retriever=_default_retriever(),
+    )
+    db.commit()
+
+    rows = path.bedrock_usage.usage_for(db, use_case="summary_agent_chat")
+    assert len(rows) == 1
+    assert rows[0].idempotency_key == "corr-usage-persist:2"  # the final turn — the only one with usage_metadata
+    assert rows[0].input_tokens == 200 and rows[0].output_tokens == 40
