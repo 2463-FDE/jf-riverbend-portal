@@ -1,15 +1,19 @@
-# Root-level .dockerignore — applies only to services whose docker-compose
+# Root-level .dockerignore — applies to every service whose docker-compose
 # build context is the repo root: intake-service and eligibility-service
 # (adr/0005-eligibility-agent-runtime-and-resilience.md), records-service
-# (Stage 3 — imports libs.patient_view_agent), and now gateway (it must copy
+# (Stage 3 — imports libs.patient_view_agent), gateway (it must copy
 # config/roles.yaml, the live RBAC permission source, which lives outside its
-# own directory). scheduling-service, interop-service and roi-service still
-# build from their own directories with their own local .dockerignore.
+# own directory), and now scheduling-service, interop-service, and
+# roi-service (OBS-M02, Stage 7 smoke-test discovery: all three import
+# libs/ — libs.safe_logging, and scheduling/roi's Stage 6 libs.metrics —
+# which a per-service build context could never see; the image built fine
+# but the container crashed at startup with ModuleNotFoundError, invisible
+# to CI and to pytest, which imports directly from the repo checkout).
 #
-# Note the consequence of gateway joining this list: `services/gateway/` can no
-# longer be excluded here, so it is present in the other root-context services'
-# build contexts too. That costs a few KB of context and nothing else — their
-# Dockerfiles only COPY the paths they name.
+# Every root-context service now needs every other service's directory
+# present in the context (none is excluded below) — that costs a few KB of
+# context and nothing else, since each Dockerfile only COPYs the paths it
+# names.
 .git/
 .github/
 frontend/
@@ -25,13 +29,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .DS_Store
-
-# Sibling services that still build from their own directories, so they are
-# never needed in a root-context build. `services/gateway/` is deliberately
-# NOT in this list any more — gateway now builds from the repo root.
-services/scheduling-service/
-services/interop-service/
-services/roi-service/
 
 # db/ is mounted into the Postgres container at runtime (docker-compose.yml);
 # it is not part of any Python service's build.

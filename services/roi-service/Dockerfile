@@ -1,3 +1,13 @@
+# OBS-M02 (Stage 7 smoke-test discovery): this service imports libs/
+# (libs.safe_logging, libs.metrics) — a shared package that lives at the
+# repo root, outside services/roi-service/. The old context
+# (./services/roi-service, per-service COPY . .) could never see it: the
+# image built fine, but the container crashed at startup with
+# ModuleNotFoundError, invisible to CI (image build only, never runs the
+# container) and to pytest (imports directly from the repo checkout). The
+# build context is now the repo root (see docker-compose.yml's
+# build.context for this service) so libs/ can be copied in explicitly —
+# mirroring services/records-service/Dockerfile and the others.
 # P5 follow-up, item 3: python:3.12-slim floats to whatever Debian release is
 # current (trixie/13 as of this pin, which still carries HIGH-severity
 # util-linux/bsdutils/OpenSSL findings). python:3.12-slim-bookworm (Debian
@@ -7,10 +17,11 @@ FROM python:3.12-slim-bookworm@sha256:0f5b26b9518d002b6173fd61daad821fa340635ebf
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY services/roi-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY services/roi-service/ .
+COPY libs/ ./libs/
 
 EXPOSE 8076
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8076"]

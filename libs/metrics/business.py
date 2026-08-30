@@ -28,8 +28,12 @@ SCHEDULING_BOOKING_OUTCOMES = Counter(
 )
 
 # No labels: this route's own identity IS the label (see
-# services/records-service/app.py::get_patient_records, DEBT D8) — counted,
-# not batched or deprecated in this stage.
+# services/records-service/app.py::get_patient_records). DEBT D8 (the N+1
+# read pattern this counter was originally named for) was batched in Stage
+# 7 sub-slice 4 after live smoke evidence proved the route is still called
+# by the current frontend — the counter's name/identity is kept unchanged
+# so any dashboard/alert referencing it stays valid; it now measures calls
+# to the batched chart-assembly path.
 RECORDS_LEGACY_N_PLUS_ONE_CHART_READS = Counter(
-    "records_legacy_chart_n_plus_one_total", "Reads of the deliberate N+1 chart-assembly path (DEBT D8)",
+    "records_legacy_chart_n_plus_one_total", "Reads of the (now-batched) legacy chart-assembly path, formerly N+1 (DEBT D8)",
 )

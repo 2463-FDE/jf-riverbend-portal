@@ -170,9 +170,22 @@ here; sequencing lives in the current delivery plan, not in this file.
   `services/records-service/patient_access_gate.py` against
   `db/migrations/014_patient_access_grants.sql`; see
   `tests/integration/test_records_flow.py::test_user_cannot_read_other_patients_chart`.
-- **N+1 + full-table scans** in the records read/search paths. Still open,
-  deliberately deferred (`docs/analysis/W4-records-N-plus-one.md`, DEBT D8).
-  Needs fixing alongside the missing patient-scoped indexes, not before them.
+- **N+1 query pattern** in `get_patient_records` — **Resolved** (W10 Final
+  Stage 7 sub-slice 4, DEBT D8): live smoke evidence (a real browser "Load
+  records" click against the exact merged revision, not just static code
+  inspection) proved the route is still called by the current frontend
+  (`frontend/app/records/page.tsx`'s "Load records" action, proxied by
+  `frontend/app/api/records/route.ts`), so per the stage's own rule that
+  decided batching over deprecation. `services/records-service/app.py`'s
+  `get_patient_records` now issues 2 queries total regardless of encounter
+  count (encounters, then one `IN (...)`-batched records query), not 1+N.
+  **Still open, separately: full-table scans.** Neither `records.encounter_id`
+  nor `encounters.patient_id` is indexed (`pg_indexes` on a fresh volume
+  shows only the two primary keys) — both the old N+1 queries and the new
+  batched query are sequential scans over `records`/`encounters`. Batching
+  reduces the scan COUNT from 1+N to 2 but does not add the missing
+  patient-scoped indexes this line originally paired with the N+1 fix;
+  that migration is separate, not-yet-scheduled work.
 - **Brittle HL7 mapping** — only PID/PV1 are mapped; AL1 (allergies) and RXA
   (medications) are silently dropped. Still open.
 - **ROI has no authorization enforcement** — disclosures go out with no recorded
