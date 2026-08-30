@@ -42,6 +42,13 @@ export default function RoiPage() {
   const [busy, setBusy] = useState(false);
   const [busyFulfill, setBusyFulfill] = useState<number | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // W10 Final 2 Stage 1: fulfillment requires a specific, already-reviewed
+  // authorization id (roi-service's FulfillRequest.authorization_id) — there
+  // is no authorization-review UI yet (that workflow is API-only today), so
+  // staff enter the id of the authorization a supervisor already reviewed
+  // 'valid' for this patient/recipient. Keyed per request id so multiple
+  // pending rows don't share one input.
+  const [authorizationIds, setAuthorizationIds] = useState<Record<number, string>>({});
 
   const load = useCallback(async () => {
     setRequests(null);
@@ -89,11 +96,30 @@ export default function RoiPage() {
   }
 
   async function fulfill(req: RoiRequest) {
+    const raw = authorizationIds[req.id] ?? "";
+    const authorizationId = Number(raw);
+    if (!raw || !Number.isInteger(authorizationId) || authorizationId <= 0) {
+      setMsg({ kind: "err", text: "Enter the id of a reviewed, valid authorization before fulfilling." });
+      return;
+    }
     setBusyFulfill(req.id);
     setMsg(null);
     try {
-      const r = await apiFetch(`/api/roi/requests/${req.id}/fulfill`, { method: "POST" });
-      if (!r.ok) throw new Error();
+      const r = await apiFetch(`/api/roi/requests/${req.id}/fulfill`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authorization_id: authorizationId }),
+      });
+      const data = await r.json().catch(() => null);
+      if (!r.ok) {
+        // Truthful failure text — the gateway now forwards roi-service's
+        // real status/detail (e.g. "authorization has expired", "an active
+        // disclosure restriction blocks this release") instead of a
+        // downstream rejection silently becoming a false 200.
+        const detail = typeof data?.detail === "string" ? data.detail : null;
+        setMsg({ kind: "err", text: detail || "Could not fulfill that request." });
+        return;
+      }
       setMsg({ kind: "ok", text: `Request #${req.id} marked fulfilled.` });
       await load();
     } catch {
@@ -203,7 +229,18 @@ export default function RoiPage() {
                       )}
                     </div>
                     {!done && (
-                      <div style={{ marginTop: 10 }}>
+                      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                        <input
+                          className="rb-input"
+                          style={{ width: 140 }}
+                          placeholder="Authorization ID"
+                          inputMode="numeric"
+                          aria-label={`Authorization ID for request #${req.id}`}
+                          value={authorizationIds[req.id] ?? ""}
+                          onChange={(e) =>
+                            setAuthorizationIds((prev) => ({ ...prev, [req.id]: e.target.value }))
+                          }
+                        />
                         <button
                           className="rb-btn rb-btn--sm"
                           onClick={() => fulfill(req)}

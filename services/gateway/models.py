@@ -123,6 +123,30 @@ class PatientAccessGrant(Base):
     expires_at = Column(DateTime(timezone=True))  # NULL = never expires
 
 
+class RoiRequest(Base):
+    """Minimal read-only mirror of roi-service's own table (008/029/030) —
+    only `patient_id` is needed here, to resolve which patient a bare
+    `request_id` in a ROI proxy route URL belongs to before checking a
+    patient_access_grants row (W10 Final 2 Stage 1 — see
+    roi_authorization.py). Same adr/0001 reasoning as Appointment/
+    PatientAccessGrant above."""
+
+    __tablename__ = "roi_requests"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, nullable=False)
+
+
+class RoiAuthorization(Base):
+    """Minimal read-only mirror of roi-service's own table (029/030) — same
+    reasoning as RoiRequest above, for a bare `authorization_id`."""
+
+    __tablename__ = "roi_authorizations"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, nullable=False)
+
+
 class InsuranceCoverage(Base):
     __tablename__ = "insurance_coverages"
 
