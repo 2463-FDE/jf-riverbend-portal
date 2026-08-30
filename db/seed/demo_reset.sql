@@ -258,8 +258,8 @@ UPDATE insurance_coverages
 -- design — see migration 022's own comment), so a rehearsal that sends a
 -- follow-up, marks a thread read, or closes one leaves that behind for the
 -- next rehearsal without this reset.
-DELETE FROM thread_messages WHERE thread_id IN (1, 2) AND id NOT IN (1, 2, 3);
 DELETE FROM thread_read_state WHERE thread_id IN (1, 2);
+DELETE FROM thread_messages WHERE thread_id IN (1, 2) AND id NOT IN (1, 2, 3);
 INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id, updated_at)
 SELECT 2, u.id, 3, TIMESTAMPTZ '2026-08-18 15:00:00'
   FROM users u WHERE u.patient_id = 1739 AND u.role = 'patient';

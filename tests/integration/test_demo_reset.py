@@ -248,14 +248,14 @@ def test_reset_restores_messaging_to_the_documented_baseline():
     seed.sql — a rehearsal that replies, marks it read, or closes it must
     not carry over into the next one."""
     thomas_user_id = _one("SELECT id FROM users WHERE patient_id = 1738 AND role = 'patient'")
-    _run(
+    follow_up_id = _one(
         "INSERT INTO thread_messages (thread_id, sender_user_id, body, idempotency_key)"
-        " VALUES (1, %s, 'a rehearsal follow-up', 'test-followup-stage3')",
+        " VALUES (1, %s, 'a rehearsal follow-up', 'test-followup-stage3') RETURNING id",
         (thomas_user_id,),
     )
     _run(
-        "INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id) VALUES (1, %s, 1)",
-        (thomas_user_id,),
+        "INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id) VALUES (1, %s, %s)",
+        (thomas_user_id, follow_up_id),
     )
     _run("UPDATE message_threads SET status = 'closed' WHERE id = 1")
 
