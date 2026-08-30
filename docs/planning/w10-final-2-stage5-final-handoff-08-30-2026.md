@@ -28,13 +28,19 @@ git fetch origin && git checkout c15f0638726d452ddd2964343d6095e05af907ad
 cp .env.example .env   # only if .env doesn't already exist locally
 ```
 
-Four variables the committed `.env` does not supply on a clean checkout
-must be exported to the shell only (never written to `.env`) before
-`make up`/`make demo-reset` will succeed: `DB_ADMIN_PASSWORD`,
-`PHI_ACTIVE_KEY_VERSION`, `PHI_ENCRYPTION_KEY_V1`, `PHI_BLIND_INDEX_KEY_V1`.
-Generate fresh ephemeral values per `docs/runbook.md`'s own guidance
-(`openssl rand -hex 32` / `openssl rand -base64 32`), export them in the
-same shell session, then:
+Six variables must be set to real, non-placeholder values before `make
+up`/`make demo-reset` will succeed: `DB_PASSWORD`, `DB_ADMIN_PASSWORD`,
+`INTERNAL_SERVICE_TOKEN`, `PHI_ACTIVE_KEY_VERSION`, `PHI_ENCRYPTION_KEY_V1`,
+`PHI_BLIND_INDEX_KEY_V1`. **`docs/runbook.md` is the authoritative source
+for which of these need setting and how to generate each one** — its
+"Required one-time setup" sections cover `INTERNAL_SERVICE_TOKEN` and
+`DB_PASSWORD`/`DB_ADMIN_PASSWORD` in full (including the two DB values'
+must-be-distinct requirement); consult it directly rather than this list,
+which will drift as requirements change. On this session's checkout,
+`DB_PASSWORD` and `INTERNAL_SERVICE_TOKEN` were already present in the
+committed `.env`; `DB_ADMIN_PASSWORD` and the three `PHI_*` keys were not
+and were generated fresh and exported to the shell only (never written to
+`.env`), then exported in the same shell session before:
 
 ```bash
 make up            # docker compose up -d
@@ -144,10 +150,21 @@ observed, not as assumed from `BEDROCK_MODEL_ID` being set.
   `CLAUDE.md`'s Known Risks / Debt section for the exact, current, field-
   by-field list — do not describe this system as having encrypted PHI
   without naming which fields).
-- `eligibility-service`, `scheduling-service`, `interop-service`, and
-  `roi-service` still have no gateway-to-service internal-token check
-  (only `intake-service`/`records-service` do) — unrelated to this
-  rehearsal, unchanged by this PR.
+- All six domain services (`gateway`, `intake-service`,
+  `records-service`, `eligibility-service`, `scheduling-service`,
+  `interop-service`, `roi-service`) validate the same shared
+  `INTERNAL_SERVICE_TOKEN` on every route (each service's own
+  `_verify_internal_token`, wired via FastAPI `dependencies=` on every
+  endpoint — see e.g. `services/eligibility-service/app.py:64`,
+  `services/scheduling-service/app.py:58`,
+  `services/interop-service/app.py:46`,
+  `services/roi-service/app.py:70`; `docker-compose.yml` passes
+  `${INTERNAL_SERVICE_TOKEN:?...}` to all seven). The real residual gap is
+  that this is **one shared secret across every service, not per-service
+  identities/credentials** — a caller possessing that single token, or a
+  compromise of any one service that exposes it, can call any other
+  domain service directly as if it were the gateway. Unrelated to this
+  rehearsal and unchanged by this PR.
 
 ## 6. Recovery / reset steps
 
