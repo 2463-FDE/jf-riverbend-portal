@@ -249,8 +249,12 @@ install_http_metrics(app, "records")
 
 # W10 Final Stage 6 sub-slice 4: RECORDS_LEGACY_N_PLUS_ONE_CHART_READS
 # (imported above) is incremented once per COMPLETED, audited call to
-# get_patient_records below (DEBT D8) — counted, not batched or
-# deprecated in this stage.
+# get_patient_records below. Originally an unbatched N+1 read (DEBT D8);
+# Stage 7 sub-slice 4 batched it into 2 queries after live smoke evidence
+# proved the route is still called by the current frontend. The counter's
+# name and metric identity are kept unchanged (dashboards/alerts that may
+# reference it stay valid) — it now measures calls to the batched
+# assembly path, not an N+1 one.
 
 
 @app.get("/healthz")
@@ -602,8 +606,21 @@ def get_patient_records(
 
     Week 4 catch-up: DEBT D11 (IDOR) is fixed the same way get_patient above
     is — real per-(actor, patient) authorization runs before any encounter/
-    record query. DEBT D8 (N+1) is untouched and deliberate (see comment
-    below); this fix is scoped to authorization only.
+    record query.
+
+    W10 Final Stage 7 sub-slice 4 (OBS-N01): DEBT D8 (N+1) is now batched.
+    Live smoke evidence (a real browser "Load" click against this exact
+    route, not just static code inspection) proved
+    RECORDS_LEGACY_N_PLUS_ONE_CHART_READS is still incremented by the
+    current frontend (frontend/app/records/page.tsx's "Load records"
+    action, proxied verbatim by frontend/app/api/records/route.ts) — per
+    stages.md, that telemetry is what decides batching over deprecation.
+    Authorization, response shape (PatientChart/EncounterWithRecords),
+    ordering (encounters by id, records by id within each encounter), error
+    handling, the audit write, and the counter's placement (after a
+    successful audit write, per the earlier RECORDS-COUNTER-BEFORE-AUDIT
+    review fix) are all unchanged — only the number of queries changed,
+    from 1+N to 2.
     """
     _verify_internal_token(x_internal_token)
     _authorize_or_deny(db, x_actor_id=x_actor_id, x_actor_name=x_actor_name, x_request_id=x_request_id, patient_id=patient_id)
@@ -619,24 +636,28 @@ def get_patient_records(
             .all()
         )
 
-        chart: list[EncounterWithRecords] = []
-        # N+1: one extra query per encounter (deliberate — do not collapse to a join)
-        for enc in encounters:
-            recs = (
+        encounter_ids = [enc.id for enc in encounters]
+        records_by_encounter: dict[int, list[Record]] = {eid: [] for eid in encounter_ids}
+        if encounter_ids:
+            all_records = (
                 db.execute(
                     select(Record)
-                    .where(Record.encounter_id == enc.id)
-                    .order_by(Record.id)
+                    .where(Record.encounter_id.in_(encounter_ids))
+                    .order_by(Record.encounter_id, Record.id)
                 )
                 .scalars()
                 .all()
             )
-            chart.append(
-                EncounterWithRecords(
-                    encounter=EncounterOut.model_validate(enc),
-                    records=[RecordOut.model_validate(r) for r in recs],
-                )
+            for rec in all_records:
+                records_by_encounter[rec.encounter_id].append(rec)
+
+        chart: list[EncounterWithRecords] = [
+            EncounterWithRecords(
+                encounter=EncounterOut.model_validate(enc),
+                records=[RecordOut.model_validate(r) for r in records_by_encounter[enc.id]],
             )
+            for enc in encounters
+        ]
     except SQLAlchemyError as exc:
         log.error("get_patient_records: database error for patient_id=%s error_type=%s", patient_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable")

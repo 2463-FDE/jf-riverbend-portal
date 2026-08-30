@@ -235,7 +235,18 @@ services:
       retries: 5
 
   scheduling-service:
-    build: ./services/scheduling-service
+    # OBS-M02 discovered during Stage 7 smoke testing: this service imports
+    # libs/ (libs.safe_logging, and Stage 6's libs.metrics), which lives at
+    # the repo root — the old per-service build context could never see it.
+    # The image built fine (COPY . . just copies this directory), but the
+    # container crashed at startup with ModuleNotFoundError, invisible to
+    # CI (which only builds images, never starts them) and to pytest
+    # (which imports directly from the repo checkout). Same fix already
+    # applied to gateway/intake-service/eligibility-service/records-service
+    # — see services/scheduling-service/Dockerfile.
+    build:
+      context: .
+      dockerfile: services/scheduling-service/Dockerfile
     env_file:
       # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
       # clone does not have one — and a missing env_file is a HARD compose
@@ -260,7 +271,12 @@ services:
       retries: 5
 
   interop-service:
-    build: ./services/interop-service
+    # OBS-M02 discovered during Stage 7 smoke testing — see the identical
+    # comment on scheduling-service above. This service has imported
+    # libs.safe_logging since Stage 3; the bug predates Stage 6.
+    build:
+      context: .
+      dockerfile: services/interop-service/Dockerfile
     env_file:
       # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
       # clone does not have one — and a missing env_file is a HARD compose
@@ -282,7 +298,11 @@ services:
       retries: 5
 
   roi-service:
-    build: ./services/roi-service
+    # OBS-M02 discovered during Stage 7 smoke testing — see the identical
+    # comment on scheduling-service above.
+    build:
+      context: .
+      dockerfile: services/roi-service/Dockerfile
     env_file:
       # Optional on purpose. `.env` is no longer tracked (adr/0007), so a clean
       # clone does not have one — and a missing env_file is a HARD compose
