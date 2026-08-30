@@ -5,7 +5,7 @@ idempotent operator command (run inside records-service's own container via
 Mirrors tests/test_policy_corpus_ingest_script.py's mocked-connection
 approach: no real Postgres or Bedrock call here (those already have their
 own coverage — libs/policy_corpus's own unit/integration tests, and this
-file's sibling tests/integration/test_policy_corpus_prepare_script.py for a
+file's sibling tests/integration/test_policy_corpus_prepare_idempotency.py for a
 real-Postgres/fake-embedding-provider proof). This file is about the
 wrapper's OWN new behavior: configuration validated before any connection,
 an already-fresh corpus never touching the embedding provider at all, and a

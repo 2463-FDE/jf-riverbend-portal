@@ -11,7 +11,7 @@ rows in `public` — the reusable local demo corpus), and the same
 deterministic local vector generator instead of the real Bedrock adapter,
 so this stays runnable with no live AWS credential.
 
-Run with:  pytest -m integration tests/integration/test_policy_corpus_prepare_script.py
+Run with:  pytest -m integration tests/integration/test_policy_corpus_prepare_idempotency.py
 Skipped by default in CI (`pytest -m "not integration"`).
 """
 import hashlib
