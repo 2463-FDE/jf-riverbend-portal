@@ -27,3 +27,8 @@ cryptography==50.0.1
 # own mfa_totp.py need pyotp importable. Matches services/gateway/
 # requirements.txt's pin.
 pyotp==2.10.0
+
+# W10 Final Stage 6: libs/metrics/http.py is imported eagerly by all four
+# in-scope services' app.py — needs this importable at collection time.
+# Matches each service's own requirements.txt pin.
+prometheus-client==0.26.0

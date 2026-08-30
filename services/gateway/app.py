@@ -55,6 +55,7 @@ import production_guard
 import roles_config
 from config import settings
 from db import SessionLocal, get_db
+from libs.metrics.http import install_http_metrics, metrics_response
 from logging_config import configure
 from models import (
     AuditLog,
@@ -210,6 +211,10 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Riverbend gateway", version="1.4.0", lifespan=lifespan)
 
+# W10 Final Stage 6: real, scrapeable Prometheus request metrics (count,
+# latency, in-flight) — GET /metrics, labeled by route TEMPLATE only.
+install_http_metrics(app, "gateway")
+
 SERVICES = {
     "intake": settings.intake_url,
     "eligibility": settings.eligibility_url,
@@ -302,6 +307,14 @@ def healthz():
     if not _internal_token_is_configured():
         raise HTTPException(status_code=503, detail="internal_service_token not configured")
     return {"status": "ok", "service": settings.service_name}
+
+
+@app.get("/metrics")
+def metrics():
+    # Unauthenticated, matching /healthz above: a session-cookie check (this
+    # service's own auth model) doesn't fit a Prometheus scraper, and metric
+    # labels carry no PHI/patient/user/correlation id to protect.
+    return metrics_response()
 
 
 def _stage_audit(db: Session, *, actor: str, message: str) -> None:

@@ -17,3 +17,7 @@ PyYAML==6.0.2
 # intake-service already do for PHI field encryption (adr/0012).
 pyotp==2.10.0
 cryptography==50.0.1
+
+# W10 Final Stage 6: real scrapeable Prometheus HTTP request metrics
+# (libs/metrics/http.py::install_http_metrics).
+prometheus-client==0.26.0

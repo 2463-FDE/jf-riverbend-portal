@@ -39,3 +39,7 @@ cryptography==50.0.1
 # same pins already used by intake-service/eligibility-service.
 opentelemetry-api==1.29.0
 opentelemetry-sdk==1.29.0
+
+# W10 Final Stage 6: real scrapeable Prometheus HTTP request metrics
+# (libs/metrics/http.py::install_http_metrics).
+prometheus-client==0.26.0

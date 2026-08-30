@@ -3,3 +3,7 @@ uvicorn[standard]==0.34.0
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 pydantic==2.10.4
+
+# W10 Final Stage 6: real scrapeable Prometheus HTTP request metrics
+# (libs/metrics/http.py::install_http_metrics).
+prometheus-client==0.26.0
