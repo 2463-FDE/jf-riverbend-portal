@@ -158,23 +158,39 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Generate ephemeral secrets (never the developer's .env, never a paid-provider credential)
         # Same generation pattern as concurrency-tests/docker-build above —
-        # a fresh, throwaway value per run, never printed. Deliberately does
-        # NOT set AWS_REGION/AWS_BEARER_TOKEN_BEDROCK/PAYER_API_KEY/
-        # PAYER_API_URL/POLICY_EMBEDDING_MODEL_ID: this job must never be
-        # able to make a real Bedrock or payer call, by construction rather
-        # than by trusting every step below to remember not to.
+        # a fresh, throwaway value per run. Deliberately does NOT set
+        # AWS_REGION/AWS_BEARER_TOKEN_BEDROCK/PAYER_API_KEY/PAYER_API_URL/
+        # POLICY_EMBEDDING_MODEL_ID: this job must never be able to make a
+        # real Bedrock or payer call, by construction rather than by
+        # trusting every step below to remember not to.
+        #
+        # Each value is registered with `::add-mask::` before it is written
+        # anywhere — GitHub Actions redacts a masked value from all
+        # subsequent log output for the rest of the job, including the
+        # automatic "env:" listing every step prints. Without this, a prior
+        # run of this exact job printed every one of these generated
+        # (throwaway, single-run-only) values in that listing.
         run: |
           set -euo pipefail
+          db_password="$(openssl rand -hex 32)"
+          db_admin_password="$(openssl rand -hex 32)"
+          internal_service_token="$(openssl rand -hex 32)"
+          phi_encryption_key_v1="$(openssl rand -base64 32)"
+          phi_blind_index_key_v1="$(openssl rand -base64 32)"
+          for value in "$db_password" "$db_admin_password" "$internal_service_token" \
+                       "$phi_encryption_key_v1" "$phi_blind_index_key_v1"; do
+            echo "::add-mask::$value"
+          done
           {
             echo "DB_USER=riverbend_app"
             echo "DB_NAME=riverbend"
-            echo "DB_PASSWORD=$(openssl rand -hex 32)"
+            echo "DB_PASSWORD=$db_password"
             echo "DB_ADMIN_USER=riverbend_admin"
-            echo "DB_ADMIN_PASSWORD=$(openssl rand -hex 32)"
-            echo "INTERNAL_SERVICE_TOKEN=$(openssl rand -hex 32)"
+            echo "DB_ADMIN_PASSWORD=$db_admin_password"
+            echo "INTERNAL_SERVICE_TOKEN=$internal_service_token"
             echo "PHI_ACTIVE_KEY_VERSION=v1"
-            echo "PHI_ENCRYPTION_KEY_V1=$(openssl rand -base64 32)"
-            echo "PHI_BLIND_INDEX_KEY_V1=$(openssl rand -base64 32)"
+            echo "PHI_ENCRYPTION_KEY_V1=$phi_encryption_key_v1"
+            echo "PHI_BLIND_INDEX_KEY_V1=$phi_blind_index_key_v1"
           } >> "$GITHUB_ENV"
       - name: Validate Compose configuration
         run: docker compose config -q
@@ -205,33 +221,6 @@ jobs:
               raise SystemExit(f'{len(unhealthy)} service(s) not healthy — see above')
           print('all health-checked services are healthy')
           "
-      - name: Warm up — confirm Postgres actually serves real queries, not just pg_isready
-        # Every service's own /healthz only proves the process answers HTTP —
-        # it never touches the database — and postgres's own healthcheck
-        # (pg_isready) can report ready moments before its two-phase startup
-        # (initdb, then one internal restart) has fully settled from a fresh
-        # volume, on a resource-constrained CI runner starting every service
-        # at once. Observed here as a sustained (30+ second) OperationalError
-        # on gateway's first real query even though `--wait` had already
-        # reported every container healthy. A first attempt at probing this
-        # via gateway's own POST /login instead hit its login rate limiter
-        # (10 attempts per username per 5 minutes) well before the DB
-        # settled, self-defeating the retry — this probes Postgres directly
-        # instead, with a real query (not just a liveness ping), so it can
-        # retry as many times as it needs without side effects.
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT 1" >/tmp/warmup.log 2>&1; then
-              echo "postgres is serving real queries (attempt $i)"
-              exit 0
-            fi
-            echo "attempt $i: postgres not yet serving real queries — retrying"
-            sleep 2
-          done
-          echo "postgres never started serving real queries within the bounded retry window"
-          cat /tmp/warmup.log
-          exit 1
       - name: Verify fresh schema/bootstrap and role separation
         # Proves the auto-seed-on-a-fresh-volume path (docker-entrypoint-
         # initdb.d, see docs/runbook.md "First-boot data") actually ran, and

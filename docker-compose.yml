@@ -100,6 +100,21 @@ services:
       # the healthcheck's retry budget ran out. See docs/runbook.md's
       # "Required one-time setup" section.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # W10 Final 2 Stage 4 review fix: this service connects to Postgres
+      # directly (services/gateway/config.py) but never had its own
+      # DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD entries here — it relied
+      # entirely on the optional env_file entry above (`.env`) for them. A
+      # clean checkout with no `.env` at all (e.g. CI) leaves DB_PASSWORD
+      # empty here while postgres's own POSTGRES_PASSWORD above is the
+      # real, required ${DB_PASSWORD:?...} — a password mismatch, not a
+      # startup race, that fails every real query with a persistent
+      # OperationalError. DB_ADMIN_PASSWORD is deliberately never
+      # referenced here: this is the runtime role only.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-riverbend}
+      DB_USER: ${DB_USER:-riverbend_app}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see docs/runbook.md § Required one-time setup}
       INTAKE_URL: http://intake-service:8071
       ELIGIBILITY_URL: http://eligibility-service:8072
       RECORDS_URL: http://records-service:8073
@@ -146,6 +161,14 @@ services:
     environment:
       # Round-17 review (2026-08-06): see gateway's identical entry above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # W10 Final 2 Stage 4 review fix: see gateway's identical entry above —
+      # this service also connects to Postgres directly and had the exact
+      # same env_file-only gap.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-riverbend}
+      DB_USER: ${DB_USER:-riverbend_app}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see docs/runbook.md § Required one-time setup}
       ELIGIBILITY_URL: http://eligibility-service:8072
       # w8-planner-2 P2 (adr/0012): this service encrypts ssn/dob/notes at
       # intake time (libs/phi_crypto). Only intake-service and
@@ -217,6 +240,14 @@ services:
     environment:
       # Round-17 review (2026-08-06): see gateway's identical entry above.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # W10 Final 2 Stage 4 review fix: see gateway's identical entry above —
+      # this service also connects to Postgres directly and had the exact
+      # same env_file-only gap.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-riverbend}
+      DB_USER: ${DB_USER:-riverbend_app}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see docs/runbook.md § Required one-time setup}
       # w8-planner-2 P2 (adr/0012): this service decrypts ssn/dob/notes on
       # every patient read (libs/phi_crypto) — see intake-service's
       # identical entry above and adr/0012 "which services hold keys".
@@ -261,6 +292,14 @@ services:
       # and the ${VAR:?...} form makes a missing value stop compose rather
       # than start a service that 401s every real request.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # W10 Final 2 Stage 4 review fix: see gateway's identical entry above —
+      # this service also connects to Postgres directly and had the exact
+      # same env_file-only gap.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-riverbend}
+      DB_USER: ${DB_USER:-riverbend_app}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see docs/runbook.md § Required one-time setup}
     depends_on:
       postgres:
         condition: service_healthy
@@ -317,6 +356,14 @@ services:
       # the ${VAR:?...} form makes a missing value stop compose rather than
       # start a service that 401s every real request.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # W10 Final 2 Stage 4 review fix: see gateway's identical entry above —
+      # this service also connects to Postgres directly and had the exact
+      # same env_file-only gap.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-riverbend}
+      DB_USER: ${DB_USER:-riverbend_app}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see docs/runbook.md § Required one-time setup}
     depends_on:
       postgres:
         condition: service_healthy

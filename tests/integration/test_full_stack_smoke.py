@@ -29,7 +29,6 @@ No paid or real payer/provider call is made anywhere in this walk:
 Run with:  pytest -m integration tests/integration/test_full_stack_smoke.py
 """
 import os
-import time
 
 import pytest
 
@@ -46,23 +45,9 @@ PATIENT_PASSWORD = "portalportal123"  # db/seed/generate_seed.py's PATIENT_DEMO_
 
 
 def _token(username, password="portal123"):
-    # Retries only on a transient 503 — never on a real auth failure. A
-    # resource-constrained CI runner starting the whole stack at once can
-    # leave a service's underlying DB connection settling for a few seconds
-    # after its own /healthz already reports ready (see .github/workflows/
-    # ci.yml's "Warm up" step, which checks Postgres itself but can't prove
-    # every app service's OWN connection is past that same window). Bounded
-    # at 5 attempts specifically so this can never approach the gateway's
-    # own login rate limit (10 attempts per username per 5 minutes).
-    last_response = None
-    for attempt in range(5):
-        r = httpx.post(f"{GATEWAY}/login", json={"username": username, "password": password}, timeout=10)
-        if r.status_code != 503:
-            r.raise_for_status()
-            return r.json()["token"]
-        last_response = r
-        time.sleep(2)
-    last_response.raise_for_status()
+    r = httpx.post(f"{GATEWAY}/login", json={"username": username, "password": password}, timeout=10)
+    r.raise_for_status()
+    return r.json()["token"]
 
 
 def _auth(t):
