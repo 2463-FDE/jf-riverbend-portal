@@ -68,6 +68,12 @@ jobs:
         # Postgres + Redis and are skipped here. Coverage of the security/auth
         # paths is thin — tracked in RIV-201.
         run: pytest -m "not integration" -q
+      - name: Retrieval quality gate (deterministic, no paid provider)
+        # W10 Final Stage 5 sub-slice 4: the approved 28-case client gold set
+        # against KeywordPolicyRetriever only — never real Bedrock/pgvector,
+        # which stays db/policy_corpus_evaluate.py's separate, credentialed,
+        # manually-run command.
+        run: python db/policy_retrieval_gate.py
 
   # W10 Final Stage 2: proves the scheduling (RIV-175), ROI, audit-chain, and
   # agent-draft database-level concurrency invariants under a REAL Postgres —
