@@ -1,0 +1,106 @@
+# W10 Final Stage 7 (sub-slice 3) — `promtool test rules` fixtures proving
+# each of the 3 alert rules in ../prometheus/alert_rules.yml actually fires
+# under the condition it names, and does NOT fire when that condition isn't
+# met. Run with:
+#   docker run --rm -v "$(pwd)/observability:/etc/observability:ro" \
+#     --entrypoint promtool prom/prometheus:v2.55.1 \
+#     test rules /etc/observability/promtool_tests/alert_rules_test.yml
+rule_files:
+  - ../prometheus/alert_rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- ElevatedHttp5xxRate -----------------------------------------------
+  - interval: 1m
+    input_series:
+      # 2xx grows steadily; 5xx grows fast enough to push the ratio well
+      # past 5% for the whole window, so `for: 5m` has time to satisfy.
+      - series: 'http_requests_total{service="gateway",method="GET",route="/x",status_class="2xx"}'
+        values: "0+10x30"
+      - series: 'http_requests_total{service="gateway",method="GET",route="/x",status_class="5xx"}'
+        values: "0+2x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ElevatedHttp5xxRate
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ElevatedHttp5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Elevated 5xx rate across Riverbend services"
+              description: "More than 5% of HTTP requests have returned 5xx over the last 5 minutes."
+
+  - interval: 1m
+    input_series:
+      # 5xx never appears at all — ratio is always 0, must never fire.
+      - series: 'http_requests_total{service="gateway",method="GET",route="/x",status_class="2xx"}'
+        values: "0+10x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ElevatedHttp5xxRate
+        exp_alerts: []
+
+  # --- RoiFulfillmentFailureSpike -----------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'roi_fulfillment_outcomes_total{outcome="failure"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RoiFulfillmentFailureSpike
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RoiFulfillmentFailureSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "ROI fulfillment failures detected"
+              description: "roi-service has recorded fulfillment failures continuously for at least 10 minutes."
+
+  - interval: 1m
+    input_series:
+      # Only successes — no failure series exists at all, must never fire.
+      - series: 'roi_fulfillment_outcomes_total{outcome="success"}'
+        values: "0+5x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RoiFulfillmentFailureSpike
+        exp_alerts: []
+
+  # --- BookingConflictAnomaly ---------------------------------------------
+  - interval: 1m
+    input_series:
+      # conflict grows fast relative to success -> ratio > 20% for the
+      # whole window, enough time for `for: 10m` to be satisfied.
+      - series: 'scheduling_booking_outcomes_total{outcome="success"}'
+        values: "0+8x30"
+      - series: 'scheduling_booking_outcomes_total{outcome="conflict"}'
+        values: "0+4x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: BookingConflictAnomaly
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BookingConflictAnomaly
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Unusually high scheduling conflict rate"
+              description: "More than 20% of booking attempts have resulted in a conflict outcome over the last 15 minutes."
+
+  - interval: 1m
+    input_series:
+      # conflict rate well under 20% the whole time, must never fire.
+      - series: 'scheduling_booking_outcomes_total{outcome="success"}'
+        values: "0+20x30"
+      - series: 'scheduling_booking_outcomes_total{outcome="conflict"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BookingConflictAnomaly
+        exp_alerts: []

@@ -1,0 +1,34 @@
+# W10 Final Stage 7 (sub-slice 2) — Loki single-binary, filesystem-backed
+# config for the local observability POC. No object storage, no
+# multi-tenant auth: this is a local dev/demo stack, not production.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Grafana Alloy's pipeline (../alloy/config.alloy) attaches correlation_id
+  # as structured metadata rather than a label, specifically so it stays
+  # searchable without becoming a high-cardinality label series.
+  allow_structured_metadata: true
