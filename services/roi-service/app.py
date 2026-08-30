@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db import get_db
+from libs.metrics.business import ROI_FULFILLMENT_OUTCOMES
+from libs.metrics.http import install_http_metrics, metrics_response
 from logging_config import configure
 from models import Disclosure, Patient, Record, RoiAuthorization, RoiDisclosureRestriction, RoiRequest
 from schemas import (
@@ -36,6 +38,15 @@ from schemas import (
 log = configure(settings.service_name)
 
 app = FastAPI(title="Riverbend roi-service")
+
+# W10 Final Stage 6: real, scrapeable Prometheus request metrics (count,
+# latency, in-flight) — GET /metrics, labeled by route TEMPLATE only.
+install_http_metrics(app, "roi")
+
+# W10 Final Stage 6 sub-slice 2: ROI_FULFILLMENT_OUTCOMES (imported above)
+# is incremented in fulfill_roi_request below. A 404 (request or
+# authorization not found) is not one of the four named outcomes and is
+# deliberately left uncounted.
 
 
 @app.get("/healthz")
@@ -84,6 +95,11 @@ def _verify_internal_token(x_internal_token: Optional[str] = Header(default=None
         or not hmac.compare_digest(x_internal_token, configured)
     ):
         raise HTTPException(status_code=401, detail="missing or invalid internal service token")
+
+
+@app.get("/metrics", dependencies=[Depends(_verify_internal_token)])
+def metrics():
+    return metrics_response()
 
 
 @app.on_event("startup")
@@ -433,6 +449,7 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
         if req is None:
             raise HTTPException(status_code=404, detail="roi request not found")
         if req.status == "fulfilled":
+            ROI_FULFILLMENT_OUTCOMES.labels(outcome="retry").inc()
             raise HTTPException(status_code=409, detail="roi request has already been fulfilled")
 
         auth = db.get(RoiAuthorization, payload.authorization_id)
@@ -441,10 +458,12 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
 
         reason = _authorization_error(auth, req, datetime.now(timezone.utc))
         if reason is not None:
+            ROI_FULFILLMENT_OUTCOMES.labels(outcome="rejected").inc()
             raise HTTPException(status_code=422, detail=reason)
 
         restriction = _active_restriction(db, req.patient_id, req.recipient)
         if restriction is not None:
+            ROI_FULFILLMENT_OUTCOMES.labels(outcome="rejected").inc()
             raise HTTPException(status_code=422, detail="an active disclosure restriction blocks this release")
 
         req.status = "fulfilled"
@@ -475,6 +494,7 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
 
         db.commit()
         db.refresh(disclosure)
+        ROI_FULFILLMENT_OUTCOMES.labels(outcome="success").inc()
     except HTTPException:
         db.rollback()
         raise
@@ -485,10 +505,12 @@ def fulfill_roi_request(request_id: int, payload: FulfillRequest, db: Session = 
         # attempted anyway, report it the same truthful way as the ordinary
         # already-fulfilled case rather than a raw 500.
         db.rollback()
+        ROI_FULFILLMENT_OUTCOMES.labels(outcome="retry").inc()
         raise HTTPException(status_code=409, detail="roi request has already been fulfilled")
     except SQLAlchemyError as exc:
         db.rollback()
         log.error("fulfill_roi_request: database error for request_id=%s error_type=%s", request_id, type(exc).__name__)
+        ROI_FULFILLMENT_OUTCOMES.labels(outcome="failure").inc()
         raise HTTPException(status_code=503, detail="database unavailable")
 
     return FulfillResult(

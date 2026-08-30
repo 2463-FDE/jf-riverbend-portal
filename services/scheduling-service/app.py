@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 from book import IdempotencyKeyConflict, book
 from config import settings
 from db import get_db
+from libs.metrics.business import SCHEDULING_BOOKING_OUTCOMES
+from libs.metrics.http import install_http_metrics, metrics_response
 from logging_config import configure
 from models import Appointment, Provider, Slot
 from schemas import (
@@ -32,6 +34,13 @@ from schemas import (
 log = configure(settings.service_name)
 
 app = FastAPI(title="Riverbend scheduling-service")
+
+# W10 Final Stage 6: real, scrapeable Prometheus request metrics (count,
+# latency, in-flight) — GET /metrics, labeled by route TEMPLATE only.
+install_http_metrics(app, "scheduling")
+
+# W10 Final Stage 6 sub-slice 3: SCHEDULING_BOOKING_OUTCOMES (imported
+# above) is incremented in create_appointment below.
 
 
 _MIN_INTERNAL_TOKEN_LENGTH = 32  # rejects "changeme" and any other short/example value
@@ -72,6 +81,11 @@ def _verify_internal_token(x_internal_token: Optional[str] = Header(default=None
         or not hmac.compare_digest(x_internal_token, configured)
     ):
         raise HTTPException(status_code=401, detail="missing or invalid internal service token")
+
+
+@app.get("/metrics", dependencies=[Depends(_verify_internal_token)])
+def metrics():
+    return metrics_response()
 
 
 @app.on_event("startup")
@@ -215,16 +229,19 @@ def create_appointment(req: BookingRequest):
             "(patient=%s, existing_appointment_id=%s)",
             req.patient_id, e.existing_appointment_id,
         )
+        SCHEDULING_BOOKING_OUTCOMES.labels(outcome="conflict").inc()
         raise HTTPException(
             status_code=409,
             detail={"error": "idempotency_key_conflict", "existing_appointment_id": e.existing_appointment_id},
         )
     except Exception as exc:
         log.error("booking failed for patient=%s slot=%s error_type=%s", req.patient_id, req.slot_id, type(exc).__name__)
+        SCHEDULING_BOOKING_OUTCOMES.labels(outcome="failure").inc()
         raise HTTPException(status_code=503, detail="database unavailable")
 
     if appointment_id is None:
         log.info("slot %s already taken (patient=%s)", req.slot_id, req.patient_id)
+        SCHEDULING_BOOKING_OUTCOMES.labels(outcome="conflict").inc()
         raise HTTPException(status_code=409, detail={"error": "slot_taken"})
 
     log.info(
@@ -234,6 +251,7 @@ def create_appointment(req: BookingRequest):
         req.slot_id,
         is_replay,
     )
+    SCHEDULING_BOOKING_OUTCOMES.labels(outcome="retry" if is_replay else "success").inc()
     return BookingResponse(appointment_id=appointment_id, status="confirmed")
 
 

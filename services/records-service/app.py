@@ -63,6 +63,8 @@ import policy_navigator_path
 import review_queue
 import summary_agent_path
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
+from libs.metrics.business import RECORDS_LEGACY_N_PLUS_ONE_CHART_READS
+from libs.metrics.http import install_http_metrics, metrics_response
 from libs.phi_crypto import PhiCryptoError
 from libs.tracing.spans import new_correlation_id
 from patient_view_repository import SqlChartRepository
@@ -240,6 +242,15 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Riverbend records-service", lifespan=lifespan)
+
+# W10 Final Stage 6: real, scrapeable Prometheus request metrics (count,
+# latency, in-flight) — GET /metrics, labeled by route TEMPLATE only.
+install_http_metrics(app, "records")
+
+# W10 Final Stage 6 sub-slice 4: RECORDS_LEGACY_N_PLUS_ONE_CHART_READS
+# (imported above) is incremented once per COMPLETED, audited call to
+# get_patient_records below (DEBT D8) — counted, not batched or
+# deprecated in this stage.
 
 
 @app.get("/healthz")
@@ -635,6 +646,12 @@ def get_patient_records(
         actor=_actor_label(x_actor_name, x_actor_id),
         message=f"get_patient_records outcome=allowed patient_id={patient_id} correlation_id={x_request_id or ''}",
     )
+    # Review fix RECORDS-COUNTER-BEFORE-AUDIT: this counts a COMPLETED,
+    # auditable chart read, not merely an assembly attempt — incremented
+    # only after _write_audit() has actually committed. An audit-write
+    # failure (503, above) must not still count this as a legacy-path
+    # read that happened.
+    RECORDS_LEGACY_N_PLUS_ONE_CHART_READS.inc()
     return PatientChart(patient_id=patient_id, encounters=chart)
 
 
@@ -726,6 +743,12 @@ def _verify_internal_token(x_internal_token: Optional[str]) -> None:
         or not hmac.compare_digest(x_internal_token, configured)
     ):
         raise HTTPException(status_code=401, detail="missing or invalid internal service token")
+
+
+@app.get("/metrics")
+def metrics(x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token")):
+    _verify_internal_token(x_internal_token)
+    return metrics_response()
 
 
 @app.get("/patients/{patient_id}/view", response_model=PatientViewResult)
