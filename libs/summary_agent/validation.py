@@ -67,6 +67,37 @@ def _normalize(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+def sentence_candidates(text: str) -> list:
+    """The complete sentences in `text`, each an EXACT slice of it.
+
+    One shared notion of "a sentence" for the whole package. The concise-format
+    count below, the per-sentence grounding check, and `deterministic_draft()`'s
+    fallback selection all read sentences through this — review finding
+    SA-FALLBACK-SENTENCE-SCAN was the fallback having a second, narrower idea of
+    its own (the text before the first ". "), which silently discarded every
+    sentence after the first in a document.
+
+    Slices are CUT from the source at `_SENTENCE_END` boundaries rather than
+    reassembled from split fragments, so a candidate is always a verbatim,
+    contiguous substring of `text` — which is exactly what a quote claim must
+    be for `validate_draft` to accept it. The separator's own whitespace (and
+    a closing quote mark sitting on the boundary) belongs to no sentence, the
+    same way `_SENTENCE_END.split` has always dropped it.
+    """
+    spans, start = [], 0
+    for boundary in _SENTENCE_END.finditer(text):
+        spans.append(text[start:boundary.start()])
+        start = boundary.end()
+    spans.append(text[start:])
+
+    sentences = []
+    for span in spans:
+        sentence = span.strip()
+        if _HAS_CONTENT.search(sentence):  # skip punctuation-only leftovers
+            sentences.append(sentence)
+    return sentences
+
+
 def _computation_sentence(claim: ComputationClaim) -> str:
     """The one sentence a computation claim licenses, generated from the claim.
 
@@ -87,11 +118,10 @@ def _is_instruction_shaped(text: str) -> bool:
 
 
 def _content_sentence_count(summary: str) -> int:
-    """How many non-empty sentences `summary` splits into — the same split
-    the per-sentence grounding check below uses, counted rather than matched,
-    so the concise-format cap and the grounding check agree on what a
-    "sentence" is."""
-    return sum(1 for s in _SENTENCE_END.split(summary) if _HAS_CONTENT.search(_normalize(s)))
+    """How many sentences `summary` carries, read through `sentence_candidates`
+    so the concise-format cap, the grounding check below and the fallback's own
+    selection all agree on what a "sentence" is."""
+    return len(sentence_candidates(summary))
 
 
 def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> ValidationOutcome:
@@ -154,10 +184,8 @@ def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> Validatio
     # sentence its claim generates, exactly.
     templates = {_normalize(_computation_sentence(c)) for c in draft.claims
                  if isinstance(c, ComputationClaim)}
-    for sentence in _SENTENCE_END.split(draft.summary):
+    for sentence in sentence_candidates(draft.summary):
         normalized = _normalize(sentence)
-        if not _HAS_CONTENT.search(normalized):
-            continue  # punctuation or quote marks left over by the split
         if normalized in templates:
             continue
         if any(q and (q in normalized or normalized in q) for q in validated_quotes):

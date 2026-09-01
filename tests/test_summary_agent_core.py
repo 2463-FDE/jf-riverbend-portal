@@ -434,6 +434,47 @@ def test_deterministic_fallback_selects_only_complete_sentences_within_limits():
     assert outcome.passed, outcome.code
 
 
+def test_deterministic_fallback_reaches_a_later_sentence_when_the_first_is_too_long():
+    """Review finding SA-FALLBACK-SENTENCE-SCAN.
+
+    Reading only the text before a document's first ". " meant one over-long
+    opening sentence threw the whole document away, and the fallback refused
+    with CODE_NO_CLAIMS even though the very next sentence was short, complete
+    and quotable. The fallback must scan the document's sentences, not just
+    its first one.
+    """
+    long_first = "X" * (MAX_SUMMARY_CHARACTERS + 10) + "."
+    short_second = "The clinic posts approved guidance for every reader."
+    ledger = RetrievalLedger()
+    ledger.record([_chunk("DOC-MIX@1.0#s", f"{long_first} {short_second}")])
+
+    draft = deterministic_draft(ledger)
+
+    assert [c.quote for c in draft.claims] == [short_second], "the fitting sentence is used"
+    assert long_first not in draft.summary, "and the over-long one is left out whole"
+    assert len(draft.summary) <= MAX_SUMMARY_CHARACTERS
+    outcome = V.validate_draft(draft, ledger)
+    assert outcome.passed, outcome.code
+
+
+def test_deterministic_fallback_never_truncates_a_sentence_to_make_it_fit():
+    """The limit is met by DROPPING whole sentences, never by cutting one
+    short — a half-sentence is a claim the source never made."""
+    sentences = [
+        "The first approved sentence is quite a long one and it uses up a good part of the budget.",
+        "The second approved sentence is also long enough to matter for the running total here.",
+        "Short closing note.",
+    ]
+    ledger = RetrievalLedger()
+    ledger.record([_chunk(f"DOC-{i}@1.0#s", text) for i, text in enumerate(sentences)])
+
+    draft = deterministic_draft(ledger)
+
+    for claim in draft.claims:
+        assert claim.quote in sentences, "every quote is a whole source sentence, not a prefix"
+    assert V.validate_draft(draft, ledger).passed
+
+
 def test_deterministic_fallback_yields_no_approvable_content_when_nothing_fits():
     """A single source sentence too long to ever fit the concise cap must not
     be shortened to make it fit — the fallback must produce no claims, which

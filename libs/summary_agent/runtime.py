@@ -34,6 +34,7 @@ from .contracts import (
     parse_draft,
 )
 from .retrieval import RetrievalLedger, RetrievalLimits, build_retrieval_tool, citations_for_persistence, retrieve
+from .validation import sentence_candidates
 
 log = get_safe_logger(__name__)
 
@@ -155,21 +156,31 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
     complete source-exact sentences, skipping (never truncating) one that
     would not fit, and stops once it holds MAX_SUMMARY_SENTENCES. If no
     complete sentence fits at all, it returns no claims — the existing
-    no-evidence refusal — rather than shortening a sentence to make it fit."""
+    no-evidence refusal — rather than shortening a sentence to make it fit.
+
+    Sentences come from `sentence_candidates`, the same boundary logic the
+    validator counts with. Review finding SA-FALLBACK-SENTENCE-SCAN: reading
+    only the text before a document's first ". " meant one over-long opening
+    sentence discarded the whole document, refusing a summary that a later,
+    perfectly quotable sentence in that same document could have grounded.
+
+    It still takes at most ONE sentence per document — with the caps this
+    small, spending the whole budget on one document's opening paragraph
+    would drop the other approved sources entirely, and breadth across the
+    retrieved set is the more useful of the two for a reader."""
     quotes, claims, used_chars = [], [], 0
     for citation_id in ledger.citation_ids:
         if len(claims) >= MAX_SUMMARY_SENTENCES:
             break
-        text = ledger.get(citation_id).text
-        head, separator, _ = text.partition(". ")
-        sentence = head + "." if separator else head
-        quoted = f'"{sentence}"'
-        joined_chars = used_chars + len(quoted) + (1 if quotes else 0)  # +1 for the joining space
-        if joined_chars > MAX_SUMMARY_CHARACTERS:
-            continue  # this one doesn't fit; a later, shorter citation still might
-        quotes.append(quoted)
-        claims.append(QuoteClaim(kind="quote", citation_id=citation_id, quote=sentence))
-        used_chars = joined_chars
+        for sentence in sentence_candidates(ledger.get(citation_id).text):
+            quoted = f'"{sentence}"'
+            joined_chars = used_chars + len(quoted) + (1 if quotes else 0)  # +1 for the joining space
+            if joined_chars > MAX_SUMMARY_CHARACTERS:
+                continue  # too long to fit; a later sentence here still might
+            quotes.append(quoted)
+            claims.append(QuoteClaim(kind="quote", citation_id=citation_id, quote=sentence))
+            used_chars = joined_chars
+            break
     return StructuredDraft(
         summary=" ".join(quotes) if quotes else "No approved source material was available.",
         claims=claims,
