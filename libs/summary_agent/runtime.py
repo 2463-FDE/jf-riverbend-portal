@@ -21,6 +21,7 @@ import time
 from typing import Optional
 
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
+from libs.metrics import ai as ai_metrics
 from libs.policy_corpus import RetrievalScope
 from libs.safe_logging import get_safe_logger
 
@@ -40,6 +41,10 @@ log = get_safe_logger(__name__)
 
 PROMPT_VERSION = "summary-agent-v1"
 DEFAULT_MAX_TURNS = 4
+# The bounded metrics label for this surface. Matches the durable
+# `bedrock_usage_events.use_case` written by summary_agent_path.py, so a
+# Prometheus series and a database row describe the same thing.
+METRICS_USE_CASE = "summary_agent_chat"
 
 SYSTEM_PROMPT = """You write short, factual summaries for Riverbend Community Health.
 
@@ -125,8 +130,15 @@ def _trace_middleware(trace: TraceRecorder, model_id: Optional[str], label: Prov
                 # that caused it, which is the one thing that must not persist.
                 trace.provider_call(label=label, model_id=model_id, latency_ms=elapsed(),
                                     error_type=type(exc).__name__)
+                # The exception type is NOT a metric label — it is unbounded and
+                # can carry provider detail. Only the categorical outcome is.
+                ai_metrics.record_provider_call(
+                    use_case=METRICS_USE_CASE, model_id=model_id, outcome="provider_error",
+                    duration_seconds=elapsed() / 1000.0,
+                )
                 raise
             trace.provider_call(label=label, model_id=model_id, latency_ms=elapsed())
+            call_duration_seconds = elapsed() / 1000.0
             messages = getattr(response, "result", None) or [response]
             ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
             calls = list(getattr(ai, "tool_calls", None) or []) if ai else []
@@ -136,11 +148,20 @@ def _trace_middleware(trace: TraceRecorder, model_id: Optional[str], label: Prov
             # REAL provider call — never a fixture/scripted test model, even
             # one that happens to set usage_metadata itself.
             usage = getattr(ai, "usage_metadata", None) if ai else None
-            if label is ProvenanceLabel.REAL and usage:
+            real_usage = usage if (label is ProvenanceLabel.REAL and usage) else None
+            if real_usage:
                 usage_events.append(UsageTurn(
                     model_id=model_id, turn=self.turn,
                     input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
                 ))
+            # Tokens follow the same REAL-only rule as the durable usage rows:
+            # a scripted model's usage_metadata is not a provider measurement.
+            ai_metrics.record_provider_call(
+                use_case=METRICS_USE_CASE, model_id=model_id, outcome="success",
+                duration_seconds=call_duration_seconds,
+                input_tokens=real_usage.get("input_tokens") if real_usage else None,
+                output_tokens=real_usage.get("output_tokens") if real_usage else None,
+            )
             return response
 
     return _TraceMiddleware()
@@ -202,6 +223,15 @@ def _fallback(retriever, *, scope, ledger, limits, trace, error_type, terminatio
         # evidence — deterministically, through the same bounded call.
         retrieve(retriever, scope=scope, query=_FALLBACK_QUERY, limits=limits, ledger=ledger, trace=trace)
     draft = deterministic_draft(ledger)
+    citations = citations_for_persistence(ledger, draft.citation_ids())
+    # Every fallback path in this module funnels through here, so this is the
+    # one place a fallback run is counted — `termination_reason` still says
+    # WHY (provider_error vs max_turns), which the label alone would lose.
+    ai_metrics.record_agent_run(
+        use_case=METRICS_USE_CASE, provenance_label=ProvenanceLabel.FALLBACK,
+        termination_reason=termination_reason,
+    )
+    ai_metrics.record_citations(use_case=METRICS_USE_CASE, count=len(citations))
     return AgentRunResult(
         draft=draft, label=ProvenanceLabel.FALLBACK, ledger=ledger,
         # Neither a model nor a prompt: naming PROMPT_VERSION here would
@@ -209,7 +239,7 @@ def _fallback(retriever, *, scope, ledger, limits, trace, error_type, terminatio
         # misattribution create_draft already refuses for model_id.
         model_id=None, prompt_version=None, provider_error_type=error_type,
         termination_reason=termination_reason,
-        citations=citations_for_persistence(ledger, draft.citation_ids()),
+        citations=citations,
         # A turn or more may have genuinely succeeded (and used real tokens)
         # before the run ultimately fell back (e.g. max_turns) — those turns'
         # usage is still real and still worth recording.
@@ -289,9 +319,14 @@ def run_summary_agent(
         log.warning("summary agent run failed (error_type=%s)", type(exc).__name__)
         return fallback(type(exc).__name__, "provider_error")
 
+    citations = citations_for_persistence(ledger, draft.citation_ids())
+    ai_metrics.record_agent_run(
+        use_case=METRICS_USE_CASE, provenance_label=resolved, termination_reason="answered",
+    )
+    ai_metrics.record_citations(use_case=METRICS_USE_CASE, count=len(citations))
     return AgentRunResult(
         draft=draft, label=resolved, ledger=ledger, model_id=model_id,
         prompt_version=PROMPT_VERSION, termination_reason="answered",
-        citations=citations_for_persistence(ledger, draft.citation_ids()),
+        citations=citations,
         usage=tuple(usage_events),
     )

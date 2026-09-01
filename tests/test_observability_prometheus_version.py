@@ -32,7 +32,13 @@ _VERSION_RE = re.compile(r"prom/prometheus:v(\d+)\.(\d+)\.(\d+)")
 # Scrape jobs that must present the internal-service-token header. Gateway
 # is deliberately excluded: its /metrics is unauthenticated, matching its
 # own /healthz precedent (see libs/metrics/http.py, services/gateway/app.py).
-_TOKEN_GUARDED_JOBS = ("records-service", "scheduling-service", "roi-service")
+_TOKEN_GUARDED_JOBS = (
+    "records-service", "scheduling-service", "roi-service",
+    # W10 metrics Stage 1: eligibility-service exposes /metrics behind the
+    # same internal-token guard as its other routes, so Prometheus must
+    # present the header for it too.
+    "eligibility-service",
+)
 
 
 def _compose_prometheus_image():

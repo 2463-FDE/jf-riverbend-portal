@@ -21,11 +21,13 @@ just advising on it).
 """
 import os
 import re
+import time
 from typing import Optional
 
 from libs.agent_provenance import ProvenanceLabel
 from libs.deid import scrub
 from libs.metrics import record_counter
+from libs.metrics import ai as ai_metrics
 from libs.policy_corpus import PolicyRetriever, RetrievalLedger, RetrievalScope
 from libs.safe_logging import get_safe_logger
 
@@ -36,6 +38,9 @@ log = get_safe_logger(__name__)
 
 PROMPT_VERSION = "policy-navigator-v1"
 DEFAULT_MAX_TURNS = 4
+# Bounded metrics label for this surface, matching the durable
+# `bedrock_usage_events.use_case` records-service writes for it.
+METRICS_USE_CASE = "policy_navigator_chat"
 
 _SAFE_PROVIDER_REPLY = (
     "I couldn't reach the policy navigator just now. Please try again in a moment."
@@ -121,16 +126,36 @@ def _usage_middleware(model_id: Optional[str], label: ProvenanceLabel, usage_eve
 
         def wrap_model_call(self, request, handler):
             self.turn += 1
-            response = handler(request)
+            started = time.monotonic()
+            try:
+                response = handler(request)
+            except Exception:
+                # Categorical outcome only — the exception type is unbounded
+                # and can carry provider detail, so it is never a label. The
+                # run's own outer try/except still classifies and re-raises.
+                ai_metrics.record_provider_call(
+                    use_case=METRICS_USE_CASE, model_id=model_id, outcome="provider_error",
+                    duration_seconds=time.monotonic() - started,
+                )
+                raise
+            duration_seconds = time.monotonic() - started
+            real_usage = None
             if label is ProvenanceLabel.REAL:
                 messages = getattr(response, "result", None) or [response]
                 ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
                 usage = getattr(ai, "usage_metadata", None) if ai else None
                 if usage:
+                    real_usage = usage
                     usage_events.append(UsageTurn(
                         model_id=model_id, turn=self.turn,
                         input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
                     ))
+            ai_metrics.record_provider_call(
+                use_case=METRICS_USE_CASE, model_id=model_id, outcome="success",
+                duration_seconds=duration_seconds,
+                input_tokens=real_usage.get("input_tokens") if real_usage else None,
+                output_tokens=real_usage.get("output_tokens") if real_usage else None,
+            )
             return response
 
     return _UsageMiddleware()
@@ -181,6 +206,16 @@ def run_policy_navigator(
         termination_reason=result.termination_reason,
         provenance_label=result.label,
     )
+    ai_metrics.record_agent_run(
+        use_case=METRICS_USE_CASE,
+        provenance_label=result.label,
+        termination_reason=result.termination_reason,
+    )
+    # Only a completed answer has citations to count. A refusal deliberately
+    # carries none, and observing 0 for it would drag the histogram toward
+    # zero for a reason that has nothing to do with citation richness.
+    if result.termination_reason == "answered":
+        ai_metrics.record_citations(use_case=METRICS_USE_CASE, count=len(result.citations or ()))
     return result
 
 

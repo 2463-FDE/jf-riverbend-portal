@@ -34,6 +34,7 @@ from check import check
 from config import settings
 from contracts import EligibilityStatus
 from jobs import EligibilityJob, JobStatus, JobStoreUnavailable, RedisEligibilityJobStore
+from libs.metrics.http import install_http_metrics, metrics_response
 from libs.tracing import new_correlation_id, safe_span
 from logging_config import configure
 from schemas import (
@@ -47,6 +48,10 @@ from worker import run_worker_loop
 
 log = configure(settings.service_name)
 app = FastAPI(title="Riverbend eligibility-service", version="1.4.0")
+# W10 metrics Stage 1: this service owns the eligibility circuit-breaker and
+# agent-run series, so it needs a scrape target of its own — it was the one
+# AI-bearing service with no /metrics route.
+install_http_metrics(app, "eligibility-service")
 
 
 _MIN_INTERNAL_TOKEN_LENGTH = 32  # rejects "changeme" and any other short/example value
@@ -180,6 +185,11 @@ async def _stop_worker():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "service": settings.service_name}
+
+
+@app.get("/metrics", dependencies=[Depends(_verify_internal_token)])
+def metrics():
+    return metrics_response()
 
 
 @app.get("/eligibility", response_model=EligibilityResponse, dependencies=[Depends(_verify_internal_token)])

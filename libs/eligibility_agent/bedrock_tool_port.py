@@ -17,10 +17,12 @@ for the same underlying AWS SDK, just behind a different method shape.
 """
 import json
 import os
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional
 
+from libs.metrics import ai as ai_metrics
 from libs.llm_client.errors import (
     ProviderCallError,
     ProviderNotConfiguredError,
@@ -105,6 +107,10 @@ class ToolCapableModel(ABC):
         yield ConverseStreamEvent(kind="stop", stop_reason=turn.stop_reason)
 
 
+# Bounded metrics label for the eligibility assistant surface.
+_METRICS_USE_CASE = "eligibility_agent_chat"
+
+
 class BedrockConverseToolModel(ToolCapableModel):
     def __init__(self, model_id: str = None, region: str = None):
         self._model_id = model_id or os.getenv("BEDROCK_MODEL_ID")
@@ -115,6 +121,31 @@ class BedrockConverseToolModel(ToolCapableModel):
             raise ProviderNotConfiguredError("AWS_REGION is not configured")
 
     def converse(self, messages: list, tools: list, *, timeout: float) -> ConverseTurn:
+        """Timed, counted wrapper around the real Converse call.
+
+        This surface reports NO token usage — Bedrock returns a usage block
+        but `_converse` discards it, so only the call, its categorical
+        outcome and its duration are measured. Recording a zero here would
+        invent a measurement this port never made.
+        """
+        started = time.monotonic()
+        try:
+            turn = self._converse(messages, tools, timeout=timeout)
+        except Exception:
+            # Categorical outcome only: every error type this raises is
+            # normalized elsewhere, and none of them belongs in a label.
+            ai_metrics.record_provider_call(
+                use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse",
+                outcome="provider_error", duration_seconds=time.monotonic() - started,
+            )
+            raise
+        ai_metrics.record_provider_call(
+            use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse",
+            outcome="success", duration_seconds=time.monotonic() - started,
+        )
+        return turn
+
+    def _converse(self, messages: list, tools: list, *, timeout: float) -> ConverseTurn:
         try:
             import boto3  # lazy import — see module docstring
             from botocore.config import Config
@@ -191,6 +222,30 @@ class BedrockConverseToolModel(ToolCapableModel):
         )
 
     def converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
+        """Timed, counted wrapper around the real streaming Converse call.
+
+        Duration here is the WHOLE stream, first byte to last — the natural
+        analogue of the blocking call's round trip. The outcome is only known
+        once the generator finishes or raises, so it is recorded then rather
+        than on the first yield. Like the blocking path, no tokens: this port
+        discards the provider's usage block.
+        """
+        started = time.monotonic()
+        try:
+            for event in self._converse_stream(messages, tools, timeout=timeout):
+                yield event
+        except Exception:
+            ai_metrics.record_provider_call(
+                use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse_stream",
+                outcome="provider_error", duration_seconds=time.monotonic() - started,
+            )
+            raise
+        ai_metrics.record_provider_call(
+            use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse_stream",
+            outcome="success", duration_seconds=time.monotonic() - started,
+        )
+
+    def _converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
         """w-9-2-planner P1b: Bedrock's ConverseStream API, translated to
         ConverseStreamEvent. Text deltas are yielded AS THEY ARRIVE — the
         caller (RawBedrockAgentRuntime) forwards exactly these to the

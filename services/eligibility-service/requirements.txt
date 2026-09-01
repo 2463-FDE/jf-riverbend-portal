@@ -23,3 +23,8 @@ opentelemetry-sdk==1.29.0
 # here (generic AWS_BEARER_TOKEN_<SERVICE> resolver).
 boto3==1.43.78
 botocore==1.43.78
+
+# W10 metrics Stage 1: real scrapeable Prometheus metrics — this service's
+# /metrics route (libs/metrics/http.py) plus the AI/circuit-breaker series
+# in libs/metrics/ai.py, which libs.eligibility_agent and breaker.py import.
+prometheus-client==0.26.0

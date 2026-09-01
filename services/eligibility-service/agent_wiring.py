@@ -22,6 +22,7 @@ from typing import Iterator, Optional
 import redis as redis_lib
 
 from config import settings
+from libs.metrics import ai as ai_metrics
 from libs.eligibility_agent import (
     AgentRuntime,
     RedisVisitMemory,
@@ -75,6 +76,25 @@ def get_agent_runtime() -> Optional[AgentRuntime]:
         return None
 
 
+# Bounded metrics label for this surface.
+_METRICS_USE_CASE = "eligibility_agent_chat"
+
+
+def _record_run(termination_reason) -> None:
+    """One completed eligibility assistant turn.
+
+    `provenance_label` is deliberately `not_applicable`: unlike the summary
+    agent and Policy Navigator, this surface has no real/fixture/fallback
+    distinction of its own, and borrowing one would report a provenance the
+    code never actually determines.
+    """
+    ai_metrics.record_agent_run(
+        use_case=_METRICS_USE_CASE,
+        provenance_label=ai_metrics.NOT_APPLICABLE,
+        termination_reason=getattr(termination_reason, "value", termination_reason),
+    )
+
+
 def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
     """Safe entry point for the visit-chat endpoint: degrades to a safe
     reply if the runtime isn't available, mirroring AgentRuntime.
@@ -83,6 +103,7 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
     the caller's point of view."""
     runtime = get_agent_runtime()
     if runtime is None:
+        _record_run(TerminationReason.PROVIDER_ERROR)
         return VisitTurnResult(
             visit_id=visit_id,
             reply=UNAVAILABLE_REPLY,
@@ -91,7 +112,9 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
             termination_reason=TerminationReason.PROVIDER_ERROR,
             turns_used=0,
         )
-    return runtime.handle_message(visit_id, message)
+    result = runtime.handle_message(visit_id, message)
+    _record_run(result.termination_reason)
+    return result
 
 
 _UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitly None"

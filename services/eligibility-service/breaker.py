@@ -13,6 +13,8 @@ import time
 from enum import Enum
 from typing import Callable, Optional
 
+from libs.metrics import ai as ai_metrics
+
 
 class CircuitState(str, Enum):
     CLOSED = "closed"
@@ -35,11 +37,24 @@ class CircuitBreaker:
         self._consecutive_failures = 0
         self._opened_at: Optional[float] = None
 
+    def _transition_to(self, new_state: CircuitState) -> None:
+        """The one place `_state` changes, so no transition can go uncounted.
+
+        `record_circuit_transition` ignores a no-op (CLOSED -> CLOSED on a
+        run of successes), so callers do not have to check first.
+        """
+        previous = self._state
+        self._state = new_state
+        if previous != new_state:
+            ai_metrics.record_circuit_transition(previous, new_state)
+
     @property
     def state(self) -> CircuitState:
         if self._state == CircuitState.OPEN and self._opened_at is not None:
             if self._clock() - self._opened_at >= self._reset_timeout_seconds:
-                self._state = CircuitState.HALF_OPEN
+                # A lazily-observed transition is still a real one: the
+                # breaker genuinely stops rejecting requests at this moment.
+                self._transition_to(CircuitState.HALF_OPEN)
         return self._state
 
     def allow_request(self) -> bool:
@@ -47,7 +62,7 @@ class CircuitBreaker:
 
     def record_success(self) -> None:
         self._consecutive_failures = 0
-        self._state = CircuitState.CLOSED
+        self._transition_to(CircuitState.CLOSED)
         self._opened_at = None
 
     def record_failure(self) -> None:
@@ -57,5 +72,5 @@ class CircuitBreaker:
         # anything else happened to read `.state` first) still correctly
         # reopens from HALF_OPEN rather than only from a stale OPEN.
         if self.state == CircuitState.HALF_OPEN or self._consecutive_failures >= self._failure_threshold:
-            self._state = CircuitState.OPEN
+            self._transition_to(CircuitState.OPEN)
             self._opened_at = self._clock()
