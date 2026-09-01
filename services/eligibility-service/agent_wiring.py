@@ -120,7 +120,44 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
 _UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitly None"
 
 
+# VisitStreamEvent's own contract: "Exactly one of 'done'/'error' ends a
+# stream." Those are therefore the two kinds that mean a turn actually
+# terminated.
+_TERMINAL_STREAM_KINDS = frozenset({"done", "error"})
+
+
+def _record_terminal_run(events: Iterator[VisitStreamEvent]) -> Iterator[VisitStreamEvent]:
+    """Count exactly one agent run per streamed turn, at its terminal event.
+
+    Wrapping the whole generator is what makes "exactly once" true for every
+    branch below — unavailable runtime, non-streaming fallback, and the real
+    streaming runtime all end with a single done/error event, and none of
+    them has to remember to record for itself.
+
+    A stream that ends WITHOUT a terminal event records nothing, deliberately.
+    Per VisitStreamEvent's contract a client that sees neither done nor error
+    "was disconnected ... not answered", so there is no termination reason to
+    report and inventing one would misreport a disconnect as an outcome.
+    """
+    recorded = False
+    for event in events:
+        if not recorded and event.kind in _TERMINAL_STREAM_KINDS:
+            _record_run(event.termination_reason)
+            recorded = True
+        yield event
+
+
 def stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEvent]:
+    """Streaming counterpart to handle_visit_message, with run accounting.
+
+    The frontend posts to the streaming route, so this — not
+    handle_visit_message — is the path most live eligibility turns take, and
+    it must reach `agent_runs_total` or the metric undercounts real usage.
+    """
+    yield from _record_terminal_run(_stream_visit_message(visit_id, message))
+
+
+def _stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEvent]:
     """w-9-2-planner P1b: streaming counterpart to handle_visit_message.
     Degrades the same way — a missing/misconfigured runtime yields one
     "error" event carrying UNAVAILABLE_REPLY, never raises. A runtime that

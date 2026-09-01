@@ -259,6 +259,132 @@ def test_a_policy_navigator_refusal_records_the_run_but_no_citation_observation(
                        use_case="policy_navigator_chat") == before_citations
 
 
+# --- eligibility streamed runs (review finding AI-RUNS-STREAM-MISSING) -----
+#
+# The frontend posts to the STREAMING route, so this is the path most live
+# eligibility turns actually take. Stage 1 originally recorded only the
+# blocking path, which undercounted real usage in the very metric it added.
+
+
+def _wiring_module(name):
+    return load_module("services/eligibility-service/agent_wiring.py", name)
+
+
+class _StubStreamingRuntime:
+    """Yields a scripted event sequence, like the real streaming runtime."""
+
+    def __init__(self, events):
+        self._events = events
+
+    def handle_message_stream(self, visit_id, message):
+        yield from self._events
+
+
+class _StubBlockingRuntime:
+    """No handle_message_stream — exercises the non-stream fallback branch."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def handle_message(self, visit_id, message):
+        return self._result
+
+
+def _elig_runs(reason) -> float:
+    return ai_metrics.AGENT_RUNS.labels(
+        use_case="eligibility_agent_chat", provenance_label=ai_metrics.NOT_APPLICABLE,
+        termination_reason=reason,
+    )._value.get()
+
+
+@pytest.mark.parametrize("reason,terminal_kind", [
+    ("answered", "done"),
+    ("max_turns", "done"),
+    ("provider_error", "error"),
+])
+def test_a_streamed_turn_records_exactly_one_run_for_its_outcome(monkeypatch, reason, terminal_kind):
+    wiring = _wiring_module(f"wiring_stream_{reason}")
+    VisitStreamEvent = wiring.VisitStreamEvent
+    events = [
+        VisitStreamEvent(kind="delta", text="partial "),
+        VisitStreamEvent(kind="delta", text="answer"),
+        VisitStreamEvent(kind=terminal_kind, termination_reason=reason, turns_used=1),
+    ]
+    monkeypatch.setattr(wiring, "get_agent_runtime", lambda: _StubStreamingRuntime(events))
+
+    before = _elig_runs(reason)
+    streamed = list(wiring.stream_visit_message("visit-1", "am I covered?"))
+
+    assert len(streamed) == 3, "every event still reaches the caller"
+    assert _elig_runs(reason) == before + 1, "exactly one run per streamed turn"
+
+
+def test_a_streamed_turn_with_an_unavailable_runtime_records_a_provider_error_run(monkeypatch):
+    wiring = _wiring_module("wiring_stream_unavailable")
+    monkeypatch.setattr(wiring, "get_agent_runtime", lambda: None)
+
+    before = _elig_runs("provider_error")
+    streamed = list(wiring.stream_visit_message("visit-2", "hello"))
+
+    assert [e.kind for e in streamed] == ["error"]
+    assert _elig_runs("provider_error") == before + 1
+
+
+def test_the_non_streaming_fallback_branch_also_records_one_run(monkeypatch):
+    """A runtime without handle_message_stream replays a blocking reply as a
+    single delta plus a terminal event — still one turn, still one run."""
+    wiring = _wiring_module("wiring_stream_fallback")
+    result = wiring.VisitTurnResult(
+        visit_id="visit-3", reply="You are covered.", tool_called=True,
+        eligibility_status=None, termination_reason=wiring.TerminationReason.ANSWERED,
+        turns_used=2,
+    )
+    monkeypatch.setattr(wiring, "get_agent_runtime", lambda: _StubBlockingRuntime(result))
+
+    before = _elig_runs("answered")
+    streamed = list(wiring.stream_visit_message("visit-3", "am I covered?"))
+
+    assert [e.kind for e in streamed] == ["delta", "done"]
+    assert _elig_runs("answered") == before + 1
+
+
+def test_a_stream_abandoned_before_its_terminal_event_records_no_run(monkeypatch):
+    """VisitStreamEvent's contract: a client that sees neither done nor error
+    "was disconnected ... not answered". There is no termination reason to
+    report, and inventing one would misreport a disconnect as an outcome."""
+    wiring = _wiring_module("wiring_stream_abandoned")
+    VisitStreamEvent = wiring.VisitStreamEvent
+    events = [
+        VisitStreamEvent(kind="delta", text="partial"),
+        VisitStreamEvent(kind="done", termination_reason="answered", turns_used=1),
+    ]
+    monkeypatch.setattr(wiring, "get_agent_runtime", lambda: _StubStreamingRuntime(events))
+
+    before = _elig_runs("answered")
+    stream = wiring.stream_visit_message("visit-4", "am I covered?")
+    assert next(stream).kind == "delta"   # consumer walks away here
+    stream.close()
+
+    assert _elig_runs("answered") == before
+
+
+def test_a_stream_yielding_two_terminal_events_still_records_only_one_run(monkeypatch):
+    """Defensive: "exactly once" must not depend on the runtime being
+    well-behaved about its own contract."""
+    wiring = _wiring_module("wiring_stream_double_terminal")
+    VisitStreamEvent = wiring.VisitStreamEvent
+    events = [
+        VisitStreamEvent(kind="done", termination_reason="answered", turns_used=1),
+        VisitStreamEvent(kind="done", termination_reason="answered", turns_used=1),
+    ]
+    monkeypatch.setattr(wiring, "get_agent_runtime", lambda: _StubStreamingRuntime(events))
+
+    before = _elig_runs("answered")
+    list(wiring.stream_visit_message("visit-5", "am I covered?"))
+
+    assert _elig_runs("answered") == before + 1
+
+
 # --- eligibility circuit breaker ------------------------------------------
 
 
