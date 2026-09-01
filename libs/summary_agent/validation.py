@@ -12,9 +12,11 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from .contracts import ComputationClaim, QuoteClaim, StructuredDraft
+from .contracts import MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_SENTENCES, ComputationClaim, QuoteClaim, StructuredDraft
 from .retrieval import RetrievalLedger
 
+CODE_SUMMARY_TOO_LONG = "REFUSED_SUMMARY_TOO_LONG"
+CODE_TOO_MANY_SENTENCES = "REFUSED_TOO_MANY_SENTENCES"
 CODE_NO_CLAIMS = "REFUSED_NO_CLAIMS"
 CODE_CITATION_NOT_RETRIEVED = "REFUSED_CITATION_NOT_RETRIEVED"
 CODE_QUOTE_NOT_IN_SOURCE = "REFUSED_QUOTE_NOT_IN_SOURCE"
@@ -48,6 +50,10 @@ _WHITESPACE = re.compile(r"\s+")
 # "1.3" in half and lose the very number a computation claim supports.
 _SENTENCE_END = re.compile(r'(?<=[.!?])["”]?\s+')
 _HAS_CONTENT = re.compile(r"[A-Za-z0-9]")
+# A span that actually ENDS a sentence, rather than trailing off. The closing
+# quote/bracket is optional because a sentence may legitimately finish inside
+# one ('He said "no result."').
+_SENTENCE_TERMINATED = re.compile(r"""[.!?]["”'’)\]]*$""")
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,63 @@ class ValidationOutcome:
 
 def _normalize(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
+
+
+def sentence_candidates(text: str) -> list:
+    """EVERY sentence-shaped span in `text`, each an EXACT slice of it —
+    including a final one that trails off with no terminal punctuation.
+
+    One shared notion of a sentence BOUNDARY for the whole package (review
+    finding SA-FALLBACK-SENTENCE-SCAN: the fallback used to have a second,
+    narrower idea of its own). Slices are CUT from the source at
+    `_SENTENCE_END` boundaries rather than reassembled from split fragments,
+    so a candidate is always a verbatim, contiguous substring of `text` —
+    exactly what a quote claim must be for `validate_draft` to accept it. The
+    separator's own whitespace (and a closing quote mark sitting on the
+    boundary) belongs to no sentence, the same way `_SENTENCE_END.split` has
+    always dropped it.
+
+    THE UNTERMINATED TAIL IS DELIBERATELY INCLUDED, and this function is the
+    VALIDATOR's view for that reason: every scrap of a draft's summary has to
+    be counted and grounded, so text trailing off without a full stop must
+    still face the per-sentence check. Dropping it here would let
+    `"<valid quote>" You are cured and may stop your medication` validate,
+    because the unsupported half would no longer be a sentence anybody looked
+    at. A GENERATOR choosing text to publish needs the opposite default —
+    see `complete_sentences`.
+    """
+    spans, start = [], 0
+    for boundary in _SENTENCE_END.finditer(text):
+        spans.append(text[start:boundary.start()])
+        start = boundary.end()
+    spans.append(text[start:])
+
+    sentences = []
+    for span in spans:
+        sentence = span.strip()
+        if _HAS_CONTENT.search(sentence):  # skip punctuation-only leftovers
+            sentences.append(sentence)
+    return sentences
+
+
+def complete_sentences(text: str) -> list:
+    """Only the candidates that actually finish a sentence — the GENERATOR's
+    view, for anything choosing source text to publish.
+
+    Review finding SA-INCOMPLETE-FRAGMENT-ACCEPTED: `sentence_candidates`
+    hands back an unterminated tail on purpose, and `deterministic_draft()`
+    was publishing that tail as a quote claim. It validated, because a
+    fragment IS a verbatim substring of its source — so a chunk ending
+    "Take this medication with" became a patient-visible clinical instruction
+    cut off mid-clause. Retrieval makes this the common case rather than an
+    exotic one: `retrieve()` truncates each chunk to the character budget, so
+    the last sentence a ledger holds is routinely cut mid-word.
+
+    A fragment is never published, and it is never completed or trimmed into
+    something publishable either — if a document has no whole sentence that
+    fits, the fallback simply has nothing to offer from it.
+    """
+    return [s for s in sentence_candidates(text) if _SENTENCE_TERMINATED.search(s)]
 
 
 def _computation_sentence(claim: ComputationClaim) -> str:
@@ -84,8 +147,21 @@ def _is_instruction_shaped(text: str) -> bool:
     return any(p.search(text) for p in _INSTRUCTION_PATTERNS)
 
 
+def _content_sentence_count(summary: str) -> int:
+    """How many sentences `summary` carries, read through `sentence_candidates`
+    so the concise-format cap, the grounding check below and the fallback's own
+    selection all agree on what a "sentence" is."""
+    return len(sentence_candidates(summary))
+
+
 def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> ValidationOutcome:
     """Refuse on the first failure, cheapest and most dangerous check first."""
+    if len(draft.summary) > MAX_SUMMARY_CHARACTERS:
+        return ValidationOutcome(False, CODE_SUMMARY_TOO_LONG)
+
+    if _content_sentence_count(draft.summary) > MAX_SUMMARY_SENTENCES:
+        return ValidationOutcome(False, CODE_TOO_MANY_SENTENCES)
+
     if _is_instruction_shaped(draft.summary) or any(
         _is_instruction_shaped(c.quote) for c in draft.claims if isinstance(c, QuoteClaim)
     ):
@@ -138,10 +214,8 @@ def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> Validatio
     # sentence its claim generates, exactly.
     templates = {_normalize(_computation_sentence(c)) for c in draft.claims
                  if isinstance(c, ComputationClaim)}
-    for sentence in _SENTENCE_END.split(draft.summary):
+    for sentence in sentence_candidates(draft.summary):
         normalized = _normalize(sentence)
-        if not _HAS_CONTENT.search(normalized):
-            continue  # punctuation or quote marks left over by the split
         if normalized in templates:
             continue
         if any(q and (q in normalized or normalized in q) for q in validated_quotes):

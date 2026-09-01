@@ -22,9 +22,16 @@ from conftest import load_module
 from libs.agent_provenance import ProvenanceLabel, Stage, TraceRecorder, assert_safe
 from libs.phi_crypto import EnvKeyProvider
 from libs.policy_corpus import RetrievalScope, RetrievedChunk
-from libs.summary_agent import RetrievalLedger, RetrievalLimits, build_retrieval_tool, retrieve
+from libs.summary_agent import (
+    MAX_SUMMARY_CHARACTERS,
+    MAX_SUMMARY_SENTENCES,
+    RetrievalLedger,
+    RetrievalLimits,
+    build_retrieval_tool,
+    retrieve,
+)
 from libs.summary_agent import validation as V
-from libs.summary_agent.runtime import SYSTEM_PROMPT
+from libs.summary_agent.runtime import SYSTEM_PROMPT, deterministic_draft
 
 drafts = load_module("services/records-service/agent_drafts.py", "agent_drafts_mod")
 path = load_module("services/records-service/summary_agent_path.py", "summary_agent_path_mod")
@@ -353,6 +360,188 @@ def test_a_sentence_reusing_the_computed_number_is_refused(db):
     assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE
     assert outcome.draft.status == drafts.REFUSED
     assert drafts.approved_draft(db, PATIENT) is None
+
+
+# --- W10 Final 3: concise, validated patient summaries ---------------------
+
+
+def test_a_brief_grounded_draft_is_accepted(db):
+    """The ordinary case: one short quote, well within both concise limits."""
+    outcome = _generate(db, [_tool_call(), _final('"%s"' % POL_SENTENCE, [_quote(POL, POL_SENTENCE)])])
+
+    assert outcome.accepted, outcome.validation.code
+    assert outcome.draft.status == drafts.VALIDATED
+
+
+def test_a_grounded_draft_exceeding_the_sentence_limit_is_refused(db):
+    """Four short, individually well-grounded sentences — comfortably under the
+    character cap, but one more sentence than the format allows."""
+    sentences = [
+        "Sentence one is short.",
+        "Sentence two is short too.",
+        "Sentence three also fits.",
+        "Sentence four completes the set.",
+    ]
+    assert len(sentences) > MAX_SUMMARY_SENTENCES
+    chunks = [_chunk(f"DOC-{i}@1.0#s", text) for i, text in enumerate(sentences)]
+    claims = [_quote(c.citation_id, text) for c, text in zip(chunks, sentences)]
+    summary = " ".join(f'"{s}"' for s in sentences)
+    assert len(summary) <= MAX_SUMMARY_CHARACTERS, "isolating the sentence-count failure alone"
+
+    outcome = _generate(db, [_tool_call(), _final(summary, claims)],
+                        retriever=_FakeRetriever([chunks]))
+
+    assert not outcome.accepted
+    assert outcome.validation.code == V.CODE_TOO_MANY_SENTENCES
+    assert outcome.draft.status == drafts.REFUSED
+    assert drafts.approved_draft(db, PATIENT) is None
+
+
+def test_a_grounded_draft_exceeding_the_character_limit_is_refused(db):
+    """One single sentence, genuinely quoted verbatim from its source, that by
+    itself is longer than the concise character cap allows."""
+    long_sentence = "X" * (MAX_SUMMARY_CHARACTERS + 10) + "."
+    chunk = _chunk("DOC-LONG@1.0#s", long_sentence)
+    summary = f'"{long_sentence}"'
+    assert len(summary) > MAX_SUMMARY_CHARACTERS
+
+    outcome = _generate(
+        db, [_tool_call(), _final(summary, [_quote(chunk.citation_id, long_sentence)])],
+        retriever=_FakeRetriever([[chunk]]),
+    )
+
+    assert not outcome.accepted
+    assert outcome.validation.code == V.CODE_SUMMARY_TOO_LONG
+    assert outcome.draft.status == drafts.REFUSED
+    assert drafts.approved_draft(db, PATIENT) is None
+
+
+def test_deterministic_fallback_selects_only_complete_sentences_within_limits():
+    """`deterministic_draft` must never truncate a quote to fit — it selects
+    whichever complete sentences fit, in order, and stops within both caps."""
+    sentences = [f"Sentence {i} of the approved guidance is short enough to fit here." for i in range(6)]
+    ledger = RetrievalLedger()
+    ledger.record([_chunk(f"DOC-{i}@1.0#s", text) for i, text in enumerate(sentences)])
+
+    draft = deterministic_draft(ledger)
+
+    assert len(draft.claims) <= MAX_SUMMARY_SENTENCES
+    assert len(draft.summary) <= MAX_SUMMARY_CHARACTERS
+    for claim in draft.claims:
+        # Every quote is one of the exact source sentences, never a fragment.
+        assert claim.quote in sentences
+    outcome = V.validate_draft(draft, ledger)
+    assert outcome.passed, outcome.code
+
+
+def test_deterministic_fallback_reaches_a_later_sentence_when_the_first_is_too_long():
+    """Review finding SA-FALLBACK-SENTENCE-SCAN.
+
+    Reading only the text before a document's first ". " meant one over-long
+    opening sentence threw the whole document away, and the fallback refused
+    with CODE_NO_CLAIMS even though the very next sentence was short, complete
+    and quotable. The fallback must scan the document's sentences, not just
+    its first one.
+    """
+    long_first = "X" * (MAX_SUMMARY_CHARACTERS + 10) + "."
+    short_second = "The clinic posts approved guidance for every reader."
+    ledger = RetrievalLedger()
+    ledger.record([_chunk("DOC-MIX@1.0#s", f"{long_first} {short_second}")])
+
+    draft = deterministic_draft(ledger)
+
+    assert [c.quote for c in draft.claims] == [short_second], "the fitting sentence is used"
+    assert long_first not in draft.summary, "and the over-long one is left out whole"
+    assert len(draft.summary) <= MAX_SUMMARY_CHARACTERS
+    outcome = V.validate_draft(draft, ledger)
+    assert outcome.passed, outcome.code
+
+
+def test_deterministic_fallback_never_truncates_a_sentence_to_make_it_fit():
+    """The limit is met by DROPPING whole sentences, never by cutting one
+    short — a half-sentence is a claim the source never made."""
+    sentences = [
+        "The first approved sentence is quite a long one and it uses up a good part of the budget.",
+        "The second approved sentence is also long enough to matter for the running total here.",
+        "Short closing note.",
+    ]
+    ledger = RetrievalLedger()
+    ledger.record([_chunk(f"DOC-{i}@1.0#s", text) for i, text in enumerate(sentences)])
+
+    draft = deterministic_draft(ledger)
+
+    for claim in draft.claims:
+        assert claim.quote in sentences, "every quote is a whole source sentence, not a prefix"
+    assert V.validate_draft(draft, ledger).passed
+
+
+def test_deterministic_fallback_refuses_a_document_with_no_complete_sentence():
+    """Review finding SA-INCOMPLETE-FRAGMENT-ACCEPTED.
+
+    A fragment is a verbatim substring of its source, so it validated happily
+    — and "Take this medication with" is exactly the kind of clinical
+    instruction that must never reach a patient cut off mid-clause. No whole
+    sentence means nothing to publish, not a shortened something.
+    """
+    ledger = RetrievalLedger()
+    ledger.record([_chunk("DOC-FRAG@1.0#s", "Take this medication with")])
+
+    draft = deterministic_draft(ledger)
+
+    assert draft.claims == [], "an unterminated fragment is not a sentence"
+    outcome = V.validate_draft(draft, ledger)
+    assert not outcome.passed
+    assert outcome.code == V.CODE_NO_CLAIMS
+
+
+def test_deterministic_fallback_drops_the_tail_retrieval_truncation_leaves():
+    """The realistic route to a fragment: `retrieve()` caps each chunk at the
+    character budget, so a ledger's last sentence is routinely cut mid-word.
+    The complete sentence before the cut is still publishable; the severed
+    tail is not."""
+    whole = "Patients may request an amendment to their record."
+    ledger = RetrievalLedger()
+    ledger.record([_chunk("POL-TRUNC@1.0#s", f"{whole} Take this medication with foo")])
+
+    draft = deterministic_draft(ledger)
+
+    assert [c.quote for c in draft.claims] == [whole]
+    assert "Take this medication with" not in draft.summary
+    assert V.validate_draft(draft, ledger).passed
+
+
+def test_an_unsupported_unterminated_tail_is_still_refused(db):
+    """The other half of SA-INCOMPLETE-FRAGMENT-ACCEPTED, and the reason the
+    fix is two views rather than one tightened helper.
+
+    The VALIDATOR must keep seeing text that trails off without a full stop.
+    Had `sentence_candidates` simply dropped unterminated tails, this draft —
+    a real quote followed by an ungrounded clinical instruction with no
+    terminating period — would have passed, because the unsupported half
+    would no longer have been a sentence anybody checked.
+    """
+    outcome = _generate(db, [_tool_call(), _final(
+        '"%s" You are cured and may stop your medication' % POL_SENTENCE,
+        [_quote(POL, POL_SENTENCE)])])
+
+    assert not outcome.accepted
+    assert outcome.validation.code == V.CODE_UNSUPPORTED_SUMMARY_SENTENCE
+    assert drafts.approved_draft(db, PATIENT) is None
+
+
+def test_deterministic_fallback_yields_no_approvable_content_when_nothing_fits():
+    """A single source sentence too long to ever fit the concise cap must not
+    be shortened to make it fit — the fallback must produce no claims, which
+    the existing no-evidence refusal already handles."""
+    ledger = RetrievalLedger()
+    ledger.record([_chunk("DOC-HUGE@1.0#s", "X" * (MAX_SUMMARY_CHARACTERS + 50) + ".")])
+
+    draft = deterministic_draft(ledger)
+
+    assert draft.claims == []
+    outcome = V.validate_draft(draft, ledger)
+    assert not outcome.passed
+    assert outcome.code == V.CODE_NO_CLAIMS
 
 
 # --- W10 Final Stage 4: truthful loop-exhaustion classification ------------

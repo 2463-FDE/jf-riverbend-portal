@@ -24,8 +24,17 @@ from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from libs.policy_corpus import RetrievalScope
 from libs.safe_logging import get_safe_logger
 
-from .contracts import AgentRunResult, QuoteClaim, StructuredDraft, UsageTurn, parse_draft
+from .contracts import (
+    MAX_SUMMARY_CHARACTERS,
+    MAX_SUMMARY_SENTENCES,
+    AgentRunResult,
+    QuoteClaim,
+    StructuredDraft,
+    UsageTurn,
+    parse_draft,
+)
 from .retrieval import RetrievalLedger, RetrievalLimits, build_retrieval_tool, citations_for_persistence, retrieve
+from .validation import complete_sentences
 
 log = get_safe_logger(__name__)
 
@@ -65,7 +74,14 @@ nothing added: "The difference between 7.5 and 6.2 is 1.3." (subtract) or "The
 sum of 7.5 and 6.2 is 13.7." (add). Do not interpret the number — "your A1c
 fell 1.3 points" is a claim the document did not make and will be refused.
 
-Leave out anything the evidence does not support."""
+Leave out anything the evidence does not support.""" + f"""
+
+The summary must be at most {MAX_SUMMARY_SENTENCES} sentences and at most
+{MAX_SUMMARY_CHARACTERS} characters in total. Choose the SMALLEST set of
+sentences that is still useful — you do not have to use every document or
+every claim you retrieved. A longer draft that only fits by shortening,
+merging or paraphrasing a sentence will be refused; instead leave out whichever
+complete sentences are least necessary until what remains fits."""
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -134,14 +150,39 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
     """A draft with no model in it, quoting the retrieved documents directly.
     Every sentence it shows is also a quote claim, so it passes the same
     deterministic validation the model path does — the fallback is held to the
-    grounding bar, not excused from it."""
-    quotes, claims = [], []
+    grounding bar, not excused from it.
+
+    Obeys the same concise-format limits as the model path: it selects
+    complete source-exact sentences, skipping (never truncating) one that
+    would not fit, and stops once it holds MAX_SUMMARY_SENTENCES. If no
+    complete sentence fits at all, it returns no claims — the existing
+    no-evidence refusal — rather than shortening a sentence to make it fit.
+
+    Sentences come from `complete_sentences`, which shares the validator's
+    sentence-boundary logic but keeps only spans that actually finish.
+    Review finding SA-FALLBACK-SENTENCE-SCAN: reading only the text before a
+    document's first ". " meant one over-long opening sentence discarded the
+    whole document. Review finding SA-INCOMPLETE-FRAGMENT-ACCEPTED: a chunk
+    trailing off mid-clause (which retrieval's character-budget truncation
+    produces routinely) must not have that fragment published as a quote.
+
+    It still takes at most ONE sentence per document — with the caps this
+    small, spending the whole budget on one document's opening paragraph
+    would drop the other approved sources entirely, and breadth across the
+    retrieved set is the more useful of the two for a reader."""
+    quotes, claims, used_chars = [], [], 0
     for citation_id in ledger.citation_ids:
-        text = ledger.get(citation_id).text
-        head, separator, _ = text.partition(". ")
-        sentence = head + "." if separator else head
-        quotes.append(f'"{sentence}"')
-        claims.append(QuoteClaim(kind="quote", citation_id=citation_id, quote=sentence))
+        if len(claims) >= MAX_SUMMARY_SENTENCES:
+            break
+        for sentence in complete_sentences(ledger.get(citation_id).text):
+            quoted = f'"{sentence}"'
+            joined_chars = used_chars + len(quoted) + (1 if quotes else 0)  # +1 for the joining space
+            if joined_chars > MAX_SUMMARY_CHARACTERS:
+                continue  # too long to fit; a later sentence here still might
+            quotes.append(quoted)
+            claims.append(QuoteClaim(kind="quote", citation_id=citation_id, quote=sentence))
+            used_chars = joined_chars
+            break
     return StructuredDraft(
         summary=" ".join(quotes) if quotes else "No approved source material was available.",
         claims=claims,
