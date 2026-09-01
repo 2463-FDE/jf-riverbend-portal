@@ -34,7 +34,7 @@ from .contracts import (
     parse_draft,
 )
 from .retrieval import RetrievalLedger, RetrievalLimits, build_retrieval_tool, citations_for_persistence, retrieve
-from .validation import sentence_candidates
+from .validation import complete_sentences
 
 log = get_safe_logger(__name__)
 
@@ -158,11 +158,13 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
     complete sentence fits at all, it returns no claims — the existing
     no-evidence refusal — rather than shortening a sentence to make it fit.
 
-    Sentences come from `sentence_candidates`, the same boundary logic the
-    validator counts with. Review finding SA-FALLBACK-SENTENCE-SCAN: reading
-    only the text before a document's first ". " meant one over-long opening
-    sentence discarded the whole document, refusing a summary that a later,
-    perfectly quotable sentence in that same document could have grounded.
+    Sentences come from `complete_sentences`, which shares the validator's
+    sentence-boundary logic but keeps only spans that actually finish.
+    Review finding SA-FALLBACK-SENTENCE-SCAN: reading only the text before a
+    document's first ". " meant one over-long opening sentence discarded the
+    whole document. Review finding SA-INCOMPLETE-FRAGMENT-ACCEPTED: a chunk
+    trailing off mid-clause (which retrieval's character-budget truncation
+    produces routinely) must not have that fragment published as a quote.
 
     It still takes at most ONE sentence per document — with the caps this
     small, spending the whole budget on one document's opening paragraph
@@ -172,7 +174,7 @@ def deterministic_draft(ledger: RetrievalLedger) -> StructuredDraft:
     for citation_id in ledger.citation_ids:
         if len(claims) >= MAX_SUMMARY_SENTENCES:
             break
-        for sentence in sentence_candidates(ledger.get(citation_id).text):
+        for sentence in complete_sentences(ledger.get(citation_id).text):
             quoted = f'"{sentence}"'
             joined_chars = used_chars + len(quoted) + (1 if quotes else 0)  # +1 for the joining space
             if joined_chars > MAX_SUMMARY_CHARACTERS:

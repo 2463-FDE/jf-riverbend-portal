@@ -50,6 +50,10 @@ _WHITESPACE = re.compile(r"\s+")
 # "1.3" in half and lose the very number a computation claim supports.
 _SENTENCE_END = re.compile(r'(?<=[.!?])["”]?\s+')
 _HAS_CONTENT = re.compile(r"[A-Za-z0-9]")
+# A span that actually ENDS a sentence, rather than trailing off. The closing
+# quote/bracket is optional because a sentence may legitimately finish inside
+# one ('He said "no result."').
+_SENTENCE_TERMINATED = re.compile(r"""[.!?]["”'’)\]]*$""")
 
 
 @dataclass(frozen=True)
@@ -68,21 +72,27 @@ def _normalize(text: str) -> str:
 
 
 def sentence_candidates(text: str) -> list:
-    """The complete sentences in `text`, each an EXACT slice of it.
+    """EVERY sentence-shaped span in `text`, each an EXACT slice of it —
+    including a final one that trails off with no terminal punctuation.
 
-    One shared notion of "a sentence" for the whole package. The concise-format
-    count below, the per-sentence grounding check, and `deterministic_draft()`'s
-    fallback selection all read sentences through this — review finding
-    SA-FALLBACK-SENTENCE-SCAN was the fallback having a second, narrower idea of
-    its own (the text before the first ". "), which silently discarded every
-    sentence after the first in a document.
+    One shared notion of a sentence BOUNDARY for the whole package (review
+    finding SA-FALLBACK-SENTENCE-SCAN: the fallback used to have a second,
+    narrower idea of its own). Slices are CUT from the source at
+    `_SENTENCE_END` boundaries rather than reassembled from split fragments,
+    so a candidate is always a verbatim, contiguous substring of `text` —
+    exactly what a quote claim must be for `validate_draft` to accept it. The
+    separator's own whitespace (and a closing quote mark sitting on the
+    boundary) belongs to no sentence, the same way `_SENTENCE_END.split` has
+    always dropped it.
 
-    Slices are CUT from the source at `_SENTENCE_END` boundaries rather than
-    reassembled from split fragments, so a candidate is always a verbatim,
-    contiguous substring of `text` — which is exactly what a quote claim must
-    be for `validate_draft` to accept it. The separator's own whitespace (and
-    a closing quote mark sitting on the boundary) belongs to no sentence, the
-    same way `_SENTENCE_END.split` has always dropped it.
+    THE UNTERMINATED TAIL IS DELIBERATELY INCLUDED, and this function is the
+    VALIDATOR's view for that reason: every scrap of a draft's summary has to
+    be counted and grounded, so text trailing off without a full stop must
+    still face the per-sentence check. Dropping it here would let
+    `"<valid quote>" You are cured and may stop your medication` validate,
+    because the unsupported half would no longer be a sentence anybody looked
+    at. A GENERATOR choosing text to publish needs the opposite default —
+    see `complete_sentences`.
     """
     spans, start = [], 0
     for boundary in _SENTENCE_END.finditer(text):
@@ -96,6 +106,26 @@ def sentence_candidates(text: str) -> list:
         if _HAS_CONTENT.search(sentence):  # skip punctuation-only leftovers
             sentences.append(sentence)
     return sentences
+
+
+def complete_sentences(text: str) -> list:
+    """Only the candidates that actually finish a sentence — the GENERATOR's
+    view, for anything choosing source text to publish.
+
+    Review finding SA-INCOMPLETE-FRAGMENT-ACCEPTED: `sentence_candidates`
+    hands back an unterminated tail on purpose, and `deterministic_draft()`
+    was publishing that tail as a quote claim. It validated, because a
+    fragment IS a verbatim substring of its source — so a chunk ending
+    "Take this medication with" became a patient-visible clinical instruction
+    cut off mid-clause. Retrieval makes this the common case rather than an
+    exotic one: `retrieve()` truncates each chunk to the character budget, so
+    the last sentence a ledger holds is routinely cut mid-word.
+
+    A fragment is never published, and it is never completed or trimmed into
+    something publishable either — if a document has no whole sentence that
+    fits, the fallback simply has nothing to offer from it.
+    """
+    return [s for s in sentence_candidates(text) if _SENTENCE_TERMINATED.search(s)]
 
 
 def _computation_sentence(claim: ComputationClaim) -> str:
