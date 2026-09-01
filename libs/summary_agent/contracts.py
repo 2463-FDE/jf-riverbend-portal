@@ -18,6 +18,15 @@ from libs.agent_provenance import ProvenanceLabel
 
 from .retrieval import RetrievalLedger
 
+# The concise patient-summary format contract: the prompt, the deterministic
+# validator, and the deterministic fallback all select against these SAME two
+# numbers, so a draft cannot pass one path's idea of "short" and fail
+# another's. Chosen to read as a few sentences in the clinician-review panel,
+# not a full chart note — small enough to keep, never to be duplicated as a
+# separate magic number anywhere else in this package.
+MAX_SUMMARY_SENTENCES = 3
+MAX_SUMMARY_CHARACTERS = 480
+
 
 class QuoteClaim(BaseModel):
     """Words copied from a cited source. Quoting is a copy, not a generation."""

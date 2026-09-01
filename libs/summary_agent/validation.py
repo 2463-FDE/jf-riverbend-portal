@@ -12,9 +12,11 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from .contracts import ComputationClaim, QuoteClaim, StructuredDraft
+from .contracts import MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_SENTENCES, ComputationClaim, QuoteClaim, StructuredDraft
 from .retrieval import RetrievalLedger
 
+CODE_SUMMARY_TOO_LONG = "REFUSED_SUMMARY_TOO_LONG"
+CODE_TOO_MANY_SENTENCES = "REFUSED_TOO_MANY_SENTENCES"
 CODE_NO_CLAIMS = "REFUSED_NO_CLAIMS"
 CODE_CITATION_NOT_RETRIEVED = "REFUSED_CITATION_NOT_RETRIEVED"
 CODE_QUOTE_NOT_IN_SOURCE = "REFUSED_QUOTE_NOT_IN_SOURCE"
@@ -84,8 +86,22 @@ def _is_instruction_shaped(text: str) -> bool:
     return any(p.search(text) for p in _INSTRUCTION_PATTERNS)
 
 
+def _content_sentence_count(summary: str) -> int:
+    """How many non-empty sentences `summary` splits into — the same split
+    the per-sentence grounding check below uses, counted rather than matched,
+    so the concise-format cap and the grounding check agree on what a
+    "sentence" is."""
+    return sum(1 for s in _SENTENCE_END.split(summary) if _HAS_CONTENT.search(_normalize(s)))
+
+
 def validate_draft(draft: StructuredDraft, ledger: RetrievalLedger) -> ValidationOutcome:
     """Refuse on the first failure, cheapest and most dangerous check first."""
+    if len(draft.summary) > MAX_SUMMARY_CHARACTERS:
+        return ValidationOutcome(False, CODE_SUMMARY_TOO_LONG)
+
+    if _content_sentence_count(draft.summary) > MAX_SUMMARY_SENTENCES:
+        return ValidationOutcome(False, CODE_TOO_MANY_SENTENCES)
+
     if _is_instruction_shaped(draft.summary) or any(
         _is_instruction_shaped(c.quote) for c in draft.claims if isinstance(c, QuoteClaim)
     ):
