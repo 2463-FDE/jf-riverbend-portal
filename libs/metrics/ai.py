@@ -43,9 +43,11 @@ USE_CASES = frozenset({
     "eligibility_agent_chat",
 })
 OPERATIONS = frozenset({"converse", "converse_stream"})
-# Per-CALL outcome. Deliberately coarse: a call either returned or raised.
-# How the RUN ended is a different question, answered by TERMINATION_REASONS.
-CALL_OUTCOMES = frozenset({"success", "provider_error"})
+# Per-CALL outcome. Deliberately coarse: a call either returned, raised, or
+# (streaming only) was cancelled by its consumer closing the generator before
+# it finished. How the RUN ended is a different question, answered by
+# TERMINATION_REASONS.
+CALL_OUTCOMES = frozenset({"success", "provider_error", "cancelled"})
 TERMINATION_REASONS = frozenset({
     "answered", "max_turns", "provider_error", "citation_invalid", "no_evidence",
 })

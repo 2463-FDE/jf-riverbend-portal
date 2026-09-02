@@ -225,25 +225,36 @@ class BedrockConverseToolModel(ToolCapableModel):
         """Timed, counted wrapper around the real streaming Converse call.
 
         Duration here is the WHOLE stream, first byte to last — the natural
-        analogue of the blocking call's round trip. The outcome is only known
-        once the generator finishes or raises, so it is recorded then rather
-        than on the first yield. Like the blocking path, no tokens: this port
-        discards the provider's usage block.
+        analogue of the blocking call's round trip. Like the blocking path,
+        no tokens: this port discards the provider's usage block.
+
+        Exactly one outcome is recorded, in the `finally`, once the stream has
+        started — review finding AI-PROVIDER-STREAM-CLOSE-MISSING: a plain
+        `except Exception` never sees `GeneratorExit` (it is a BaseException),
+        so a caller that stops iterating early — a client disconnect, the
+        ordinary case for a live chat stream — used to leave this call
+        unrecorded. `GeneratorExit` is caught here ONLY to classify the
+        outcome as `cancelled`; it is always re-raised unchanged, never
+        suppressed, so the generator-close protocol is unaffected. Closing
+        the underlying Bedrock event stream is `_converse_stream`'s own
+        `finally` (below), untouched by this change.
         """
         started = time.monotonic()
+        outcome = "success"
         try:
             for event in self._converse_stream(messages, tools, timeout=timeout):
                 yield event
+        except GeneratorExit:
+            outcome = "cancelled"
+            raise
         except Exception:
+            outcome = "provider_error"
+            raise
+        finally:
             ai_metrics.record_provider_call(
                 use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse_stream",
-                outcome="provider_error", duration_seconds=time.monotonic() - started,
+                outcome=outcome, duration_seconds=time.monotonic() - started,
             )
-            raise
-        ai_metrics.record_provider_call(
-            use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse_stream",
-            outcome="success", duration_seconds=time.monotonic() - started,
-        )
 
     def _converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
         """w-9-2-planner P1b: Bedrock's ConverseStream API, translated to
