@@ -49,7 +49,10 @@ OPERATIONS = frozenset({"converse", "converse_stream"})
 # TERMINATION_REASONS.
 CALL_OUTCOMES = frozenset({"success", "provider_error", "cancelled"})
 TERMINATION_REASONS = frozenset({
-    "answered", "max_turns", "provider_error", "citation_invalid", "no_evidence",
+    # "budget_rejected" (W10 Metrics Stage 4): a centrally enforced request
+    # bound (libs/agent_budget) refused this run BEFORE any provider call —
+    # distinct from provider_error, which means a call was actually attempted.
+    "answered", "max_turns", "provider_error", "citation_invalid", "no_evidence", "budget_rejected",
 })
 PROVENANCE_LABELS = frozenset({"real", "fixture", "fallback", NOT_APPLICABLE})
 REVIEW_OUTCOMES = frozenset({"approved", "rejected"})
@@ -97,6 +100,46 @@ BEDROCK_CALL_DURATION = Histogram(
     ["provider", "model", "use_case", "operation"],
     buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0),
 )
+
+# --- W10 Metrics Stage 4: versioned Bedrock cost -----------------------
+BEDROCK_ESTIMATED_COST_USD = Counter(
+    "bedrock_estimated_cost_usd_total",
+    "Cumulative Bedrock cost computed under an exact versioned rate match, by model and use case",
+    ["provider", "model", "use_case"],
+)
+BEDROCK_RATE_UNAVAILABLE = Counter(
+    "bedrock_rate_unavailable_total",
+    "Usage events with reported tokens but no exact versioned rate match, by model and use case",
+    ["provider", "model", "use_case"],
+)
+
+
+def record_cost(*, model_id: Optional[str], use_case: str, cost_usd, provider: str = "bedrock") -> None:
+    """One usage event's computed cost, added to the running total — ONLY
+    ever called with a cost libs/bedrock_pricing actually computed from an
+    exact rate match; never an estimate or a guess."""
+    try:
+        if cost_usd is None or float(cost_usd) < 0:
+            return
+        BEDROCK_ESTIMATED_COST_USD.labels(
+            provider=_bounded(provider, PROVIDERS), model=_model_label(model_id),
+            use_case=_bounded(use_case, USE_CASES),
+        ).inc(float(cost_usd))
+    except Exception:
+        pass
+
+
+def record_rate_unavailable(*, model_id: Optional[str], use_case: str, provider: str = "bedrock") -> None:
+    """A usage event reported real tokens but matched no configured rate —
+    the bounded signal that a deployed model has no versioned price yet."""
+    try:
+        BEDROCK_RATE_UNAVAILABLE.labels(
+            provider=_bounded(provider, PROVIDERS), model=_model_label(model_id),
+            use_case=_bounded(use_case, USE_CASES),
+        ).inc()
+    except Exception:
+        pass
+
 
 # --- agent-run metrics -----------------------------------------------------
 AGENT_RUNS = Counter(

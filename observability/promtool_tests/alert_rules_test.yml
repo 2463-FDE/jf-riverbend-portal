@@ -239,3 +239,34 @@ tests:
       - eval_time: 25m
         alertname: AiAgentMaxTurnsOrCitationInvalidSpike
         exp_alerts: []
+
+  # --- BedrockTrainingCostBudgetExceeded (W10 metrics Stage 4) ------------
+
+  - interval: 1m
+    input_series:
+      # $0.50/min sustained -> $5 crossed well within the 1h window, with
+      # time left for `for: 5m` to be satisfied before the eval below.
+      - series: 'bedrock_estimated_cost_usd_total{provider="bedrock",model="m",use_case="summary_agent_chat"}'
+        values: "0+0.5x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: BedrockTrainingCostBudgetExceeded
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BedrockTrainingCostBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Bedrock training cost budget exceeded"
+              description: "Versioned, exact-rate Bedrock cost has exceeded $5 over the last hour — a local training threshold, not a production spend limit."
+
+  - interval: 1m
+    input_series:
+      # $0.01/min the whole time -> nowhere near $5 in any 1h window, must never fire.
+      - series: 'bedrock_estimated_cost_usd_total{provider="bedrock",model="m",use_case="summary_agent_chat"}'
+        values: "0+0.01x60"
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: BedrockTrainingCostBudgetExceeded
+        exp_alerts: []

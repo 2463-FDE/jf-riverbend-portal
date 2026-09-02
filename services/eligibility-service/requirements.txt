@@ -31,3 +31,8 @@ botocore==1.43.78
 # /metrics route (libs/metrics/http.py) plus the AI/circuit-breaker series
 # in libs/metrics/ai.py, which libs.eligibility_agent and breaker.py import.
 prometheus-client==0.26.0
+
+# W10 metrics Stage 4: this service's only Postgres access — durable
+# Bedrock usage accounting (bedrock_usage.py). Same pinned version already
+# proven in services/records-service/requirements.txt.
+psycopg2-binary==2.9.10

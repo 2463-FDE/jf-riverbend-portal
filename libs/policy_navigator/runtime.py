@@ -24,6 +24,7 @@ import re
 import time
 from typing import Optional
 
+from libs.agent_budget import BUDGETS, BudgetExceededError, preflight_check
 from libs.agent_provenance import ProvenanceLabel
 from libs.deid import scrub
 from libs.metrics import record_counter
@@ -53,6 +54,9 @@ _SAFE_NO_EVIDENCE_REPLY = (
 _SAFE_CITATION_INVALID_REPLY = (
     "I can't show that answer safely — it referenced policy text that wasn't actually retrieved "
     "for this question. Please try rephrasing your question."
+)
+_SAFE_BUDGET_REPLY = (
+    "That question is too long for me to research right now. Please shorten it and try again."
 )
 _SAFE_MAX_TURNS_REPLY = (
     "I wasn't able to finish researching this within the allowed number of steps. "
@@ -100,7 +104,12 @@ def _default_model():
     model_id = os.getenv("BEDROCK_MODEL_ID", "")
     if not model_id or model_id == "changeme":
         raise ProviderNotConfigured("BEDROCK_MODEL_ID is not configured")
-    return ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION"))
+    # W10 Metrics Stage 4: centrally bounded "maximum output tokens" — see
+    # libs/agent_budget. Previously unset here, i.e. entirely provider-default.
+    return ChatBedrockConverse(
+        model=model_id, region_name=os.getenv("AWS_REGION"),
+        max_tokens=BUDGETS[METRICS_USE_CASE].max_output_tokens,
+    )
 
 
 def _model_id_of(model) -> Optional[str]:
@@ -230,6 +239,30 @@ def run_policy_navigator(
     """
     correlation_id = new_correlation_id()
     with safe_span(_TRACER_NAME, "policy_navigator.ask", {"correlation_id": correlation_id}) as span:
+        # W10 Metrics Stage 4: centrally enforced request bound
+        # (libs/agent_budget), checked BEFORE any model is built or called —
+        # `question` is the gross, caller-supplied input this surface takes.
+        model_id_for_budget = _model_id_of(model) if model is not None else os.getenv("BEDROCK_MODEL_ID")
+        try:
+            preflight_check(METRICS_USE_CASE, model_id_for_budget, question)
+        except BudgetExceededError as exc:
+            log.warning("policy navigator rejected by preflight budget (reason=%s)", exc.reason)
+            result = PolicyNavigatorResult(
+                answer=_SAFE_BUDGET_REPLY, citations=(), label=ProvenanceLabel.FALLBACK.value,
+                model_id=None, termination_reason="budget_rejected",
+            )
+            record_counter(
+                "policy_navigator_termination_total",
+                termination_reason=result.termination_reason, provenance_label=result.label,
+            )
+            ai_metrics.record_agent_run(
+                use_case=METRICS_USE_CASE, provenance_label=result.label,
+                termination_reason=result.termination_reason,
+            )
+            span.set_attribute("provenance_label", result.label)
+            span.set_attribute("termination_reason", result.termination_reason)
+            return result
+
         result = _run_policy_navigator(
             question, scope=scope, retriever=retriever, model=model, label=label, max_turns=max_turns,
             correlation_id=correlation_id,

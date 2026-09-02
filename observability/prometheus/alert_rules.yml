@@ -100,3 +100,16 @@ groups:
         annotations:
           summary: "Agent runs hitting max_turns or an invalid citation"
           description: "At least one agent run has ended in max_turns or citation_invalid continuously for 10 minutes."
+
+      # W10 metrics Stage 4 — built on libs/bedrock_pricing's versioned,
+      # exact-rate-match cost only (never an estimate or a guessed rate).
+      # $5 is a local TRAINING threshold for this POC's own demo/exercise
+      # traffic, not a real production spend limit.
+      - alert: BedrockTrainingCostBudgetExceeded
+        expr: sum(increase(bedrock_estimated_cost_usd_total[1h])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bedrock training cost budget exceeded"
+          description: "Versioned, exact-rate Bedrock cost has exceeded $5 over the last hour — a local training threshold, not a production spend limit."

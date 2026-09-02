@@ -240,9 +240,19 @@ services:
       # intake-service's identical entry above for why .env's own value
       # can't do this alone.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # W10 metrics Stage 4: this service's only Postgres access — durable
+      # Bedrock usage accounting (bedrock_usage.py) into the same table
+      # records-service writes. See that service's identical block above.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-riverbend}
+      DB_USER: ${DB_USER:-riverbend_app}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env — see docs/runbook.md § Required one-time setup}
     depends_on:
       redis:
         condition: service_started
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8072/healthz')\""]
       interval: 10s

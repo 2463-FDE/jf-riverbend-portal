@@ -20,6 +20,7 @@ import os
 import time
 from typing import Optional
 
+from libs.agent_budget import BUDGETS, BudgetExceededError, preflight_check
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from libs.metrics import ai as ai_metrics
 from libs.policy_corpus import RetrievalScope
@@ -101,7 +102,12 @@ def _default_model():
     model_id = os.getenv("BEDROCK_MODEL_ID", "")
     if not model_id or model_id == "changeme":
         raise ProviderNotConfigured("BEDROCK_MODEL_ID is not configured")
-    return ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION"))
+    # W10 Metrics Stage 4: centrally bounded "maximum output tokens" — see
+    # libs/agent_budget. Previously unset here, i.e. entirely provider-default.
+    return ChatBedrockConverse(
+        model=model_id, region_name=os.getenv("AWS_REGION"),
+        max_tokens=BUDGETS[METRICS_USE_CASE].max_output_tokens,
+    )
 
 
 def _model_id_of(model) -> Optional[str]:
@@ -296,6 +302,19 @@ def run_summary_agent(
     fallback = lambda err, reason: _fallback(retriever, scope=scope, ledger=ledger, limits=limits,
                                              trace=trace, error_type=err, termination_reason=reason,
                                              usage_events=usage_events)
+
+    # W10 Metrics Stage 4: centrally enforced request bound
+    # (libs/agent_budget), checked BEFORE any model is built or called. This
+    # surface has no free-text caller input (its request is the fixed
+    # instruction below) — the meaningful check here is the worst-case-cost
+    # ceiling for whichever model would actually be used, guarding against a
+    # misconfigured max_turns/model combination, not a caller-supplied length.
+    model_id_for_budget = _model_id_of(model) if model is not None else os.getenv("BEDROCK_MODEL_ID")
+    try:
+        preflight_check(METRICS_USE_CASE, model_id_for_budget, "")
+    except BudgetExceededError as exc:
+        log.warning("summary agent rejected by preflight budget (reason=%s)", exc.reason)
+        return fallback(type(exc).__name__, "budget_rejected")
 
     if model is None:
         resolved = label or ProvenanceLabel.REAL

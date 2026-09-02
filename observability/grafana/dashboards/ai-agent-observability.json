@@ -229,6 +229,40 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 12,
+      "title": "Estimated Bedrock cost by model and use case (W10 Metrics Stage 4)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "Cumulative bedrock_estimated_cost_usd_total — only ever incremented from an EXACT versioned rate match (libs/bedrock_pricing). A model with no configured rate contributes nothing here; see the rate-unavailable panel instead.",
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+          "expr": "sum(increase(bedrock_estimated_cost_usd_total[1h])) by (model, use_case)",
+          "legendFormat": "{{model}} / {{use_case}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Rate-unavailable usage events (W10 Metrics Stage 4)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "bedrock_rate_unavailable_total — a real usage event with reported tokens but no exact versioned rate match for its model_id. Non-zero here means a deployed model has no price configured in libs/bedrock_pricing yet, not a cost of $0.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+          "expr": "sum(rate(bedrock_rate_unavailable_total[15m])) by (model, use_case)",
+          "legendFormat": "{{model}} / {{use_case}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

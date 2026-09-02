@@ -41,5 +41,5 @@ class PolicyNavigatorResult:
     citations: Tuple[CitedSource, ...]
     label: str  # "real" | "fixture" | "fallback"
     model_id: Optional[str]
-    termination_reason: str  # "answered" | "no_evidence" | "provider_error" | "citation_invalid" | "max_turns"
+    termination_reason: str  # "answered" | "no_evidence" | "provider_error" | "citation_invalid" | "max_turns" | "budget_rejected"
     usage: Tuple[UsageTurn, ...] = ()

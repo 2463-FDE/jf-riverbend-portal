@@ -23,6 +23,18 @@ class Settings:
 
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
+    # W10 Metrics Stage 4: this service's only Postgres access — durable
+    # Bedrock usage accounting (bedrock_usage.py) into the same
+    # bedrock_usage_events table records-service already writes. Same
+    # defaults/variable names as every other service's identical block
+    # (e.g. records-service/config.py) for one shared docker-compose.yml
+    # environment block to satisfy.
+    db_host = os.getenv("DB_HOST", "postgres")
+    db_port = os.getenv("DB_PORT", "5432")
+    db_name = os.getenv("DB_NAME", "riverbend")
+    db_user = os.getenv("DB_USER", "riverbend_app")
+    db_password = os.getenv("DB_PASSWORD", "")
+
     # Shared secret proving a call came through the gateway. Defaults to
     # empty and is checked both per-request and at startup — an unset value
     # must fail closed, never be read as "no check needed".
