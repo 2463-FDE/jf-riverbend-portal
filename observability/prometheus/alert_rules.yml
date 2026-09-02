@@ -1,7 +1,11 @@
-# W10 Final Stage 7 (sub-slice 3) — 3 alert rules for the local
-# observability POC. No production paging is implied by these rules; they
-# exist so `promtool test rules` has something real to prove, and so the
-# provisioned Grafana/Prometheus stack demonstrates end-to-end alerting.
+# W10 Final Stage 7 (sub-slice 3) + W10 metrics Stage 2 — 6 alert rules for
+# the local observability POC. These are plain local Prometheus rules,
+# evaluated and shown in Prometheus's own Alerts page and Grafana — no
+# Alertmanager, no external paging, no routing/silencing/on-call config
+# exists in this stack. No production paging is implied by these rules;
+# they exist so `promtool test rules` has something real to prove, and so
+# the provisioned Grafana/Prometheus stack demonstrates end-to-end
+# alerting.
 groups:
   - name: riverbend-observability-poc
     rules:
@@ -42,3 +46,57 @@ groups:
         annotations:
           summary: "Unusually high scheduling conflict rate"
           description: "More than 20% of booking attempts have resulted in a conflict outcome over the last 15 minutes."
+
+      # W10 metrics Stage 2 — built on Stage 1's libs/metrics/ai.py series.
+      # No pending-review-backlog alert: Stage 1 deliberately exposes no
+      # such gauge (a process-local one would reset on restart and lie), so
+      # there is nothing truthful to threshold here.
+
+      - alert: AiProviderErrorOrFallbackRatioSpike
+        # One alert, two independent conditions ORed together — either
+        # signal alone means an AI surface is degraded: provider_error is
+        # the per-CALL signal (a single round trip failed), fallback is the
+        # per-RUN signal (the whole run ended with no model answer at all,
+        # whatever the cause — provider_error, max_turns, or a refused
+        # draft). A spike in either is worth the same page.
+        expr: |
+          (
+            sum(rate(bedrock_provider_calls_total{outcome="provider_error"}[15m]))
+            /
+            sum(rate(bedrock_provider_calls_total[15m]))
+          ) > 0.2
+          or
+          (
+            sum(rate(agent_runs_total{provenance_label="fallback"}[15m]))
+            /
+            sum(rate(agent_runs_total[15m]))
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated AI provider-error or fallback rate"
+          description: "More than 20% of Bedrock provider calls have failed, or more than 20% of agent runs have fallen back to a no-model answer, over the last 15 minutes."
+
+      - alert: EligibilityCircuitOpen
+        expr: eligibility_circuit_open == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Eligibility circuit breaker is open"
+          description: "The payer eligibility circuit breaker has been open for at least 2 minutes; eligibility checks are degrading to the last-known-good cache."
+
+      - alert: AiAgentMaxTurnsOrCitationInvalidSpike
+        # Occurrence-style, mirroring RoiFulfillmentFailureSpike: either
+        # reason is a training-configuration problem (the loop bound is too
+        # tight, or a model is citing ids it was never shown), not ordinary
+        # request variance, so any sustained occurrence is worth flagging.
+        expr: |
+          sum(rate(agent_runs_total{termination_reason=~"max_turns|citation_invalid"}[15m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent runs hitting max_turns or an invalid citation"
+          description: "At least one agent run has ended in max_turns or citation_invalid continuously for 10 minutes."

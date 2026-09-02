@@ -1,7 +1,7 @@
-# W10 Final Stage 7 (sub-slice 3) — `promtool test rules` fixtures proving
-# each of the 3 alert rules in ../prometheus/alert_rules.yml actually fires
-# under the condition it names, and does NOT fire when that condition isn't
-# met. Run with:
+# W10 Final Stage 7 (sub-slice 3) + W10 metrics Stage 2 — `promtool test
+# rules` fixtures proving each of the 6 alert rules in
+# ../prometheus/alert_rules.yml actually fires under the condition it
+# names, and does NOT fire when that condition isn't met. Run with:
 #   docker run --rm -v "$(pwd)/observability:/etc/observability:ro" \
 #     --entrypoint promtool prom/prometheus:v2.55.1 \
 #     test rules /etc/observability/promtool_tests/alert_rules_test.yml
@@ -103,4 +103,139 @@ tests:
     alert_rule_test:
       - eval_time: 25m
         alertname: BookingConflictAnomaly
+        exp_alerts: []
+
+  # --- AiProviderErrorOrFallbackRatioSpike (W10 metrics Stage 2) ----------
+  # Two independent conditions ORed in one rule; each is tested on its own,
+  # plus one negative case with neither elevated.
+
+  - interval: 1m
+    input_series:
+      # PROVIDER_ERROR branch: call-level failures pushed well past 20%.
+      - series: 'bedrock_provider_calls_total{provider="bedrock",model="m",use_case="summary_agent_chat",operation="converse",outcome="success"}'
+        values: "0+8x30"
+      - series: 'bedrock_provider_calls_total{provider="bedrock",model="m",use_case="summary_agent_chat",operation="converse",outcome="provider_error"}'
+        values: "0+4x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AiProviderErrorOrFallbackRatioSpike
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: AiProviderErrorOrFallbackRatioSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Elevated AI provider-error or fallback rate"
+              description: "More than 20% of Bedrock provider calls have failed, or more than 20% of agent runs have fallen back to a no-model answer, over the last 15 minutes."
+
+  - interval: 1m
+    input_series:
+      # FALLBACK branch: run-level fallbacks pushed well past 20%, with
+      # provider_error calls entirely absent — proves the "or" actually
+      # lets the fallback condition fire on its own.
+      - series: 'agent_runs_total{use_case="policy_navigator_chat",provenance_label="real",termination_reason="answered"}'
+        values: "0+8x30"
+      - series: 'agent_runs_total{use_case="policy_navigator_chat",provenance_label="fallback",termination_reason="provider_error"}'
+        values: "0+4x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AiProviderErrorOrFallbackRatioSpike
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: AiProviderErrorOrFallbackRatioSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Elevated AI provider-error or fallback rate"
+              description: "More than 20% of Bedrock provider calls have failed, or more than 20% of agent runs have fallen back to a no-model answer, over the last 15 minutes."
+
+  - interval: 1m
+    input_series:
+      # Neither signal elevated: all calls succeed, all runs are real/answered.
+      - series: 'bedrock_provider_calls_total{provider="bedrock",model="m",use_case="summary_agent_chat",operation="converse",outcome="success"}'
+        values: "0+10x30"
+      - series: 'agent_runs_total{use_case="summary_agent_chat",provenance_label="real",termination_reason="answered"}'
+        values: "0+10x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AiProviderErrorOrFallbackRatioSpike
+        exp_alerts: []
+
+  # --- EligibilityCircuitOpen (W10 metrics Stage 2) -----------------------
+
+  - interval: 1m
+    input_series:
+      # Closed for the first 5 samples, then opens and stays open.
+      - series: 'eligibility_circuit_open'
+        values: "0x5 1x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: EligibilityCircuitOpen
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: EligibilityCircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Eligibility circuit breaker is open"
+              description: "The payer eligibility circuit breaker has been open for at least 2 minutes; eligibility checks are degrading to the last-known-good cache."
+
+  - interval: 1m
+    input_series:
+      # Never opens — must never fire.
+      - series: 'eligibility_circuit_open'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: EligibilityCircuitOpen
+        exp_alerts: []
+
+  # --- AiAgentMaxTurnsOrCitationInvalidSpike (W10 metrics Stage 2) --------
+  # Occurrence-style like RoiFulfillmentFailureSpike; each of the two
+  # termination reasons the regex matches is tested on its own.
+
+  - interval: 1m
+    input_series:
+      - series: 'agent_runs_total{use_case="summary_agent_chat",provenance_label="fallback",termination_reason="max_turns"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AiAgentMaxTurnsOrCitationInvalidSpike
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AiAgentMaxTurnsOrCitationInvalidSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Agent runs hitting max_turns or an invalid citation"
+              description: "At least one agent run has ended in max_turns or citation_invalid continuously for 10 minutes."
+
+  - interval: 1m
+    input_series:
+      - series: 'agent_runs_total{use_case="policy_navigator_chat",provenance_label="fallback",termination_reason="citation_invalid"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AiAgentMaxTurnsOrCitationInvalidSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Agent runs hitting max_turns or an invalid citation"
+              description: "At least one agent run has ended in max_turns or citation_invalid continuously for 10 minutes."
+
+  - interval: 1m
+    input_series:
+      # Only non-matching reasons present — must never fire.
+      - series: 'agent_runs_total{use_case="summary_agent_chat",provenance_label="real",termination_reason="answered"}'
+        values: "0+5x30"
+      - series: 'agent_runs_total{use_case="summary_agent_chat",provenance_label="fallback",termination_reason="provider_error"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AiAgentMaxTurnsOrCitationInvalidSpike
         exp_alerts: []
