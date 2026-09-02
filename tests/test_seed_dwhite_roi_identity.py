@@ -69,3 +69,14 @@ def test_demo_reset_restores_dwhites_scoped_grant():
     )
     # Never a grant for dwhite outside 1042 — a typo here would silently widen the demo scope.
     assert not re.search(r"\('dwhite', (?!1042\))\d+\)", text)
+
+
+def test_demo_reset_reactivates_dwhite_account():
+    text = DEMO_RESET.read_text()
+    active_restore = re.search(
+        r"UPDATE users SET is_active = TRUE\s+"
+        r"WHERE username IN \(([^)]*)\) AND is_active = FALSE;",
+        text,
+    )
+    assert active_restore is not None
+    assert "'dwhite'" in active_restore.group(1)

@@ -164,11 +164,11 @@ DELETE FROM patient_invitations WHERE patient_id IN (1738, 1739);
 UPDATE users SET is_active = TRUE
  WHERE patient_id IN (1738, 1739) AND role = 'patient' AND is_active = FALSE;
 
--- --- Clinician accounts themselves — restored active, never deleted --------
--- A test that deactivated drkim or drnguyen (or, before this reset, one that
--- never distinguished them from an ordinary account) must not leave the
--- demo unable to show either reviewer's half of the queue.
-UPDATE users SET is_active = TRUE WHERE username IN ('drkim', 'drnguyen') AND is_active = FALSE;
+-- --- Named demo staff accounts — restored active, never deleted -------------
+-- A test or rehearsal that deactivated either clinician or the scoped ROI
+-- clerk must not leave the next demo unable to authenticate after a reset.
+UPDATE users SET is_active = TRUE
+ WHERE username IN ('drkim', 'drnguyen', 'dwhite') AND is_active = FALSE;
 
 -- --- Staff/clinician/self grants — restore ACTIVE, never merely EXISTS -----
 --

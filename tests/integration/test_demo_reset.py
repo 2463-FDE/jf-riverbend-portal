@@ -32,6 +32,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 DEMO_PATIENT = 1737
 REVIEWER = "drkim"
+DWHITE = "dwhite"
+DWHITE_PATIENT = 1042
 PASSWORD = "portal-patient-passphrase"
 
 
@@ -70,6 +72,20 @@ def _reviewer_grant_is_active() -> bool:
                AND (g.expires_at IS NULL OR g.expires_at > now())
             """,
             (REVIEWER, DEMO_PATIENT),
+        )
+    )
+
+
+def _dwhite_grant_is_active() -> bool:
+    return bool(
+        _one(
+            """
+            SELECT 1 FROM patient_access_grants g JOIN users u ON u.id = g.user_id
+             WHERE u.username = %s AND u.is_active AND g.patient_id = %s
+               AND g.revoked_at IS NULL
+               AND (g.expires_at IS NULL OR g.expires_at > now())
+            """,
+            (DWHITE, DWHITE_PATIENT),
         )
     )
 
@@ -162,6 +178,17 @@ def test_reset_restores_a_deactivated_reviewer_account_to_active():
     assert REVIEWER in out, "the summary must name the restored reviewer, not just say the role exists"
     assert "INACTIVE" not in out and "NONE" not in out, (
         "a restored reviewer must not still be reported as unusable"
+    )
+
+
+def test_reset_reactivates_the_scoped_roi_demo_account():
+    _run("UPDATE users SET is_active = false WHERE username = %s", (DWHITE,))
+    assert not _dwhite_grant_is_active(), "precondition: dwhite must start disabled"
+
+    _demo_reset()
+
+    assert _dwhite_grant_is_active(), (
+        "reset must reactivate dwhite as well as restore the scoped ROI grant"
     )
 
 

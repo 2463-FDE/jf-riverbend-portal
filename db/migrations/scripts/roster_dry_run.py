@@ -276,6 +276,10 @@ def build_report(roster, accounts, known_roles=None):
     for row in roster:
         by_key.setdefault(normalise_name(row.name), []).append(row)
 
+    accounts_by_key = {}
+    for account in accounts:
+        accounts_by_key.setdefault(normalise_name(account.full_name), []).append(account)
+
     findings = []
     matched_keys = set()
 
@@ -292,6 +296,35 @@ def build_report(roster, accounts, known_roles=None):
     for acct in sorted(accounts, key=lambda a: a.username):
         key = normalise_name(acct.full_name)
         people = by_key.get(key, [])
+
+        # One roster person must never authorize changes to two accounts.
+        # This is distinct from duplicate roster rows (handled below): here
+        # the ambiguity is in the principal set itself.  Migrating both would
+        # silently preserve duplicate credentials for one person, while
+        # choosing either account would be an identity decision the roster
+        # cannot make.  Report every account and leave both untouched.
+        same_person_accounts = accounts_by_key.get(key, [])
+        if len(same_person_accounts) > 1:
+            if people:
+                matched_keys.add(key)
+            findings.append(
+                Finding(
+                    outcome=DECIDE_NO_OWNER,
+                    subject=acct.username,
+                    detail=(
+                        f'{len(same_person_accounts)} accounts match the same normalized '
+                        f'identity "{people[0].name if people else acct.full_name}". '
+                        f"Choose the canonical account and disable or rename the other "
+                        f"before migration."
+                    ),
+                    context=[
+                        f"{candidate.username} — {candidate.full_name}, role={candidate.role}"
+                        for candidate in sorted(same_person_accounts, key=lambda a: a.username)
+                    ],
+                    roster_name=people[0].name if len(people) == 1 else None,
+                )
+            )
+            continue
 
         if not people:
             # No identified owner. Could be a shared desk login or someone

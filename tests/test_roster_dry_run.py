@@ -171,6 +171,23 @@ def test_an_account_nobody_owns_is_never_migrated():
         assert _subject_outcome(findings, username) == dry_run.DECIDE_NO_OWNER
 
 
+def test_two_accounts_for_one_roster_person_require_a_human_decision():
+    roster = [RosterRow("Dana White", "Release of Information Clerk", "HIM", "Main", "active")]
+    accounts = [
+        Account("roiclerk", "Dana White (ROI Clerk)", "staff", True),
+        Account("dwhite", "Dana White", "roi_clerk", True),
+    ]
+
+    findings = dry_run.build_report(roster, accounts, known_roles={"roi_clerk"})
+
+    assert not _outcomes(findings, dry_run.MIGRATE)
+    assert {f.subject for f in _outcomes(findings, dry_run.DECIDE_NO_OWNER)} == {
+        "roiclerk", "dwhite",
+    }
+    assert all("canonical account" in f.detail for f in findings)
+    assert all({"dwhite", "roiclerk"} == {line.split(" — ")[0] for line in f.context} for f in findings)
+
+
 def test_the_no_owner_finding_offers_context_without_guessing_a_role():
     findings = _report()
     frontdesk = next(f for f in findings if f.subject == "frontdesk")
@@ -361,18 +378,15 @@ def test_the_seeded_accounts_produce_the_documented_split():
         dry_run.read_roster(ROSTER_CSV), dry_run.read_accounts_from_seed(SEED_SQL)
     )
 
-    # Against the CLIENT's roster: eleven of the fourteen seeded accounts map
-    # cleanly, and the three that do not are exactly the three that are not
-    # people. Nothing lands in DENY BY DEFAULT or UNRECOGNISED STATUS — before
-    # the vocabulary fix, seven real staff sat in the former and three dated
-    # statuses in the latter.
-    #
-    # Demo-readiness slice: `dwhite` (role='roi_clerk') is the eleventh —
-    # normalise_name() strips parenthetical decoration, so 'Dana White (ROI
-    # Clerk)' (roiclerk) and 'Dana White' (dwhite) key to the same roster
-    # row; both are the same demo person and both legitimately migrate.
-    assert len(_outcomes(findings, dry_run.MIGRATE)) == 11
-    assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 3   # frontdesk, labtech, itadmin
+    # Against the CLIENT's roster, nine accounts are safe to migrate. The
+    # three ownerless shared/service accounts still require a decision, and
+    # dwhite/roiclerk now correctly add two more: both normalize to the same
+    # Dana White roster row, so neither credential is chosen automatically.
+    assert len(_outcomes(findings, dry_run.MIGRATE)) == 9
+    assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 5
+    assert {"dwhite", "roiclerk"}.issubset(
+        {f.subject for f in _outcomes(findings, dry_run.DECIDE_NO_OWNER)}
+    )
     assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 0  # no departure holds an account
     assert len(_outcomes(findings, dry_run.DEPARTED_CHECKED)) == 2  # Marcus Hale, Erin Castillo
     assert len(_outcomes(findings, dry_run.UNMAPPED_FUNCTION)) == 0
