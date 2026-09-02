@@ -686,16 +686,17 @@ CREATE TRIGGER agent_lifecycle_events_no_delete
     BEFORE DELETE ON agent_lifecycle_events
     FOR EACH ROW EXECUTE FUNCTION agent_lifecycle_events_reject_mutation();
 
--- Durable, append-only Bedrock chat usage accounting (037) — see that
--- migration for the full rationale (no prompts/responses/PHI, cost stays
--- NULL until a real rate config exists, idempotency_key dedups retries).
+-- Durable, append-only Bedrock chat usage accounting (037, widened by 038 to
+-- add eligibility_agent_chat) — see those migrations for the full rationale
+-- (no prompts/responses/PHI, cost stays NULL unless an exact versioned rate
+-- matched, idempotency_key dedups retries).
 CREATE TABLE IF NOT EXISTS bedrock_usage_events (
     id              BIGSERIAL PRIMARY KEY,
     idempotency_key TEXT NOT NULL,
     provider        TEXT NOT NULL,
     model_id        TEXT NOT NULL,
     use_case        TEXT NOT NULL
-                    CHECK (use_case IN ('summary_agent_chat', 'policy_navigator_chat')),
+                    CHECK (use_case IN ('summary_agent_chat', 'policy_navigator_chat', 'eligibility_agent_chat')),
     input_tokens    INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
     output_tokens   INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
     rate_version    TEXT,

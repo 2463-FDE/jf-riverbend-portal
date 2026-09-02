@@ -124,6 +124,30 @@ def test_an_unrecognized_use_case_is_rejected_by_the_check_constraint(conn):
     conn.rollback()
 
 
+def test_eligibility_agent_chat_is_accepted_by_the_widened_check_constraint(conn):
+    """Migration 038 (W10 Metrics Stage 4) widened the use_case CHECK
+    specifically so services/eligibility-service/bedrock_usage.py could
+    write here — proves the additive migration actually took effect,
+    not just that the original two use cases still work."""
+    row_id = _insert(conn, _idempotency_key(), use_case="eligibility_agent_chat")
+    conn.commit()
+    assert row_id is not None
+
+
+def test_versioned_cost_is_accepted_together_with_a_rate_version(conn):
+    key = _idempotency_key()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO bedrock_usage_events (idempotency_key, provider, model_id, use_case, "
+            "input_tokens, output_tokens, rate_version, cost_usd) "
+            "VALUES (%s, 'bedrock', 'model-x', 'summary_agent_chat', 1000000, 1000000, %s, %s) RETURNING id",
+            (key, "2026-09-02", "0.018000"),
+        )
+        row_id = cur.fetchone()[0]
+    conn.commit()
+    assert row_id is not None
+
+
 def test_cost_without_a_rate_version_is_rejected_by_the_check_constraint(conn):
     with pytest.raises(psycopg2.errors.CheckViolation):
         with conn.cursor() as cur:

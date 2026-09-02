@@ -57,6 +57,7 @@ from patient_access_gate import (
 import agent_drafts
 import agent_lifecycle
 import bedrock_usage
+from libs import agent_budget
 import messaging
 import patient_summary
 import policy_navigator_path
@@ -1996,7 +1997,11 @@ def set_thread_status(
     )
 
 
-_POLICY_QUESTION_MAX = 500
+# W10 Metrics Stage 4: this bound now lives centrally in libs/agent_budget
+# (BUDGETS["policy_navigator_chat"].max_input_chars) — same 500-char value
+# as before, no behavior change, just one source of truth instead of a
+# locally duplicated constant.
+_POLICY_QUESTION_MAX = agent_budget.BUDGETS["policy_navigator_chat"].max_input_chars
 
 
 @app.post("/policy/ask", response_model=PolicyAnswerOut)

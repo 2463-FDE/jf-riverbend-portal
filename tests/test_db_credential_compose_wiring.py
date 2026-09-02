@@ -26,8 +26,14 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-_DB_CLIENT_SERVICES = {"gateway", "intake-service", "records-service", "scheduling-service", "roi-service"}
-_NON_DB_SERVICES = {"eligibility-service", "interop-service", "frontend"}
+_DB_CLIENT_SERVICES = {
+    "gateway", "intake-service", "records-service", "scheduling-service", "roi-service",
+    # W10 Metrics Stage 4: eligibility-service gained its first-ever direct
+    # Postgres access — durable Bedrock usage accounting (bedrock_usage.py),
+    # the same table records-service already writes.
+    "eligibility-service",
+}
+_NON_DB_SERVICES = {"interop-service", "frontend"}
 
 _VALID_ENV = {
     "INTERNAL_SERVICE_TOKEN": "test-internal-token-well-over-the-32-char-floor",

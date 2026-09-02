@@ -17,8 +17,9 @@ VERIFIED verify_current_eligibility outcome may update eligibility_status",
 so the two loops cannot drift into disagreeing about it.
 """
 from datetime import datetime, timezone
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, List, Optional
 
+from libs.agent_budget import BudgetExceededError, preflight_check
 from libs.deid.safe_harbor import scrub
 from libs.llm_client.errors import LLMClientError
 from libs.safe_logging import get_safe_logger
@@ -28,6 +29,7 @@ from ..bedrock_tool_port import BedrockConverseToolModel, ConverseTurn, ToolCapa
 from ..contracts import (
     EligibilityStatus,
     TerminationReason,
+    UsageTurn,
     VisitContext,
     VisitStreamEvent,
     VisitTurnResult,
@@ -62,6 +64,11 @@ _SAFE_SCRUB_ERROR_REPLY = (
     "I couldn't process that message safely. Please try again, or check "
     "eligibility manually."
 )
+_SAFE_BUDGET_REPLY = (
+    "That message is too long for me to check right now. Please shorten it, "
+    "or check eligibility manually."
+)
+_METRICS_USE_CASE = "eligibility_agent_chat"
 
 
 class RawBedrockAgentRuntime:
@@ -149,6 +156,23 @@ class RawBedrockAgentRuntime:
         context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
         tools_by_name = self._tools_for(context)
 
+        # W10 Metrics Stage 4: the centrally enforced request bound
+        # (libs/agent_budget) is checked on the GROSS, unscrubbed message —
+        # before scrubbing, before any provider egress — so an oversized
+        # request never reaches the model at all, not even for a first turn.
+        try:
+            preflight_check(_METRICS_USE_CASE, getattr(self._model, "model_id", None), user_message)
+        except BudgetExceededError as exc:
+            log.warning("agent message rejected by preflight budget (reason=%s)", exc.reason)
+            return VisitTurnResult(
+                visit_id=visit_id,
+                reply=_SAFE_BUDGET_REPLY,
+                tool_called=False,
+                eligibility_status=context.eligibility_status,
+                termination_reason=TerminationReason.BUDGET_REJECTED,
+                turns_used=0,
+            )
+
         # P6 (w8-planner-2): the caller's raw free-text chat message used to
         # reach the provider prompt below with no scrubbing at all — see
         # libs/deid/safe_harbor.py. `known_identifiers` lets a future caller
@@ -176,6 +200,8 @@ class RawBedrockAgentRuntime:
         messages: list = [{"role": "user", "content": [{"text": user_message}]}]
         tool_called = False
         eligibility_status: Optional[EligibilityStatus] = context.eligibility_status
+        usage_events: List[UsageTurn] = []
+        model_id = getattr(self._model, "model_id", None)
 
         for turn in range(1, self._max_turns + 1):
             with safe_span(_TRACER_NAME, "eligibility_agent.provider_call", {"turn": turn}) as span:
@@ -195,7 +221,14 @@ class RawBedrockAgentRuntime:
                         eligibility_status=eligibility_status,
                         termination_reason=TerminationReason.PROVIDER_ERROR,
                         turns_used=turn,
+                        usage=tuple(usage_events),
                     )
+
+                if response.input_tokens is not None or response.output_tokens is not None:
+                    usage_events.append(UsageTurn(
+                        model_id=model_id, turn=turn,
+                        input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+                    ))
 
                 stop_reason = "tool_use" if response.tool_calls else "end_turn"
                 # A decision is a point-in-time read of the response just
@@ -211,6 +244,7 @@ class RawBedrockAgentRuntime:
                         eligibility_status=eligibility_status,
                         termination_reason=TerminationReason.ANSWERED,
                         turns_used=turn,
+                        usage=tuple(usage_events),
                     )
 
             messages.append({"role": "assistant", "content": _assistant_content(response)})
@@ -232,6 +266,7 @@ class RawBedrockAgentRuntime:
             eligibility_status=eligibility_status,
             termination_reason=TerminationReason.MAX_TURNS,
             turns_used=self._max_turns,
+            usage=tuple(usage_events),
         )
 
     def handle_message_stream(
@@ -261,6 +296,22 @@ class RawBedrockAgentRuntime:
         context = self._memory.get(visit_id) or VisitContext(visit_id=visit_id, updated_at=self._now())
         tools_by_name = self._tools_for(context)
 
+        # W10 Metrics Stage 4: same gross, pre-scrub check as handle_message
+        # — see that method's identical block for the full rationale.
+        try:
+            preflight_check(_METRICS_USE_CASE, getattr(self._model, "model_id", None), user_message)
+        except BudgetExceededError as exc:
+            log.warning("agent message rejected by preflight budget (reason=%s)", exc.reason)
+            yield VisitStreamEvent(
+                kind="error",
+                text=_SAFE_BUDGET_REPLY,
+                tool_called=False,
+                eligibility_status=context.eligibility_status,
+                termination_reason=TerminationReason.BUDGET_REJECTED,
+                turns_used=0,
+            )
+            return
+
         try:
             user_message, deid_report = scrub(user_message, known_identifiers)
         except Exception as exc:
@@ -280,9 +331,12 @@ class RawBedrockAgentRuntime:
         messages: list = [{"role": "user", "content": [{"text": user_message}]}]
         tool_called = False
         eligibility_status: Optional[EligibilityStatus] = context.eligibility_status
+        usage_events: List[UsageTurn] = []
+        model_id = getattr(self._model, "model_id", None)
 
         for turn in range(1, self._max_turns + 1):
             collected_tool_calls = []
+            turn_input_tokens = turn_output_tokens = None
             # Duration here is the WHOLE streamed turn, first byte to the
             # tool-use/end-turn decision — mirrors bedrock_tool_port.py's own
             # converse_stream span one layer down (Stage 1's cancellation
@@ -295,6 +349,8 @@ class RawBedrockAgentRuntime:
                             yield VisitStreamEvent(kind="delta", text=event.text)
                         elif event.kind == "tool_call" and event.tool_call is not None:
                             collected_tool_calls.append(event.tool_call)
+                        elif event.kind == "usage":
+                            turn_input_tokens, turn_output_tokens = event.input_tokens, event.output_tokens
                 except LLMClientError as exc:
                     log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
                     span.record_exception_type(type(exc).__name__)
@@ -305,8 +361,15 @@ class RawBedrockAgentRuntime:
                         eligibility_status=eligibility_status,
                         termination_reason=TerminationReason.PROVIDER_ERROR,
                         turns_used=turn,
+                        usage=tuple(usage_events),
                     )
                     return
+
+                if turn_input_tokens is not None or turn_output_tokens is not None:
+                    usage_events.append(UsageTurn(
+                        model_id=model_id, turn=turn,
+                        input_tokens=turn_input_tokens, output_tokens=turn_output_tokens,
+                    ))
 
                 stop_reason = "tool_use" if collected_tool_calls else "end_turn"
                 record_event(span, "agent_decision", {"turn": turn, "stop_reason": stop_reason})
@@ -318,6 +381,7 @@ class RawBedrockAgentRuntime:
                         eligibility_status=eligibility_status,
                         termination_reason=TerminationReason.ANSWERED,
                         turns_used=turn,
+                        usage=tuple(usage_events),
                     )
                     return
 
@@ -351,6 +415,7 @@ class RawBedrockAgentRuntime:
             eligibility_status=eligibility_status,
             termination_reason=TerminationReason.MAX_TURNS,
             turns_used=self._max_turns,
+            usage=tuple(usage_events),
         )
 
 

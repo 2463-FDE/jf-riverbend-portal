@@ -21,6 +21,7 @@ from typing import Iterator, Optional
 
 import redis as redis_lib
 
+import bedrock_usage
 from config import settings
 from libs.metrics import ai as ai_metrics
 from libs.tracing.spans import new_correlation_id, safe_span
@@ -130,6 +131,7 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
             )
         result = runtime.handle_message(visit_id, message)
         _record_run(result.termination_reason)
+        bedrock_usage.persist(correlation_id, result.usage)
         span.set_attribute("termination_reason", getattr(result.termination_reason, "value",
                                                           result.termination_reason))
         span.set_attribute("tool_called", result.tool_called)
@@ -145,8 +147,10 @@ _UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitl
 _TERMINAL_STREAM_KINDS = frozenset({"done", "error"})
 
 
-def _record_terminal_run(events: Iterator[VisitStreamEvent]) -> Iterator[VisitStreamEvent]:
-    """Count exactly one agent run per streamed turn, at its terminal event.
+def _record_terminal_run(events: Iterator[VisitStreamEvent], correlation_id: str) -> Iterator[VisitStreamEvent]:
+    """Count exactly one agent run per streamed turn, at its terminal event,
+    and persist that turn's durable usage accounting (W10 Metrics Stage 4)
+    at the same point.
 
     Wrapping the whole generator is what makes "exactly once" true for every
     branch below — unavailable runtime, non-streaming fallback, and the real
@@ -162,6 +166,7 @@ def _record_terminal_run(events: Iterator[VisitStreamEvent]) -> Iterator[VisitSt
     for event in events:
         if not recorded and event.kind in _TERMINAL_STREAM_KINDS:
             _record_run(event.termination_reason)
+            bedrock_usage.persist(correlation_id, event.usage)
             recorded = True
         yield event
 
@@ -182,7 +187,7 @@ def stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEve
     """
     correlation_id = new_correlation_id()
     with safe_span(_TRACER_NAME, "eligibility_agent.turn", {"correlation_id": correlation_id}) as span:
-        for event in _record_terminal_run(_stream_visit_message(visit_id, message)):
+        for event in _record_terminal_run(_stream_visit_message(visit_id, message), correlation_id):
             if event.kind in _TERMINAL_STREAM_KINDS:
                 span.set_attribute("termination_reason",
                                    getattr(event.termination_reason, "value", event.termination_reason))

@@ -4,6 +4,8 @@ accounting (migration 037, W10 Final Stage 5 sub-slice 3). Fast DB-less
 append-only/idempotency enforcement is proved in
 tests/integration/test_bedrock_usage_events_migration.py.
 """
+from decimal import Decimal
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from conftest import load_module
+from libs.bedrock_pricing import RATES
 
 bedrock_usage = load_module("services/records-service/bedrock_usage.py", "bedrock_usage_mod")
 BedrockUsageEvent = bedrock_usage.BedrockUsageEvent
@@ -86,6 +89,51 @@ def test_usage_for_filters_by_model_id_and_use_case(db):
     assert len(bedrock_usage.usage_for(db, model_id="model-x")) == 1
     assert len(bedrock_usage.usage_for(db, use_case="policy_navigator_chat")) == 1
     assert len(bedrock_usage.usage_for(db, model_id="model-x", use_case="policy_navigator_chat")) == 0
+
+
+# --- W10 Metrics Stage 4: versioned cost computation on persist -----------
+
+
+def test_persist_populates_cost_and_rate_version_for_a_known_model(db):
+    model_id = next(iter(RATES))
+    entry = RATES[model_id]
+    event = UsageEvent(provider="bedrock", model_id=model_id, use_case="summary_agent_chat",
+                       sequence=1, input_tokens=1_000_000, output_tokens=1_000_000)
+
+    bedrock_usage.persist(db, "corr-priced", [event])
+    db.commit()
+
+    row = bedrock_usage.usage_for(db, model_id=model_id)[0]
+    assert row.rate_version == entry.rate_version
+    assert row.cost_usd == entry.input_usd_per_million + entry.output_usd_per_million
+
+
+def test_persist_leaves_cost_and_rate_version_null_for_an_unpriced_model(db):
+    event = UsageEvent(provider="bedrock", model_id="not-a-real-model", use_case="summary_agent_chat",
+                       sequence=1, input_tokens=100, output_tokens=20)
+
+    bedrock_usage.persist(db, "corr-unpriced", [event])
+    db.commit()
+
+    row = bedrock_usage.usage_for(db, model_id="not-a-real-model")[0]
+    assert row.rate_version is None
+    assert row.cost_usd is None
+
+
+def test_persist_leaves_cost_null_for_a_row_with_no_reported_tokens(db):
+    """No tokens reported at all (e.g. the eligibility Converse port before
+    W10 Metrics Stage 4) is a different case from an unpriced model with
+    real tokens — neither should ever compute a cost, but only the latter
+    is a `rate_unavailable` event."""
+    model_id = next(iter(RATES))
+    event = UsageEvent(provider="bedrock", model_id=model_id, use_case="summary_agent_chat", sequence=1)
+
+    bedrock_usage.persist(db, "corr-no-tokens", [event])
+    db.commit()
+
+    row = bedrock_usage.usage_for(db, model_id=model_id)[0]
+    assert row.cost_usd is None
+    assert row.rate_version is None
 
 
 def test_usage_for_filters_by_time_window(db):

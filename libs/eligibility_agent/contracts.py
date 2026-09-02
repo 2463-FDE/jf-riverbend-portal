@@ -9,9 +9,10 @@ any more than there is between two services (adr/0001's no-shared-library
 convention, applied the same way here). Keep the two EligibilityStatus enums'
 values in sync if either ever changes.
 """
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -78,6 +79,25 @@ class TerminationReason(str, Enum):
     ANSWERED = "answered"  # the model produced a final text reply
     MAX_TURNS = "max_turns"  # the bounded tool loop was cut off
     PROVIDER_ERROR = "provider_error"  # the model/provider call failed
+    # W10 Metrics Stage 4: libs/agent_budget's centrally enforced request
+    # bound refused this turn BEFORE any provider call was made — distinct
+    # from PROVIDER_ERROR, which means a call was actually attempted.
+    BUDGET_REJECTED = "budget_rejected"
+
+
+@dataclass(frozen=True)
+class UsageTurn:
+    """One successful model round-trip's token usage — in memory only until
+    services/eligibility-service/agent_wiring.py hands it to bedrock_usage.py
+    for durable persistence. Mirrors libs.summary_agent.contracts.UsageTurn
+    and libs.policy_navigator.contracts.UsageTurn (kept separate per adr/0001:
+    no shared lib between agent packages). Never recorded for a failed or
+    budget-rejected call — no legitimate token count exists for either."""
+
+    model_id: str
+    turn: int
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 class VisitTurnResult(BaseModel):
@@ -87,6 +107,10 @@ class VisitTurnResult(BaseModel):
     eligibility_status: Optional[EligibilityStatus] = None
     termination_reason: TerminationReason
     turns_used: int
+    # W10 Metrics Stage 4: every turn this run actually completed against a
+    # real model, in order — empty whenever no model call was ever reached
+    # (a budget rejection, scrub failure, or unavailable runtime).
+    usage: Tuple[UsageTurn, ...] = ()
 
 
 class VisitStreamEvent(BaseModel):
@@ -111,6 +135,10 @@ class VisitStreamEvent(BaseModel):
     eligibility_status: Optional[EligibilityStatus] = None
     termination_reason: Optional[TerminationReason] = None
     turns_used: Optional[int] = None
+    # W10 Metrics Stage 4: only ever set on a terminal ("done"/"error")
+    # event, mirroring tool_called/eligibility_status above — see
+    # VisitTurnResult.usage.
+    usage: Tuple[UsageTurn, ...] = ()
 
 
 class NoToolArguments(BaseModel):

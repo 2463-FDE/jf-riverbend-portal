@@ -4,6 +4,13 @@ libs/policy_navigator) accumulates in memory and returns to its caller
 (summary_agent_path.py, policy_navigator_path.py). Neither runtime writes
 here directly; only what each already returns (provider, model id, a
 bounded use-case category, token counts) ever reaches this table.
+
+W10 Metrics Stage 4: `persist()` now computes `cost_usd`/`rate_version` via
+libs/bedrock_pricing, populating them ONLY on an exact model_id rate match —
+an unmatched model leaves both NULL (the table's own CHECK already requires
+they travel together) and increments the bounded `rate_unavailable` metric,
+never a guessed or zero cost. No historical row is ever touched: a rate
+added later never repriced usage recorded before it existed.
 """
 import sqlite3
 from dataclasses import dataclass
@@ -13,6 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from libs.bedrock_pricing import compute_cost
+from libs.metrics import ai as ai_metrics
 from models import BedrockUsageEvent
 
 _IDEMPOTENCY_KEY_CONSTRAINT = "bedrock_usage_events_idempotency_key_unique"
@@ -64,10 +73,22 @@ def persist(db: Session, correlation_id: str, events: Iterable[UsageEvent]) -> N
     no-op: a SAVEPOINT scopes the failure to just this insert, the same
     pattern agent_lifecycle.py's persist() uses for ALC-DISPLAY-REPEAT."""
     for event in events:
+        priced = compute_cost(event.model_id, event.input_tokens, event.output_tokens)
+        if priced is not None:
+            cost_usd, rate_version = priced
+            ai_metrics.record_cost(model_id=event.model_id, use_case=event.use_case, cost_usd=cost_usd)
+        else:
+            cost_usd, rate_version = None, None
+            if event.input_tokens is not None or event.output_tokens is not None:
+                # A real call happened and reported usage, but no exact
+                # versioned rate matches this model_id — visible as a
+                # bounded metric, never silently dropped.
+                ai_metrics.record_rate_unavailable(model_id=event.model_id, use_case=event.use_case)
         row = BedrockUsageEvent(
             idempotency_key=f"{correlation_id}:{event.sequence}",
             provider=event.provider, model_id=event.model_id, use_case=event.use_case,
             input_tokens=event.input_tokens, output_tokens=event.output_tokens,
+            rate_version=rate_version, cost_usd=cost_usd,
         )
         try:
             with db.begin_nested():

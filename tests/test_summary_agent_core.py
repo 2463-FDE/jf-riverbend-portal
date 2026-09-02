@@ -11,6 +11,7 @@ sanitized acceptance run, not a unit test.
 import base64
 import json
 import os
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine
@@ -591,6 +592,32 @@ def test_a_genuine_provider_failure_is_still_classified_as_provider_error():
     )
 
     assert result.termination_reason == "provider_error"
+    assert result.model_id is None
+
+
+# --- W10 Metrics Stage 4: centrally enforced request bound ------------------
+
+
+def test_a_worst_case_over_budget_model_is_rejected_before_any_provider_call(monkeypatch):
+    """This surface has no free-text caller input to bound by length, so the
+    meaningful preflight check is the worst-case-cost ceiling — proven here
+    by pointing it at a priced model while dropping the ceiling far below any
+    real worst case, rather than by an oversized input (there is none)."""
+    from libs import agent_budget
+    from libs.summary_agent.runtime import run_summary_agent
+
+    # model=None (not a ScriptedChatModel): this proves the preflight check
+    # runs BEFORE _default_model() ever builds a real ChatBedrockConverse —
+    # if it didn't, this test would fail trying to construct a real provider
+    # client rather than failing the assertion below.
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-5-20250929-v1:0")
+    monkeypatch.setattr(agent_budget, "MAX_WORST_CASE_COST_USD", Decimal("0.0000001"))
+    trace = TraceRecorder("corr-budget")
+
+    result = run_summary_agent(scope=_SCOPE, retriever=_default_retriever(), actor_role="clinician", trace=trace)
+
+    assert result.termination_reason == "budget_rejected"
+    assert result.label == ProvenanceLabel.FALLBACK
     assert result.model_id is None
 
 

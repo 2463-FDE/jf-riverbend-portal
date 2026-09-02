@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional
 
+from libs.agent_budget import BUDGETS
 from libs.metrics import ai as ai_metrics
 from libs.llm_client.errors import (
     ProviderCallError,
@@ -65,6 +66,11 @@ class ConverseTurn:
     text: Optional[str]
     tool_calls: List[ToolCall] = field(default_factory=list)
     stop_reason: str = ""
+    # W10 Metrics Stage 4: the provider's own reported usage for this exact
+    # call, when the response carried one — None means "not reported",
+    # never "zero".
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -72,14 +78,19 @@ class ConverseStreamEvent:
     """One increment of a streamed turn — w-9-2-planner P1b. `kind` is
     "text_delta" (a piece of user-facing answer text, safe to forward to the
     browser as it arrives), "tool_call" (a fully-assembled tool call, never
-    forwarded to the browser — internal dispatch only), or "stop" (the turn
+    forwarded to the browser — internal dispatch only), "stop" (the turn
     ended; carries Bedrock's own stop_reason, itself just a short enum
-    string, not raw provider output)."""
+    string, not raw provider output), or "usage" (W10 Metrics Stage 4:
+    Bedrock's ConverseStream reports token usage in a trailing `metadata`
+    event that arrives AFTER "stop", never combined with it — never forwarded
+    to the browser, internal accounting only)."""
 
     kind: str
     text: Optional[str] = None
     tool_call: Optional[ToolCall] = None
     stop_reason: str = ""
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 class ToolCapableModel(ABC):
@@ -119,14 +130,23 @@ class BedrockConverseToolModel(ToolCapableModel):
             raise ProviderNotConfiguredError("BEDROCK_MODEL_ID is not configured")
         if not self._region:
             raise ProviderNotConfiguredError("AWS_REGION is not configured")
+        # W10 Metrics Stage 4: centrally bounded, not a locally-chosen
+        # number — see libs/agent_budget's "maximum output tokens" bound.
+        # Bedrock's Converse API has no bound at all unless one is supplied,
+        # so before this the eligibility loop's per-turn output was entirely
+        # provider-default, unbounded from this side.
+        self._max_output_tokens = BUDGETS[_METRICS_USE_CASE].max_output_tokens
+
+    @property
+    def model_id(self) -> Optional[str]:
+        return self._model_id
 
     def converse(self, messages: list, tools: list, *, timeout: float) -> ConverseTurn:
         """Timed, counted wrapper around the real Converse call.
 
-        This surface reports NO token usage — Bedrock returns a usage block
-        but `_converse` discards it, so only the call, its categorical
-        outcome and its duration are measured. Recording a zero here would
-        invent a measurement this port never made.
+        W10 Metrics Stage 4: now records real token usage when Bedrock
+        reports one (previously this surface always discarded it — see
+        `_converse`'s own docstring update).
         """
         started = time.monotonic()
         try:
@@ -142,6 +162,7 @@ class BedrockConverseToolModel(ToolCapableModel):
         ai_metrics.record_provider_call(
             use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse",
             outcome="success", duration_seconds=time.monotonic() - started,
+            input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
         )
         return turn
 
@@ -182,7 +203,10 @@ class BedrockConverseToolModel(ToolCapableModel):
             ]
         }
         try:
-            response = client.converse(modelId=self._model_id, messages=messages, toolConfig=tool_config)
+            response = client.converse(
+                modelId=self._model_id, messages=messages, toolConfig=tool_config,
+                inferenceConfig={"maxTokens": self._max_output_tokens},
+            )
         except (ConnectTimeoutError, ReadTimeoutError) as exc:
             raise ProviderTimeoutError(type(exc).__name__) from exc
         except ClientError as exc:
@@ -215,18 +239,25 @@ class BedrockConverseToolModel(ToolCapableModel):
             # controlled provider failure, TYPE only.
             raise ProviderCallError(type(exc).__name__) from exc
 
+        usage = response.get("usage") or {}
         return ConverseTurn(
             text="".join(text_parts) if text_parts else None,
             tool_calls=tool_calls,
             stop_reason=response.get("stopReason", ""),
+            input_tokens=usage.get("inputTokens"),
+            output_tokens=usage.get("outputTokens"),
         )
 
     def converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
         """Timed, counted wrapper around the real streaming Converse call.
 
         Duration here is the WHOLE stream, first byte to last — the natural
-        analogue of the blocking call's round trip. Like the blocking path,
-        no tokens: this port discards the provider's usage block.
+        analogue of the blocking call's round trip. W10 Metrics Stage 4: now
+        records real token usage from the trailing "usage" event (see
+        `_converse_stream`'s docstring) when the stream completed normally —
+        a cancelled or errored stream may never reach that event, so usage
+        stays whatever was last observed (None if the stream never got that
+        far), never invented.
 
         Exactly one outcome is recorded, in the `finally`, once the stream has
         started — review finding AI-PROVIDER-STREAM-CLOSE-MISSING: a plain
@@ -241,9 +272,12 @@ class BedrockConverseToolModel(ToolCapableModel):
         """
         started = time.monotonic()
         outcome = "success"
+        input_tokens = output_tokens = None
         try:
             for event in self._converse_stream(messages, tools, timeout=timeout):
-                yield event
+                if event.kind == "usage":
+                    input_tokens, output_tokens = event.input_tokens, event.output_tokens
+                yield event  # the caller (RawBedrockAgentRuntime) also reads "usage" for durable accounting
         except GeneratorExit:
             outcome = "cancelled"
             raise
@@ -254,6 +288,7 @@ class BedrockConverseToolModel(ToolCapableModel):
             ai_metrics.record_provider_call(
                 use_case=_METRICS_USE_CASE, model_id=self._model_id, operation="converse_stream",
                 outcome=outcome, duration_seconds=time.monotonic() - started,
+                input_tokens=input_tokens, output_tokens=output_tokens,
             )
 
     def _converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
@@ -298,7 +333,10 @@ class BedrockConverseToolModel(ToolCapableModel):
             ]
         }
         try:
-            response = client.converse_stream(modelId=self._model_id, messages=messages, toolConfig=tool_config)
+            response = client.converse_stream(
+                modelId=self._model_id, messages=messages, toolConfig=tool_config,
+                inferenceConfig={"maxTokens": self._max_output_tokens},
+            )
             event_stream = response["stream"]
         except (ConnectTimeoutError, ReadTimeoutError) as exc:
             raise ProviderTimeoutError(type(exc).__name__) from exc
@@ -349,6 +387,16 @@ class BedrockConverseToolModel(ToolCapableModel):
                 elif "messageStop" in event:
                     saw_stop = True
                     yield ConverseStreamEvent(kind="stop", stop_reason=event["messageStop"].get("stopReason", ""))
+                elif "metadata" in event:
+                    # W10 Metrics Stage 4: ConverseStream's usage block
+                    # arrives in a trailing "metadata" event, AFTER
+                    # "messageStop" — never combined with it, so this is a
+                    # separate event kind rather than a field the "stop"
+                    # event could have carried at the time it was yielded.
+                    usage = event["metadata"].get("usage") or {}
+                    yield ConverseStreamEvent(
+                        kind="usage", input_tokens=usage.get("inputTokens"), output_tokens=usage.get("outputTokens"),
+                    )
             if not saw_stop:
                 # The iterator exhausted without ever delivering messageStop
                 # or a recognized error event — a truncated stream must not

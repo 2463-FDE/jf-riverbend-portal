@@ -250,6 +250,34 @@ def test_a_mid_run_provider_failure_degrades_to_a_safe_fallback():
     assert result.label == "fallback"
 
 
+# --- W10 Metrics Stage 4: centrally enforced request bound ------------------
+
+
+def test_an_oversized_question_is_rejected_before_any_provider_call():
+    from libs.agent_budget import BUDGETS
+
+    retriever = _FakeRetriever([[]])
+    model = ScriptedChatModel([_final("should never be reached")])
+    question = "x" * (BUDGETS["policy_navigator_chat"].max_input_chars + 1)
+
+    result = run_policy_navigator(question, scope=_SCOPE, retriever=retriever, model=model)
+
+    assert result.termination_reason == "budget_rejected"
+    assert result.label == "fallback"
+    assert model.calls == 0  # the preflight check ran before any model call
+    assert retriever.calls == []  # and before any retrieval too
+
+
+def test_a_question_within_the_bound_is_not_affected_by_the_preflight_check():
+    chunk = _chunk("SRC-001@1.0#overview", "Coverage stays active until the end of the plan year.")
+    retriever = _FakeRetriever([[chunk]])
+    model = ScriptedChatModel([_tool_call(), _final("Coverage stays active [SRC-001@1.0#overview].")])
+
+    result = run_policy_navigator("A short question", scope=_SCOPE, retriever=retriever, model=model)
+
+    assert result.termination_reason == "answered"
+
+
 # --- W10 Final Stage 3: caller-text scrubbing -------------------------------
 
 

@@ -772,3 +772,57 @@ def test_stream_stopping_early_never_triggers_further_model_or_tool_calls():
     gen.close()
 
     assert first.kind == "delta"
+
+
+# --- W10 Metrics Stage 4: centrally enforced request bound (raw_bedrock only
+# — see the file-level docstring on why the stream tests above are also
+# raw_bedrock-only: langchain_runtime.py is a comparison spike, never wired
+# into a running service, and this preflight check is only wired into the
+# default runtime) --------------------------------------------------------
+
+
+def test_an_oversized_message_is_rejected_before_any_provider_call():
+    from libs.agent_budget import BUDGETS
+
+    memory = FakeVisitMemory()
+    # An EMPTY script: FakeToolCapableModel.converse() raises StopIteration
+    # on its very first call — proof positive the runtime never reached it.
+    model = FakeToolCapableModel([])
+    runtime = RawBedrockAgentRuntime(
+        memory=memory, model=model, tool_config=_CONFIGURED, tool_transport=never_called_transport(),
+    )
+    oversized = "x" * (BUDGETS["eligibility_agent_chat"].max_input_chars + 1)
+
+    result = runtime.handle_message("visit-1", oversized)
+
+    assert result.termination_reason == TerminationReason.BUDGET_REJECTED
+    assert result.turns_used == 0
+
+
+def test_an_oversized_message_is_rejected_before_any_provider_call_streaming():
+    from libs.agent_budget import BUDGETS
+
+    memory = FakeVisitMemory()
+    model = FakeToolCapableModel([])  # empty script — see the non-streaming test above
+    runtime = RawBedrockAgentRuntime(
+        memory=memory, model=model, tool_config=_CONFIGURED, tool_transport=never_called_transport(),
+    )
+    oversized = "x" * (BUDGETS["eligibility_agent_chat"].max_input_chars + 1)
+
+    events = list(runtime.handle_message_stream("visit-1", oversized))
+
+    assert len(events) == 1
+    assert events[0].kind == "error"
+    assert events[0].termination_reason == TerminationReason.BUDGET_REJECTED
+
+
+def test_a_message_within_the_bound_is_not_affected_by_the_preflight_check():
+    memory = FakeVisitMemory()
+    model = FakeToolCapableModel([("text", "Hello there")])
+    runtime = RawBedrockAgentRuntime(
+        memory=memory, model=model, tool_config=_CONFIGURED, tool_transport=never_called_transport(),
+    )
+
+    result = runtime.handle_message("visit-1", "a short message")
+
+    assert result.termination_reason == TerminationReason.ANSWERED

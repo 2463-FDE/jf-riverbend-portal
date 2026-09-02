@@ -265,12 +265,16 @@ class AgentLifecycleEvent(Base):
 
 
 class BedrockUsageEvent(Base):
-    """Durable Bedrock chat usage accounting (migration 037) — see
-    services/records-service/bedrock_usage.py, the only writer. Never a
-    prompt, response, caller question, retrieved text, patient/user id,
-    credential, or raw error — no column here could hold any of those.
-    `cost_usd`/`rate_version` stay NULL together until a real, versioned
-    rate configuration exists (none does yet)."""
+    """Durable Bedrock chat usage accounting (migration 037, widened by 038
+    to admit eligibility_agent_chat) — see services/records-service/
+    bedrock_usage.py, the only writer for this service (services/
+    eligibility-service/bedrock_usage.py writes its own rows the same way).
+    Never a prompt, response, caller question, retrieved text, patient/user
+    id, credential, or raw error — no column here could hold any of those.
+    `cost_usd`/`rate_version` (W10 Metrics Stage 4) are populated together
+    ONLY when libs/bedrock_pricing has an exact rate for the row's model_id;
+    otherwise both stay NULL, permanently — no backfill ever repriced a row
+    after the fact (see that module's docstring)."""
 
     __tablename__ = "bedrock_usage_events"
 
