@@ -296,13 +296,17 @@ jobs:
   # download, failing the job before any scan runs.
   #
   # .trivyignore.*.yaml files are a TEMPORARY, narrow baseline for specific
-  # pre-existing findings — see each file's own header for what it covers,
-  # why, and its expiry (2026-09-02 for all of them). Every entry is scoped
-  # to an exact id + purls/paths; nothing outside that exact scope is
-  # suppressed. The remaining frontend-image baseline is validated before
-  # use so a malformed file fails the build rather than silently ignoring
-  # nothing (or, worse, erroring past `--ignorefile` in a way that skips the
-  # flag). `paths` is
+  # pre-existing findings — see each file's own header for what it covers
+  # and why. Only .trivyignore.frontend-image.yaml remains (its own npm-CLI
+  # findings, renewed through 2026-09-16 after confirming `npm view npm
+  # version` still reports 12.0.2 as latest — see that file's header for
+  # the full renewal record); .trivyignore.deps.yaml's findings were fully
+  # remediated and the file deleted, not left empty or expired-out. Every
+  # entry is scoped to an exact id + purls/paths; nothing outside that
+  # exact scope is suppressed. The remaining frontend-image baseline is
+  # validated before use so a malformed file fails the build rather than
+  # silently ignoring nothing (or, worse, erroring past `--ignorefile` in a
+  # way that skips the flag). `paths` is
   # optional here (not every entry uses it — OS-package findings are scoped
   # by `purls` instead, since Trivy has no file path for a dpkg entry), but
   # `id`, a nonempty `purls` or `paths`, `statement`, and `expired_at` are
@@ -505,11 +509,16 @@ jobs:
         # Blocking, per Option 2: this repo can actually fix a finding here
         # (a dependency bump, a base-image pin), unlike a vendor's own base
         # image. frontend still carries .trivyignore.frontend-image.yaml
-        # (4 findings vendored inside npm's own CLI, no fix published yet
-        # — P5 follow-up, item 1). The 7 Python-based backend images need
-        # no ignorefile at all: item 3 (pinning python:3.12-slim-bookworm
-        # instead of the floating, trixie-resolving python:3.12-slim)
-        # resolved every finding they used to share.
+        # (4 findings vendored inside npm's own CLI — P5 follow-up, item 1).
+        # Renewed through 2026-09-16: `npm view npm version` was re-checked
+        # and 12.0.2 (frontend/Dockerfile's own pin) is still the latest
+        # published npm release, so no fix exists to adopt yet. This is a
+        # short temporary exception, not indefinite — remove the ignorefile
+        # the moment npm publishes a release with these fixes. The 7
+        # Python-based backend images need no ignorefile at all: item 3
+        # (pinning python:3.12-slim-bookworm instead of the floating,
+        # trixie-resolving python:3.12-slim) resolved every finding they
+        # used to share.
         run: |
           set -euo pipefail
           while IFS= read -r image; do
