@@ -54,7 +54,16 @@ def _configure_tracer_provider() -> None:
             try:
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-                exporter = OTLPSpanExporter(endpoint=otlp_endpoint)
+                # W10 metrics Stage 3 (caught by an actual end-to-end
+                # verification, not assumed): passing `endpoint=` explicitly
+                # here used to bypass the SDK's own OTEL_EXPORTER_OTLP_ENDPOINT
+                # handling, which appends the per-signal path (/v1/traces) —
+                # explicit endpoint means "use this exact URL," so every
+                # export 404'd against a collector expecting that path. No
+                # argument here lets the SDK read the same env var itself and
+                # apply that suffix correctly; `otlp_endpoint` above still
+                # decides only whether to attempt this branch at all.
+                exporter = OTLPSpanExporter()
             except Exception as exc:
                 log.warning(
                     "OTLP exporter unavailable, falling back to console (error_type=%s)",

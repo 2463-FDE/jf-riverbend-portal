@@ -1,0 +1,26 @@
+# W10 metrics Stage 3 — Tempo single-process (monolithic), filesystem-backed
+# config for the local observability POC, matching ../loki/loki-config.yaml's
+# own single-binary/local-storage/no-multi-tenant choices. No metrics-
+# generator, no service graphs, no memberlist: those need a real span-metrics
+# pipeline (a Collector connector plus a Prometheus remote_write target) this
+# stage does not build, and an unused, unverified feature toggle is exactly
+# the trap review round 1 of the Stage 2 PR caught once already — traces
+# only, verified end to end, nothing decorative.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal

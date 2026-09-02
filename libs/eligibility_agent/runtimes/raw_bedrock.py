@@ -22,6 +22,7 @@ from typing import Iterable, Iterator, Optional
 from libs.deid.safe_harbor import scrub
 from libs.llm_client.errors import LLMClientError
 from libs.safe_logging import get_safe_logger
+from libs.tracing.spans import record_event, safe_span
 
 from ..bedrock_tool_port import BedrockConverseToolModel, ConverseTurn, ToolCapableModel
 from ..contracts import (
@@ -45,6 +46,7 @@ from ..memory import VisitMemoryPort
 
 log = get_safe_logger(__name__)
 
+_TRACER_NAME = "eligibility_agent"
 _TOOL_SPECS = [VERIFY_TOOL_SPEC, COVERAGE_TOOL_SPEC]
 _ALLOWED_TOOLS = frozenset({VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME})
 
@@ -100,11 +102,21 @@ class RawBedrockAgentRuntime:
             log.warning("agent tool call rejected (reason=unknown_tool)")
             return {"error": "unknown_tool"}, False, context
 
-        result = tools_by_name[call.name].invoke(call.arguments)
-        payload = result.payload
-        if not result.ok:
-            log.warning("agent tool call rejected (reason=%s)", payload.get("error", "invalid"))
-            return payload, False, context
+        # This surface's closest analogue to "retrieval": a bounded external
+        # call fetching payer/coverage evidence, real I/O with real
+        # duration. No correlation_id attribute here (unlike the summary
+        # agent/Policy Navigator equivalents) — threading one through would
+        # mean widening the AgentRuntime protocol both this runtime and the
+        # unused langchain_runtime.py comparison spike implement; this span
+        # still nests correctly under its request's trace via Tempo's own
+        # trace_id grouping, just without its own Loki cross-link.
+        with safe_span(_TRACER_NAME, "eligibility_agent.tool_call", {"tool_name": call.name}) as span:
+            result = tools_by_name[call.name].invoke(call.arguments)
+            payload = result.payload
+            span.set_attribute("outcome", payload.get("outcome", "unknown") if result.ok else "rejected")
+            if not result.ok:
+                log.warning("agent tool call rejected (reason=%s)", payload.get("error", "invalid"))
+                return payload, False, context
 
         # Only a VERIFIED (genuinely new, live) outcome from
         # verify_current_eligibility may update eligibility_status/
@@ -166,32 +178,40 @@ class RawBedrockAgentRuntime:
         eligibility_status: Optional[EligibilityStatus] = context.eligibility_status
 
         for turn in range(1, self._max_turns + 1):
-            try:
-                response = self._model.converse(messages, _TOOL_SPECS, timeout=self._timeout_seconds)
-            except LLMClientError as exc:
-                # The provider-error base — covers timeout, transient, and the
-                # non-retryable/response-shape failures the tool port now
-                # normalizes to ProviderCallError. Any of them must degrade to
-                # a safe PROVIDER_ERROR turn, never escape handle_message.
-                log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
-                return VisitTurnResult(
-                    visit_id=visit_id,
-                    reply=_SAFE_PROVIDER_ERROR_REPLY,
-                    tool_called=tool_called,
-                    eligibility_status=eligibility_status,
-                    termination_reason=TerminationReason.PROVIDER_ERROR,
-                    turns_used=turn,
-                )
+            with safe_span(_TRACER_NAME, "eligibility_agent.provider_call", {"turn": turn}) as span:
+                try:
+                    response = self._model.converse(messages, _TOOL_SPECS, timeout=self._timeout_seconds)
+                except LLMClientError as exc:
+                    # The provider-error base — covers timeout, transient, and the
+                    # non-retryable/response-shape failures the tool port now
+                    # normalizes to ProviderCallError. Any of them must degrade to
+                    # a safe PROVIDER_ERROR turn, never escape handle_message.
+                    log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
+                    span.record_exception_type(type(exc).__name__)
+                    return VisitTurnResult(
+                        visit_id=visit_id,
+                        reply=_SAFE_PROVIDER_ERROR_REPLY,
+                        tool_called=tool_called,
+                        eligibility_status=eligibility_status,
+                        termination_reason=TerminationReason.PROVIDER_ERROR,
+                        turns_used=turn,
+                    )
 
-            if not response.tool_calls:
-                return VisitTurnResult(
-                    visit_id=visit_id,
-                    reply=response.text or "",
-                    tool_called=tool_called,
-                    eligibility_status=eligibility_status,
-                    termination_reason=TerminationReason.ANSWERED,
-                    turns_used=turn,
-                )
+                stop_reason = "tool_use" if response.tool_calls else "end_turn"
+                # A decision is a point-in-time read of the response just
+                # received, not an operation with its own duration — an
+                # event on this real provider-call span, not a second span.
+                record_event(span, "agent_decision", {"turn": turn, "stop_reason": stop_reason})
+
+                if not response.tool_calls:
+                    return VisitTurnResult(
+                        visit_id=visit_id,
+                        reply=response.text or "",
+                        tool_called=tool_called,
+                        eligibility_status=eligibility_status,
+                        termination_reason=TerminationReason.ANSWERED,
+                        turns_used=turn,
+                    )
 
             messages.append({"role": "assistant", "content": _assistant_content(response)})
             tool_result_blocks = []
@@ -263,33 +283,43 @@ class RawBedrockAgentRuntime:
 
         for turn in range(1, self._max_turns + 1):
             collected_tool_calls = []
-            try:
-                for event in self._model.converse_stream(messages, _TOOL_SPECS, timeout=self._timeout_seconds):
-                    if event.kind == "text_delta" and event.text:
-                        yield VisitStreamEvent(kind="delta", text=event.text)
-                    elif event.kind == "tool_call" and event.tool_call is not None:
-                        collected_tool_calls.append(event.tool_call)
-            except LLMClientError as exc:
-                log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
-                yield VisitStreamEvent(
-                    kind="error",
-                    text=_SAFE_PROVIDER_ERROR_REPLY,
-                    tool_called=tool_called,
-                    eligibility_status=eligibility_status,
-                    termination_reason=TerminationReason.PROVIDER_ERROR,
-                    turns_used=turn,
-                )
-                return
+            # Duration here is the WHOLE streamed turn, first byte to the
+            # tool-use/end-turn decision — mirrors bedrock_tool_port.py's own
+            # converse_stream span one layer down (Stage 1's cancellation
+            # handling there is unaffected; safe_span's own GeneratorExit
+            # handling closes this span cleanly on an early gen.close() too).
+            with safe_span(_TRACER_NAME, "eligibility_agent.provider_call", {"turn": turn}) as span:
+                try:
+                    for event in self._model.converse_stream(messages, _TOOL_SPECS, timeout=self._timeout_seconds):
+                        if event.kind == "text_delta" and event.text:
+                            yield VisitStreamEvent(kind="delta", text=event.text)
+                        elif event.kind == "tool_call" and event.tool_call is not None:
+                            collected_tool_calls.append(event.tool_call)
+                except LLMClientError as exc:
+                    log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
+                    span.record_exception_type(type(exc).__name__)
+                    yield VisitStreamEvent(
+                        kind="error",
+                        text=_SAFE_PROVIDER_ERROR_REPLY,
+                        tool_called=tool_called,
+                        eligibility_status=eligibility_status,
+                        termination_reason=TerminationReason.PROVIDER_ERROR,
+                        turns_used=turn,
+                    )
+                    return
 
-            if not collected_tool_calls:
-                yield VisitStreamEvent(
-                    kind="done",
-                    tool_called=tool_called,
-                    eligibility_status=eligibility_status,
-                    termination_reason=TerminationReason.ANSWERED,
-                    turns_used=turn,
-                )
-                return
+                stop_reason = "tool_use" if collected_tool_calls else "end_turn"
+                record_event(span, "agent_decision", {"turn": turn, "stop_reason": stop_reason})
+
+                if not collected_tool_calls:
+                    yield VisitStreamEvent(
+                        kind="done",
+                        tool_called=tool_called,
+                        eligibility_status=eligibility_status,
+                        termination_reason=TerminationReason.ANSWERED,
+                        turns_used=turn,
+                    )
+                    return
 
             messages.append(
                 {"role": "assistant", "content": [

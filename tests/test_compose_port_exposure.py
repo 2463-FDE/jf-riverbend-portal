@@ -46,6 +46,13 @@ _MUST_NOT_PUBLISH = (
     # (http://loki:3100); Alloy only ships logs to Loki and reads the Docker
     # socket — nothing outside the network has a reason to reach either.
     "loki", "alloy",
+    # W10 metrics Stage 3 (observability profile): same reasoning. Tempo is
+    # only ever queried by Grafana (http://tempo:3200) and only ever written
+    # to by otel-collector (OTLP/gRPC, tempo:4317); otel-collector is only
+    # ever written to by backend services (OTLP/HTTP,
+    # OTEL_EXPORTER_OTLP_ENDPOINT). Neither is a human-facing UI and nothing
+    # outside the compose network has a reason to reach either directly.
+    "tempo", "otel-collector",
 )
 
 # Deliberately reachable: the gateway is the entry point, the frontend is the

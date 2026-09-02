@@ -23,6 +23,7 @@ import redis as redis_lib
 
 from config import settings
 from libs.metrics import ai as ai_metrics
+from libs.tracing.spans import new_correlation_id, safe_span
 from libs.eligibility_agent import (
     AgentRuntime,
     RedisVisitMemory,
@@ -78,6 +79,7 @@ def get_agent_runtime() -> Optional[AgentRuntime]:
 
 # Bounded metrics label for this surface.
 _METRICS_USE_CASE = "eligibility_agent_chat"
+_TRACER_NAME = "eligibility_agent"
 
 
 def _record_run(termination_reason) -> None:
@@ -100,21 +102,38 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
     reply if the runtime isn't available, mirroring AgentRuntime.
     handle_message's own "never raise for a provider/tool failure" contract
     — a missing/misconfigured runtime is just another provider failure from
-    the caller's point of view."""
-    runtime = get_agent_runtime()
-    if runtime is None:
-        _record_run(TerminationReason.PROVIDER_ERROR)
-        return VisitTurnResult(
-            visit_id=visit_id,
-            reply=UNAVAILABLE_REPLY,
-            tool_called=False,
-            eligibility_status=None,
-            termination_reason=TerminationReason.PROVIDER_ERROR,
-            turns_used=0,
-        )
-    result = runtime.handle_message(visit_id, message)
-    _record_run(result.termination_reason)
-    return result
+    the caller's point of view.
+
+    W10 metrics Stage 3: also the entry/terminal-outcome span for this
+    turn — provider_call/agent_decision/tool_call spans inside
+    RawBedrockAgentRuntime nest under it via OTel's own ambient context.
+    `correlation_id` is generated fresh here purely to tie this turn's
+    spans together (and, optionally, to a Loki log line); it is never
+    persisted and is unrelated to `visit_id`, which is never used as a
+    span attribute — a visit is a specific patient's specific encounter,
+    the same identifier class agent_provenance.FORBIDDEN_KEYS already
+    excludes from the durable trace.
+    """
+    correlation_id = new_correlation_id()
+    with safe_span(_TRACER_NAME, "eligibility_agent.turn", {"correlation_id": correlation_id}) as span:
+        runtime = get_agent_runtime()
+        if runtime is None:
+            _record_run(TerminationReason.PROVIDER_ERROR)
+            span.set_attribute("termination_reason", TerminationReason.PROVIDER_ERROR.value)
+            return VisitTurnResult(
+                visit_id=visit_id,
+                reply=UNAVAILABLE_REPLY,
+                tool_called=False,
+                eligibility_status=None,
+                termination_reason=TerminationReason.PROVIDER_ERROR,
+                turns_used=0,
+            )
+        result = runtime.handle_message(visit_id, message)
+        _record_run(result.termination_reason)
+        span.set_attribute("termination_reason", getattr(result.termination_reason, "value",
+                                                          result.termination_reason))
+        span.set_attribute("tool_called", result.tool_called)
+        return result
 
 
 _UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitly None"
@@ -153,8 +172,22 @@ def stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEve
     The frontend posts to the streaming route, so this — not
     handle_visit_message — is the path most live eligibility turns take, and
     it must reach `agent_runs_total` or the metric undercounts real usage.
+
+    W10 metrics Stage 3: also the entry/terminal-outcome span for the whole
+    streamed turn, same correlation_id/visit_id reasoning as
+    handle_visit_message. The span stays open for the WHOLE stream (first
+    event to the terminal one) — `safe_span`'s own GeneratorExit handling
+    closes it cleanly if the caller disconnects before a terminal event,
+    the same way `_record_terminal_run` already records no run for that case.
     """
-    yield from _record_terminal_run(_stream_visit_message(visit_id, message))
+    correlation_id = new_correlation_id()
+    with safe_span(_TRACER_NAME, "eligibility_agent.turn", {"correlation_id": correlation_id}) as span:
+        for event in _record_terminal_run(_stream_visit_message(visit_id, message)):
+            if event.kind in _TERMINAL_STREAM_KINDS:
+                span.set_attribute("termination_reason",
+                                   getattr(event.termination_reason, "value", event.termination_reason))
+                span.set_attribute("tool_called", bool(event.tool_called))
+            yield event
 
 
 def _stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEvent]:

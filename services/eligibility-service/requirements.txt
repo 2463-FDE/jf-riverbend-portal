@@ -7,6 +7,9 @@ redis==5.2.1
 # because this service now imports libs.tracing. See libs/tracing/requirements.txt.
 opentelemetry-api==1.29.0
 opentelemetry-sdk==1.29.0
+
+# W10 metrics Stage 3: the actual OTLP/HTTP exporter package libs/tracing/spans.py imports lazily when OTEL_EXPORTER_OTLP_ENDPOINT is set. Never installed anywhere before this stage — every prior OTEL_EXPORTER_OTLP_ENDPOINT reference in this repo silently fell back to the console exporter (the module's own documented degrade-on-ImportError path), so real export was never actually possible until now. Same version as opentelemetry-api/-sdk above; OTel's Python packages are versioned in lockstep.
+opentelemetry-exporter-otlp-proto-http==1.29.0
 # w9-fixes P0 4.6: this service selects the raw_bedrock runtime by default
 # (ELIGIBILITY_AGENT_RUNTIME, unset here), whose bedrock_tool_port.py imports
 # boto3 lazily inside a real Converse call — the leaving-it-unpinned choice
