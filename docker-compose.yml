@@ -467,6 +467,22 @@ services:
         condition: service_started
       roi-service:
         condition: service_started
+      pushgateway:
+        condition: service_started
+
+  # W10 Metrics Stage 5: the batch/opt-in publish path for sanitized RAG
+  # evaluation metrics (libs/rag_eval_metrics) pushes here rather than
+  # exposing its own scrapeable /metrics endpoint, since these are the
+  # result of an occasional offline evaluation run, not a live process
+  # Prometheus can poll on its own schedule. No persistent volume: this is
+  # explicitly ephemeral POC storage — the latest published run is all that
+  # matters, and a restart simply means "no data until the next run". Not
+  # published to the host either (see tests/test_compose_port_exposure.py):
+  # both writers (make rag-eval-publish, inside records-service) and the
+  # one reader (Prometheus) resolve it by compose service name.
+  pushgateway:
+    image: prom/pushgateway:v1.11.3
+    profiles: ["observability"]
 
   loki:
     image: grafana/loki:3.1.1

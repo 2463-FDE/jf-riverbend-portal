@@ -58,3 +58,15 @@ scrape_configs:
         values: ["${INTERNAL_SERVICE_TOKEN}"]
     static_configs:
       - targets: ["eligibility-service:8072"]
+
+  # W10 Metrics Stage 5: scrapes whatever libs/rag_eval_metrics most
+  # recently pushed (an occasional offline evaluation run, never a live
+  # request). honor_labels is required for a Pushgateway target specifically
+  # — without it, Prometheus's own job/instance labels would silently
+  # overwrite the job="rag_eval"/corpus="..." labels each push already set
+  # via its grouping key, collapsing both corpora's series into one.
+  - job_name: pushgateway
+    honor_labels: true
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["pushgateway:9091"]

@@ -1,0 +1,112 @@
+{
+  "id": null,
+  "uid": "rag-evaluation",
+  "title": "RAG Evaluation",
+  "description": "W10 metrics Stage 5 — the latest sanitized, offline batch RAG-evaluation run for each corpus (policy_corpus: db/policy_corpus_evaluate.py; patient_record_corpus: libs/rag_eval/harness.py), pushed opt-in via libs/rag_eval_metrics to the local Pushgateway. Never populated by an interactive request — only `make rag-eval-publish`. No query, answer, document, citation, or case identifier is ever in these series, only aggregate scores/counts.",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Recall@k / Precision@k by corpus",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_recall_at_k", "legendFormat": "recall@k / {{corpus}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_precision_at_k", "legendFormat": "precision@k / {{corpus}}", "refId": "B" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Policy corpus: citation-target and negative-case accuracy",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "negative_case_accuracy: fraction of unanswerable-by-design cases whose retrieval avoided every forbidden/unauthorized hit — see libs/rag_eval_metrics.negative_case_accuracy's explicit definition.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_citation_target_accuracy{corpus=\"policy_corpus\"}", "legendFormat": "citation-target accuracy", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_negative_case_accuracy{corpus=\"policy_corpus\"}", "legendFormat": "negative-case accuracy", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_case_coverage{corpus=\"policy_corpus\"}", "legendFormat": "case coverage", "refId": "C" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Policy corpus: forbidden citation / unauthorized retrieval",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_forbidden_citation_count{corpus=\"policy_corpus\"}", "legendFormat": "forbidden citations", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_unauthorized_retrieval_count{corpus=\"policy_corpus\"}", "legendFormat": "unauthorized retrievals", "refId": "B" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Patient-record corpus: duplicate rate / fragment-coverage gap",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "AUD-09 identity-fragmentation effects on retrieval quality — see libs/rag_eval/metrics.py.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_duplicate_rate{corpus=\"patient_record_corpus\"}", "legendFormat": "duplicate rate", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_fragment_coverage_gap{corpus=\"patient_record_corpus\"}", "legendFormat": "fragment-coverage gap", "refId": "B" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Policy corpus freshness",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "short", "mappings": [{ "type": "value", "options": { "0": { "text": "STALE" }, "1": { "text": "fresh" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_freshness_fresh{corpus=\"policy_corpus\"}", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "Policy corpus: document/chunk parity and freshness issues",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "expected_* comes from the current manifest; database_*/embedded_* from Postgres — a gap between them is exactly what freshness_issues_total counts.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_expected_documents{corpus=\"policy_corpus\"}", "legendFormat": "expected documents", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_database_documents{corpus=\"policy_corpus\"}", "legendFormat": "database documents", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_expected_chunks{corpus=\"policy_corpus\"}", "legendFormat": "expected chunks", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_embedded_chunks{corpus=\"policy_corpus\"}", "legendFormat": "embedded chunks", "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_freshness_issues_total{corpus=\"policy_corpus\"}", "legendFormat": "freshness issues", "refId": "E" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Evaluation age by corpus",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "How long ago the latest published run for each corpus completed — the same expression the RagEvaluationStale alert thresholds against.",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "time() - rag_eval_last_run_timestamp_seconds", "legendFormat": "{{corpus}}", "refId": "A" }]
+    },
+    {
+      "id": 8,
+      "title": "Embedding input tokens / provider retries per run",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_embedding_input_tokens_total", "legendFormat": "input tokens / {{corpus}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_embedding_provider_retry_total", "legendFormat": "provider retries / {{corpus}}", "refId": "B" }
+      ]
+    }
+  ]
+}

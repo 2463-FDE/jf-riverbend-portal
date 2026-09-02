@@ -65,3 +65,54 @@ def test_not_fresh_also_never_constructs_the_provider(monkeypatch):
 
     assert exit_code == 2
     assert fake_conn.closed is True
+
+
+# --- W10 Metrics Stage 5: --publish ----------------------------------------
+
+
+def test_publish_flag_off_by_default_never_pushes_anything(monkeypatch):
+    _no_provider_construction(monkeypatch)
+    monkeypatch.setattr(evaluate_mod.psycopg2, "connect", lambda **kw: _FakeConnection())
+    monkeypatch.setattr(evaluate_mod, "register_vector", lambda conn: None)
+    monkeypatch.setattr(evaluate_mod, "check_corpus_freshness", lambda *a, **kw: _FakeFreshnessReport(False))
+    calls = []
+    monkeypatch.setattr(evaluate_mod, "push_metrics", lambda **kw: calls.append(kw) or True)
+
+    evaluate_mod.main([])
+
+    assert calls == []
+
+
+def test_publish_flag_pushes_freshness_only_metrics_for_a_stale_corpus(monkeypatch):
+    """A stale corpus never runs the full evaluation, but its freshness
+    numbers must still be publishable on their own — see
+    policy_corpus_gauges' `report=None` case."""
+    _no_provider_construction(monkeypatch)
+    monkeypatch.setattr(evaluate_mod.psycopg2, "connect", lambda **kw: _FakeConnection())
+    monkeypatch.setattr(evaluate_mod, "register_vector", lambda conn: None)
+    freshness = _FakeFreshnessReport(False)
+    monkeypatch.setattr(evaluate_mod, "check_corpus_freshness", lambda *a, **kw: freshness)
+    gauge_calls = []
+    monkeypatch.setattr(evaluate_mod, "policy_corpus_gauges", lambda **kw: gauge_calls.append(kw) or {"x": 1.0})
+    push_calls = []
+    monkeypatch.setattr(evaluate_mod, "push_metrics", lambda **kw: push_calls.append(kw) or True)
+    monkeypatch.setenv("RAG_EVAL_PUSHGATEWAY_URL", "http://pushgateway:9091")
+
+    exit_code = evaluate_mod.main(["--publish"])
+
+    assert exit_code == 2
+    assert gauge_calls == [{"freshness": freshness}]
+    assert push_calls == [{"pushgateway_url": "http://pushgateway:9091", "corpus": "policy_corpus", "gauges": {"x": 1.0}}]
+
+
+def test_a_failed_push_never_changes_the_scripts_own_exit_code(monkeypatch):
+    _no_provider_construction(monkeypatch)
+    monkeypatch.setattr(evaluate_mod.psycopg2, "connect", lambda **kw: _FakeConnection())
+    monkeypatch.setattr(evaluate_mod, "register_vector", lambda conn: None)
+    monkeypatch.setattr(evaluate_mod, "check_corpus_freshness", lambda *a, **kw: _FakeFreshnessReport(True))
+    monkeypatch.setattr(evaluate_mod, "policy_corpus_gauges", lambda **kw: {})
+    monkeypatch.setattr(evaluate_mod, "push_metrics", lambda **kw: False)
+
+    exit_code = evaluate_mod.main(["--verify-only", "--publish"])
+
+    assert exit_code == 0  # unchanged from the non-publishing verify-only case

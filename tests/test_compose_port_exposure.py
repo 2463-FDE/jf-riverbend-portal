@@ -53,6 +53,13 @@ _MUST_NOT_PUBLISH = (
     # OTEL_EXPORTER_OTLP_ENDPOINT). Neither is a human-facing UI and nothing
     # outside the compose network has a reason to reach either directly.
     "tempo", "otel-collector",
+    # W10 Metrics Stage 5 (observability profile): same reasoning as
+    # tempo/otel-collector above. Pushgateway is only ever written to by
+    # libs/rag_eval_metrics (via `make rag-eval-publish`, run inside
+    # records-service — compose-network only) and only ever read by
+    # Prometheus's own scrape job (pushgateway:9091). No human-facing UI,
+    # nothing outside the compose network has a reason to reach it directly.
+    "pushgateway",
 )
 
 # Deliberately reachable: the gateway is the entry point, the frontend is the

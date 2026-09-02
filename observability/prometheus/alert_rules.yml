@@ -113,3 +113,31 @@ groups:
         annotations:
           summary: "Bedrock training cost budget exceeded"
           description: "Versioned, exact-rate Bedrock cost has exceeded $5 over the last hour — a local training threshold, not a production spend limit."
+
+      # W10 metrics Stage 5 — built on libs/rag_eval_metrics' opt-in batch
+      # publish (`make rag-eval-publish`). 86400s (24h) is a local training
+      # cadence, not an SLA: this is a once-in-a-while offline evaluation
+      # run, not a live scrape target.
+      - alert: RagEvaluationStaleOrCorpusNotFresh
+        expr: |
+          (time() - rag_eval_last_run_timestamp_seconds) > 86400
+          or
+          rag_corpus_freshness_fresh == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAG evaluation is stale or a corpus is not fresh"
+          description: "Either no batch RAG evaluation has published for a corpus in over 24 hours, or the policy corpus's manifest/database parity check reports it is not fresh."
+
+      - alert: RagForbiddenOrUnauthorizedRetrieval
+        expr: |
+          rag_eval_forbidden_citation_count > 0
+          or
+          rag_eval_unauthorized_retrieval_count > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RAG evaluation found a forbidden or unauthorized retrieval"
+          description: "The latest published policy-corpus evaluation recorded at least one forbidden citation or unauthorized (role-scope-violating) retrieval — never expected to be non-zero."
