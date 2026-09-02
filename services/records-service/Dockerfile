@@ -52,6 +52,17 @@ COPY db/policy_corpus_evaluate.py ./db/policy_corpus_evaluate.py
 COPY docs/client-inputs/2026-08-24/evaluations/retrieval-evaluations.jsonl ./docs/client-inputs/2026-08-24/evaluations/retrieval-evaluations.jsonl
 COPY docs/client-inputs/2026-08-24/evaluations/citation-aliases.json ./docs/client-inputs/2026-08-24/evaluations/citation-aliases.json
 
+# W10 Metrics Stage 5 completion-gate fix: `make rag-eval-publish`'s
+# patient-record-corpus half (python3 -m libs.rag_eval.harness --publish)
+# reads these three fixed, synthetic seed fixtures directly off disk
+# (libs/rag_corpus/corpus.py, libs/rag_eval/identity_proxy.py,
+# libs/rag_eval/clinical_fields.py, libs/rag_eval/goldset.py) — never real
+# patient data, the same deterministic generator inputs db/seed/
+# generate_seed.py already produces seed.sql from.
+COPY db/seed/patients.csv ./db/seed/patients.csv
+COPY db/seed/encounters.csv ./db/seed/encounters.csv
+COPY db/seed/goldset.json ./db/seed/goldset.json
+
 # roles_config.py resolves <module dir>/../../config/roles.yaml, so the signed
 # permission matrix must sit two levels above /app/roles_config.py — i.e.
 # /config/roles.yaml. Without it every authorized route would fail at request
