@@ -105,8 +105,10 @@ if __name__ == "__main__":
     report = run_eval(embedding_client=client)
     print(render_markdown(report))
     if opts.publish:
+        # This corpus has no freshness concept of its own — always kind=
+        # "evaluation" (see libs/rag_eval_metrics.patient_record_corpus_gauges).
         published = push_metrics(
-            pushgateway_url=os.getenv("RAG_EVAL_PUSHGATEWAY_URL", ""), corpus="patient_record_corpus",
+            pushgateway_url=os.getenv("RAG_EVAL_PUSHGATEWAY_URL", ""), corpus="patient_record_corpus", kind="evaluation",
             gauges=patient_record_corpus_gauges(report=report, embedding_client=client),
         )
         print(f"published={published}")

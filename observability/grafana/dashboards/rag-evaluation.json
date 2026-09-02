@@ -12,27 +12,29 @@
   "panels": [
     {
       "id": 1,
-      "title": "Recall@k / Precision@k by corpus",
+      "title": "Recall@k / Precision@k / MRR by corpus",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "rag_eval_mrr: mean reciprocal rank over runnable/gold cases — absent (not zero) when a corpus has no runnable case to rank at all.",
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_recall_at_k", "legendFormat": "recall@k / {{corpus}}", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_precision_at_k", "legendFormat": "precision@k / {{corpus}}", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_precision_at_k", "legendFormat": "precision@k / {{corpus}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_mrr", "legendFormat": "MRR / {{corpus}}", "refId": "C" }
       ]
     },
     {
       "id": 2,
-      "title": "Policy corpus: citation-target and negative-case accuracy",
+      "title": "Policy corpus: citation-target accuracy and negative-case retrieval safety",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
-      "description": "negative_case_accuracy: fraction of unanswerable-by-design cases whose retrieval avoided every forbidden/unauthorized hit — see libs/rag_eval_metrics.negative_case_accuracy's explicit definition.",
+      "description": "rag_eval_negative_case_retrieval_safety_rate: fraction of unanswerable-by-design cases whose RETRIEVAL avoided every forbidden/unauthorized hit — see libs/rag_eval_metrics.negative_case_retrieval_safety_rate's docstring. This measures retrieval restraint only, NOT agent refusal-wording correctness (no agent runs as part of this evaluation).",
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_citation_target_accuracy{corpus=\"policy_corpus\"}", "legendFormat": "citation-target accuracy", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_negative_case_accuracy{corpus=\"policy_corpus\"}", "legendFormat": "negative-case accuracy", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_negative_case_retrieval_safety_rate{corpus=\"policy_corpus\"}", "legendFormat": "negative-case retrieval safety rate", "refId": "B" },
         { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_case_coverage{corpus=\"policy_corpus\"}", "legendFormat": "case coverage", "refId": "C" }
       ]
     },
@@ -88,13 +90,16 @@
     },
     {
       "id": 7,
-      "title": "Evaluation age by corpus",
+      "title": "Evaluation age / freshness-check age by corpus",
       "type": "stat",
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
-      "description": "How long ago the latest published run for each corpus completed — the same expression the RagEvaluationStale alert thresholds against.",
+      "description": "Two INDEPENDENT ages, matching the two independent alerts: how long ago the last COMPLETED evaluation published (RagEvaluationStaleOrMissing's expression) vs. how long ago the policy corpus's freshness check last ran (RagCorpusFreshnessCheckStaleOrNotFresh's). A stale/verify-only run advances only the second.",
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "time() - rag_eval_last_run_timestamp_seconds", "legendFormat": "{{corpus}}", "refId": "A" }]
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "time() - rag_eval_last_run_timestamp_seconds", "legendFormat": "evaluation age / {{corpus}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "time() - rag_corpus_freshness_checked_at_seconds", "legendFormat": "freshness-check age / {{corpus}}", "refId": "B" }
+      ]
     },
     {
       "id": 8,

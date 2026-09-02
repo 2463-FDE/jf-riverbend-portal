@@ -31,7 +31,11 @@ from libs.policy_corpus.evaluation import (  # noqa: E402
 )
 from libs.policy_corpus.manifest import load_manifest  # noqa: E402
 from libs.policy_navigator import scope_for_role  # noqa: E402
-from libs.rag_eval_metrics import policy_corpus_gauges, push_metrics  # noqa: E402
+from libs.rag_eval_metrics import (  # noqa: E402
+    policy_corpus_evaluation_gauges,
+    policy_corpus_freshness_gauges,
+    push_metrics,
+)
 
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
 _MANIFEST = os.path.join(_ROOT, "docs", "RagDocs", "manifest.json")
@@ -72,9 +76,14 @@ def main(argv=None) -> int:
         output = {"freshness": freshness.as_dict()}
         if not freshness.is_fresh or args.verify_only:
             if args.publish:
+                # Freshness-only: no evaluation ran, so ONLY the freshness
+                # snapshot/timestamp is touched — kind="evaluation"'s last
+                # completed-run metrics (a prior successful run's
+                # recall/precision/etc.) are never overwritten by this push;
+                # see libs/rag_eval_metrics' module docstring.
                 output["published"] = push_metrics(
                     pushgateway_url=os.getenv("RAG_EVAL_PUSHGATEWAY_URL", ""),
-                    corpus="policy_corpus", gauges=policy_corpus_gauges(freshness=freshness),
+                    corpus="policy_corpus", kind="freshness", gauges=policy_corpus_freshness_gauges(freshness=freshness),
                 )
             print(json.dumps(output, indent=2, sort_keys=True))
             return 0 if freshness.is_fresh else 2
@@ -108,13 +117,22 @@ def main(argv=None) -> int:
             }
         )
         if args.publish:
-            # The VECTOR report — the real retriever's own performance — is
-            # what gets published; keyword_report is a comparison baseline
-            # only, never mistaken for the navigator's actual behavior.
-            output["published"] = push_metrics(
-                pushgateway_url=os.getenv("RAG_EVAL_PUSHGATEWAY_URL", ""), corpus="policy_corpus",
-                gauges=policy_corpus_gauges(freshness=freshness, report=vector_report, embedding_client=embedding_client),
+            # A full run publishes BOTH snapshots: freshness (re-checked
+            # above to decide this run should proceed at all) and the
+            # completed evaluation. The VECTOR report — the real retriever's
+            # own performance — is what gets published; keyword_report is a
+            # comparison baseline only, never mistaken for the navigator's
+            # actual behavior.
+            gateway_url = os.getenv("RAG_EVAL_PUSHGATEWAY_URL", "")
+            freshness_published = push_metrics(
+                pushgateway_url=gateway_url, corpus="policy_corpus", kind="freshness",
+                gauges=policy_corpus_freshness_gauges(freshness=freshness),
             )
+            evaluation_published = push_metrics(
+                pushgateway_url=gateway_url, corpus="policy_corpus", kind="evaluation",
+                gauges=policy_corpus_evaluation_gauges(report=vector_report, embedding_client=embedding_client),
+            )
+            output["published"] = {"freshness": freshness_published, "evaluation": evaluation_published}
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0 if not vector_report.unauthorized_retrieval_count and not vector_report.forbidden_citation_count else 3
     finally:

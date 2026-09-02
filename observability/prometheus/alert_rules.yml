@@ -118,17 +118,42 @@ groups:
       # publish (`make rag-eval-publish`). 86400s (24h) is a local training
       # cadence, not an SLA: this is a once-in-a-while offline evaluation
       # run, not a live scrape target.
-      - alert: RagEvaluationStaleOrCorpusNotFresh
+      #
+      # TWO separate alerts, not one, deliberately: an EVALUATION (recall/
+      # precision/etc.) and a FRESHNESS CHECK (manifest/database parity) are
+      # independent snapshots published under independent Pushgateway
+      # grouping keys and independent timestamps (see libs/rag_eval_metrics'
+      # module docstring) — a stale/missing evaluation says nothing about
+      # whether the corpus itself is fresh, and vice versa. Each `absent(...)
+      # == 1` branch is what makes a completely clean Pushgateway (nothing
+      # ever published) alert too: a bare staleness comparison against a
+      # metric that doesn't exist produces NO series at all, not a true
+      # condition, so it would otherwise never fire for that case.
+      - alert: RagEvaluationStaleOrMissing
         expr: |
+          absent(rag_eval_last_run_timestamp_seconds) == 1
+          or
           (time() - rag_eval_last_run_timestamp_seconds) > 86400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAG evaluation is missing or stale"
+          description: "No batch RAG evaluation has ever published, or none has published in over 24 hours."
+
+      - alert: RagCorpusFreshnessCheckStaleOrNotFresh
+        expr: |
+          absent(rag_corpus_freshness_checked_at_seconds) == 1
+          or
+          (time() - rag_corpus_freshness_checked_at_seconds) > 86400
           or
           rag_corpus_freshness_fresh == 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "RAG evaluation is stale or a corpus is not fresh"
-          description: "Either no batch RAG evaluation has published for a corpus in over 24 hours, or the policy corpus's manifest/database parity check reports it is not fresh."
+          summary: "Policy corpus freshness check is missing, stale, or not fresh"
+          description: "No corpus freshness check has ever published, none has published in over 24 hours, or the most recent one reports the corpus is not fresh."
 
       - alert: RagForbiddenOrUnauthorizedRetrieval
         expr: |

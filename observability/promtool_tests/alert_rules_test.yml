@@ -271,7 +271,36 @@ tests:
         alertname: BedrockTrainingCostBudgetExceeded
         exp_alerts: []
 
-  # --- RagEvaluationStaleOrCorpusNotFresh (W10 metrics Stage 5) -----------
+  # --- RagEvaluationStaleOrMissing (W10 metrics Stage 5) ------------------
+
+  - interval: 1m
+    input_series:
+      # A completely clean Pushgateway: rag_eval_last_run_timestamp_seconds
+      # has NEVER been pushed at all. A bare staleness comparison against a
+      # metric that doesn't exist yields no series (never fires) — only the
+      # absent() branch catches this, which is exactly what this case proves.
+      - series: 'up{job="unrelated"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RagEvaluationStaleOrMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "RAG evaluation is missing or stale"
+              description: "No batch RAG evaluation has ever published, or none has published in over 24 hours."
+
+  - interval: 1m
+    input_series:
+      # The timestamp advances roughly in step with the synthetic clock —
+      # "age" stays near zero the whole time, must never fire on staleness.
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: RagEvaluationStaleOrMissing
+        exp_alerts: []
 
   - interval: 1m
     input_series:
@@ -281,49 +310,85 @@ tests:
         values: "-200000+0x30"
     alert_rule_test:
       - eval_time: 3m
-        alertname: RagEvaluationStaleOrCorpusNotFresh
+        alertname: RagEvaluationStaleOrMissing
         exp_alerts: []
       - eval_time: 10m
-        alertname: RagEvaluationStaleOrCorpusNotFresh
+        alertname: RagEvaluationStaleOrMissing
         exp_alerts:
           - exp_labels:
               severity: warning
               corpus: policy_corpus
             exp_annotations:
-              summary: "RAG evaluation is stale or a corpus is not fresh"
-              description: "Either no batch RAG evaluation has published for a corpus in over 24 hours, or the policy corpus's manifest/database parity check reports it is not fresh."
+              summary: "RAG evaluation is missing or stale"
+              description: "No batch RAG evaluation has ever published, or none has published in over 24 hours."
+
+  # --- RagCorpusFreshnessCheckStaleOrNotFresh (W10 metrics Stage 5) -------
 
   - interval: 1m
     input_series:
-      # The timestamp advances roughly in step with the synthetic clock —
-      # "age" stays near zero the whole time, must never fire on staleness.
-      - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
+      # A completely clean Pushgateway: no freshness check has ever published.
+      - series: 'up{job="unrelated"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RagCorpusFreshnessCheckStaleOrNotFresh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Policy corpus freshness check is missing, stale, or not fresh"
+              description: "No corpus freshness check has ever published, none has published in over 24 hours, or the most recent one reports the corpus is not fresh."
+
+  - interval: 1m
+    input_series:
+      # Recently checked AND fresh — must never fire.
+      - series: 'rag_corpus_freshness_checked_at_seconds{corpus="policy_corpus"}'
         values: "0+60x30"
       - series: 'rag_corpus_freshness_fresh{corpus="policy_corpus"}'
         values: "1x30"
     alert_rule_test:
       - eval_time: 25m
-        alertname: RagEvaluationStaleOrCorpusNotFresh
+        alertname: RagCorpusFreshnessCheckStaleOrNotFresh
         exp_alerts: []
 
   - interval: 1m
     input_series:
-      # Freshly published (age near zero) but the corpus itself is stale —
-      # the "or" must still fire on this branch alone.
-      - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
-        values: "0+60x30"
+      # The check itself is stale (far-in-the-past checked_at), even though
+      # the last known freshness value was "fresh" — the check going stale
+      # must fire on its own, independent of the value it last reported.
+      - series: 'rag_corpus_freshness_checked_at_seconds{corpus="policy_corpus"}'
+        values: "-200000+0x30"
       - series: 'rag_corpus_freshness_fresh{corpus="policy_corpus"}'
-        values: "0x30"
+        values: "1x30"
     alert_rule_test:
       - eval_time: 10m
-        alertname: RagEvaluationStaleOrCorpusNotFresh
+        alertname: RagCorpusFreshnessCheckStaleOrNotFresh
         exp_alerts:
           - exp_labels:
               severity: warning
               corpus: policy_corpus
             exp_annotations:
-              summary: "RAG evaluation is stale or a corpus is not fresh"
-              description: "Either no batch RAG evaluation has published for a corpus in over 24 hours, or the policy corpus's manifest/database parity check reports it is not fresh."
+              summary: "Policy corpus freshness check is missing, stale, or not fresh"
+              description: "No corpus freshness check has ever published, none has published in over 24 hours, or the most recent one reports the corpus is not fresh."
+
+  - interval: 1m
+    input_series:
+      # Freshly checked (age near zero) but the corpus itself is not fresh —
+      # the "or" must still fire on this branch alone.
+      - series: 'rag_corpus_freshness_checked_at_seconds{corpus="policy_corpus"}'
+        values: "0+60x30"
+      - series: 'rag_corpus_freshness_fresh{corpus="policy_corpus"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RagCorpusFreshnessCheckStaleOrNotFresh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              corpus: policy_corpus
+            exp_annotations:
+              summary: "Policy corpus freshness check is missing, stale, or not fresh"
+              description: "No corpus freshness check has ever published, none has published in over 24 hours, or the most recent one reports the corpus is not fresh."
 
   # --- RagForbiddenOrUnauthorizedRetrieval (W10 metrics Stage 5) ----------
 
