@@ -17,13 +17,29 @@ import type { VisitStreamEvent } from "../lib/types";
 // w-9-2-planner P1b: send() now reads the streaming endpoint
 // (/api/visits/[id]/messages/stream) instead of waiting for one complete
 // JSON response — each newline-delimited "delta" event is appended to the
-// assistant's turn as it arrives. Only "delta" text ever renders; a "done"/
-// "error" line's own metadata (tool_called/eligibility_status/etc.) is not
-// displayed here — same as before, this UI only ever showed the reply text.
+// assistant's turn as it arrives. Only "delta" text ever renders as the
+// reply body; a "done"/"error" line's own metadata is not shown as text.
+//
+// The reply text itself is now rendered server-side from the tool payload
+// (libs/eligibility_agent/response_contract.py) — at most three plain
+// sentences, never markdown — so this component still needs nothing but a
+// plain-text render. The one addition is the terminal event's structured
+// `eligibility_status`, shown as a compact badge instead of being dropped;
+// the rest of that event's metadata stays out of the UI as before, and no
+// payload is ever rendered.
 const MAX_MESSAGE_LENGTH = 2000;
 
 type Turn = { role: "user" | "assistant"; text: string };
 type Phase = "idle" | "sending" | "unavailable";
+type EligibilityStatusValue = NonNullable<VisitStreamEvent["eligibility_status"]>;
+
+const STATUS_TONE: Record<EligibilityStatusValue, string> = {
+  active: "rb-badge--ok",
+  inactive: "rb-badge--bad",
+  pending: "rb-badge--info",
+  stale: "rb-badge--warn",
+  unknown: "rb-badge--warn",
+};
 
 export default function EligibilityChat({ appointmentId }: { appointmentId: number }) {
   const [open, setOpen] = useState(false);
@@ -31,6 +47,7 @@ export default function EligibilityChat({ appointmentId }: { appointmentId: numb
   const [input, setInput] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [deniedReason, setDeniedReason] = useState<string | null>(null);
+  const [status, setStatus] = useState<EligibilityStatusValue | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Cancellation (w-9-2-planner P1b): if the chat panel closes or the
@@ -50,6 +67,8 @@ export default function EligibilityChat({ appointmentId }: { appointmentId: numb
     setInput("");
     setPhase("sending");
     setDeniedReason(null);
+    // A previous turn's status must never linger next to a new question.
+    setStatus(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -110,6 +129,11 @@ export default function EligibilityChat({ appointmentId }: { appointmentId: numb
             appendDelta(event.text);
           } else if (event.kind === "done") {
             terminal = "done";
+            // Structured terminal metadata only — a known status value or
+            // nothing. The event's other fields are never rendered.
+            if (event.eligibility_status && event.eligibility_status in STATUS_TONE) {
+              setStatus(event.eligibility_status);
+            }
           } else if (event.kind === "error") {
             terminal = "error";
             errorText = event.text ?? null;
@@ -154,6 +178,11 @@ export default function EligibilityChat({ appointmentId }: { appointmentId: numb
           <div key={i} className={`rb-alert${turn.role === "assistant" ? "" : " rb-alert--ok"}`} role="status">
             <strong>{turn.role === "user" ? "You: " : "Assistant: "}</strong>
             {turn.text}
+            {turn.role === "assistant" && status && i === turns.length - 1 && (
+              <span className={`rb-badge ${STATUS_TONE[status]}`} style={{ marginLeft: 8 }}>
+                {status}
+              </span>
+            )}
           </div>
         ))}
         {phase === "sending" && (
