@@ -78,3 +78,15 @@ db/
 # policy_corpus_evaluate.py so `make rag-eval-publish` can run its
 # --publish flag via `docker compose exec`.
 !db/policy_corpus_evaluate.py
+# W10 Metrics Stage 5 completion-gate fix: `make rag-eval-publish`'s
+# patient-record-corpus half (libs/rag_eval/harness.py, via libs/rag_corpus
+# and libs/rag_eval's own identity/clinical-field lookups) reads these three
+# fixed, synthetic seed fixtures directly off disk — this was never
+# exercised inside a container before, only on a host checkout, so the gap
+# went unnoticed until a real run. Same deterministic generator inputs
+# db/seed/generate_seed.py already produces seed.sql from; never real
+# patient data.
+!db/seed/
+!db/seed/patients.csv
+!db/seed/encounters.csv
+!db/seed/goldset.json
