@@ -15,3 +15,23 @@ datasources:
     access: proxy
     url: http://loki:3100
     editable: false
+    jsonData:
+      # W10 metrics Stage 2 (pulled forward from Stage 3's trace-to-log
+      # navigation requirement, since this dashboard's diff landed under
+      # the 700-line floor). correlation_id is already emitted as Loki
+      # structured metadata, never a label (observability/alloy/config.alloy)
+      # — this turns it into a clickable link in any log line, in the new AI
+      # Agent Observability dashboard's logs panel and anywhere else Loki is
+      # browsed. The link re-queries Loki for every line sharing that
+      # correlation_id across services, which is log-to-log correlation
+      # today. Stage 3 extends this SAME mechanism with a second
+      # derivedField (a trace_id regex pointed at a `tempo_ds` datasource)
+      # for genuine trace-to-log navigation once Tempo exists — not added
+      # here, since provisioning a datasource for a backend this stage
+      # never starts would just show as an unhealthy, unrelated datasource.
+      derivedFields:
+        - datasourceUid: loki_ds
+          matcherRegex: 'correlation_id=(\S+)'
+          name: correlation_id
+          url: '{service=~".+"} | correlation_id="${__value.raw}"'
+          urlDisplayLabel: "View all logs for this correlation_id"
