@@ -212,6 +212,12 @@ services:
       # and the ${VAR:?...} form makes a missing value stop compose rather
       # than start a service that 401s every real request.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set in .env — see docs/runbook.md § Required one-time setup}
+      # W10 metrics Stage 3: .env's own OTEL_SERVICE_NAME is ONE shared
+      # value passed to every service via env_file — overridden here so
+      # this service's spans (the eligibility assistant's agent loop) are
+      # actually attributable to it in Tempo, rather than every traced
+      # service showing up under the same generic name.
+      OTEL_SERVICE_NAME: eligibility-service
     depends_on:
       redis:
         condition: service_started
@@ -254,6 +260,10 @@ services:
       PHI_ACTIVE_KEY_VERSION: ${PHI_ACTIVE_KEY_VERSION:?PHI_ACTIVE_KEY_VERSION must be set in .env — see adr/0012}
       PHI_ENCRYPTION_KEY_V1: ${PHI_ENCRYPTION_KEY_V1:?PHI_ENCRYPTION_KEY_V1 must be set in .env — see adr/0012}
       PHI_BLIND_INDEX_KEY_V1: ${PHI_BLIND_INDEX_KEY_V1:?PHI_BLIND_INDEX_KEY_V1 must be set in .env — see adr/0012}
+      # W10 metrics Stage 3: see eligibility-service's identical entry
+      # above — this service hosts the summary agent and Policy Navigator,
+      # so its spans need their own distinct service.name too.
+      OTEL_SERVICE_NAME: records-service
     ports:
       - "8073:8073"
     depends_on:
@@ -453,6 +463,26 @@ services:
     depends_on:
       - loki
 
+  # W10 metrics Stage 3 — services -> OTLP HTTP -> otel-collector -> tempo ->
+  # Grafana. Traces only; metrics stay on Prometheus's own scrape path
+  # (Stage 1/2), never duplicated through this pipeline.
+  tempo:
+    image: grafana/tempo:3.0.3
+    profiles: ["observability"]
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.159.0
+    profiles: ["observability"]
+    volumes:
+      - ./observability/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    depends_on:
+      - tempo
+
   grafana:
     image: grafana/grafana:11.2.0
     profiles: ["observability"]
@@ -468,8 +498,10 @@ services:
     depends_on:
       - prometheus
       - loki
+      - tempo
 
 volumes:
   pgdata:
   prometheus_data:
   loki_data:
+  tempo_data:

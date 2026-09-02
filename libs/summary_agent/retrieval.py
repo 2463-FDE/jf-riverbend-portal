@@ -30,10 +30,12 @@ from typing import Optional
 from libs.agent_provenance import TraceRecorder
 from libs.policy_corpus import RetrievalLedger, RetrievalScope
 from libs.safe_logging import get_safe_logger
+from libs.tracing.spans import safe_span
 
 log = get_safe_logger(__name__)
 
 TOOL_NAME = "retrieve_approved_documents"
+_TRACER_NAME = "summary_agent"
 
 
 @dataclass(frozen=True)
@@ -80,11 +82,19 @@ def retrieve(
     retrieval problem must never crash the fallback path, which has no
     other safety net once `_default_model()` has already failed."""
     chunks = []
+    correlation_id = getattr(trace, "correlation_id", None)
     if retriever is not None:
-        try:
-            chunks = retriever.retrieve(query, scope, limits.max_documents)
-        except Exception as exc:
-            log.warning("summary agent retrieval failed (error_type=%s)", type(exc).__name__)
+        # A real span only when a real retrieval attempt happens — never
+        # fabricated for a run that had no retriever to call (W10 metrics
+        # Stage 3: "spans ... where those stages actually occur").
+        with safe_span(_TRACER_NAME, "summary_agent.retrieval",
+                       {"correlation_id": correlation_id} if correlation_id else {}) as span:
+            try:
+                chunks = retriever.retrieve(query, scope, limits.max_documents)
+                span.set_attribute("document_count", len(chunks))
+            except Exception as exc:
+                log.warning("summary agent retrieval failed (error_type=%s)", type(exc).__name__)
+                span.record_exception_type(type(exc).__name__)
 
     payload, kept, budget = [], [], limits.max_characters
     for chunk in chunks:

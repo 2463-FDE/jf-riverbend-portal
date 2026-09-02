@@ -24,6 +24,7 @@ from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from libs.metrics import ai as ai_metrics
 from libs.policy_corpus import RetrievalScope
 from libs.safe_logging import get_safe_logger
+from libs.tracing.spans import record_event, safe_span
 
 from .contracts import (
     MAX_SUMMARY_CHARACTERS,
@@ -45,6 +46,7 @@ DEFAULT_MAX_TURNS = 4
 # `bedrock_usage_events.use_case` written by summary_agent_path.py, so a
 # Prometheus series and a database row describe the same thing.
 METRICS_USE_CASE = "summary_agent_chat"
+_TRACER_NAME = "summary_agent"
 
 SYSTEM_PROMPT = """You write short, factual summaries for Riverbend Community Health.
 
@@ -123,27 +125,40 @@ def _trace_middleware(trace: TraceRecorder, model_id: Optional[str], label: Prov
             self.turn += 1
             started = time.monotonic()
             elapsed = lambda: int((time.monotonic() - started) * 1000)
-            try:
-                response = handler(request)
-            except Exception as exc:
-                # The TYPE only: a provider error message can quote the payload
-                # that caused it, which is the one thing that must not persist.
-                trace.provider_call(label=label, model_id=model_id, latency_ms=elapsed(),
-                                    error_type=type(exc).__name__)
-                # The exception type is NOT a metric label — it is unbounded and
-                # can carry provider detail. Only the categorical outcome is.
-                ai_metrics.record_provider_call(
-                    use_case=METRICS_USE_CASE, model_id=model_id, outcome="provider_error",
-                    duration_seconds=elapsed() / 1000.0,
-                )
-                raise
-            trace.provider_call(label=label, model_id=model_id, latency_ms=elapsed())
-            call_duration_seconds = elapsed() / 1000.0
-            messages = getattr(response, "result", None) or [response]
-            ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
-            calls = list(getattr(ai, "tool_calls", None) or []) if ai else []
-            trace.agent_decision(tool_name=calls[0]["name"] if calls else None, turn=self.turn,
-                                 stop_reason="tool_use" if calls else "end_turn")
+            correlation_id = trace.correlation_id
+            span_attrs = {"correlation_id": correlation_id, "turn": self.turn,
+                         "model": model_id or ai_metrics.UNCONFIGURED}
+            with safe_span(_TRACER_NAME, "summary_agent.provider_call", span_attrs) as pspan:
+                try:
+                    response = handler(request)
+                except Exception as exc:
+                    # The TYPE only: a provider error message can quote the payload
+                    # that caused it, which is the one thing that must not persist.
+                    trace.provider_call(label=label, model_id=model_id, latency_ms=elapsed(),
+                                        error_type=type(exc).__name__)
+                    # The exception type is NOT a metric label — it is unbounded and
+                    # can carry provider detail. Only the categorical outcome is.
+                    ai_metrics.record_provider_call(
+                        use_case=METRICS_USE_CASE, model_id=model_id, outcome="provider_error",
+                        duration_seconds=elapsed() / 1000.0,
+                    )
+                    raise
+                trace.provider_call(label=label, model_id=model_id, latency_ms=elapsed())
+                call_duration_seconds = elapsed() / 1000.0
+                messages = getattr(response, "result", None) or [response]
+                ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+                calls = list(getattr(ai, "tool_calls", None) or []) if ai else []
+                stop_reason = "tool_use" if calls else "end_turn"
+                trace.agent_decision(tool_name=calls[0]["name"] if calls else None, turn=self.turn,
+                                     stop_reason=stop_reason)
+                # A decision is a point-in-time read of the response just
+                # received, not an operation with its own duration — an
+                # event on the real provider-call span it belongs to, not a
+                # second span pretending to have elapsed time of its own.
+                record_event(pspan, "agent_decision", {
+                    "turn": self.turn, "stop_reason": stop_reason,
+                    "tool_name": calls[0]["name"] if calls else "none",
+                })
             # W10 Final Stage 5 sub-slice 3: only ever record usage for a
             # REAL provider call — never a fixture/scripted test model, even
             # one that happens to set usage_metadata itself.

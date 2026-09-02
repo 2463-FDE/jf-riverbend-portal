@@ -16,6 +16,7 @@ from libs.agent_provenance import ProvenanceLabel, TraceRecorder
 from libs.policy_corpus import RetrievalScope
 from libs.summary_agent import RetrievalLimits, ValidationOutcome, validate_draft
 from libs.summary_agent.runtime import run_summary_agent
+from libs.tracing.spans import safe_span
 
 import agent_drafts
 import agent_lifecycle
@@ -29,6 +30,7 @@ DEFAULT_AUDIENCE = "patient"
 _WORKFLOW = "patient_summary"
 _PROVIDER = "bedrock"
 _USE_CASE = "summary_agent_chat"
+_TRACER_NAME = "records-service.summary_agent_path"
 
 
 @dataclass
@@ -117,46 +119,73 @@ def generate_draft(
     """
     trace = trace or TraceRecorder(correlation_id)
     scope = RetrievalScope(audiences=(audience,), workflows=(_WORKFLOW,))
-    conn = None
-    if retriever is None:
-        retriever, conn = _build_retriever()
-    try:
-        result = run_summary_agent(
-            scope=scope, retriever=retriever, actor_role=actor_role, trace=trace, model=model,
-            label=label, limits=limits,
-        )
-    finally:
-        if conn is not None:
-            conn.close()
-    outcome = validate_draft(result.draft, result.ledger)
+    # W10 metrics Stage 3: entry span for the whole generate-validate-persist
+    # request. run_summary_agent's own span (provider_call/agent_decision/
+    # retrieval nested inside it) and agent_lifecycle.persist's own span both
+    # open naturally as CHILDREN of this one via OTel's ambient context —
+    # no span object is threaded through any of these calls by hand. This
+    # span's own close, below, IS the terminal outcome: accepted/refused and
+    # the provenance label the request actually ended with.
+    with safe_span(_TRACER_NAME, "summary_agent_path.generate_draft",
+                   {"correlation_id": correlation_id, "actor_role": actor_role}) as span:
+        conn = None
+        if retriever is None:
+            retriever, conn = _build_retriever()
+        try:
+            result = run_summary_agent(
+                scope=scope, retriever=retriever, actor_role=actor_role, trace=trace, model=model,
+                label=label, limits=limits,
+            )
+        finally:
+            if conn is not None:
+                conn.close()
 
-    draft = agent_drafts.create_draft(
-        db, patient_id=patient_id, generated_text=result.draft.summary,
-        correlation_id=correlation_id, provenance_label=result.label.value,
-        model_id=result.model_id, prompt_version=result.prompt_version,
-        citations=result.citations, trace=trace,
-    )
-    agent_drafts.record_validation(
-        db, draft, passed=outcome.passed, validation_code=outcome.refusal_code, trace=trace,
-    )
-    # W10 Final Stage 4: append every stage this generation accumulated
-    # (request, provider_call(s), agent_decision(s), retrieval(s), draft,
-    # validation) to the durable lifecycle stream, in the SAME transaction
-    # as the draft/validation rows above — commits or rolls back together.
-    agent_lifecycle.persist(db, correlation_id, trace.events)
-    # W10 Final Stage 5 sub-slice 3: durable usage accounting for whichever
-    # turns genuinely called a real Bedrock model — empty whenever no real
-    # model was ever configured/reached, never invented.
-    bedrock_usage.persist(db, correlation_id, [
-        bedrock_usage.UsageEvent(
-            provider=_PROVIDER, model_id=turn.model_id, use_case=_USE_CASE, sequence=turn.turn,
-            input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+        # Deterministic validation has genuine (if small) duration — real
+        # regex/decimal checks, not a zero-cost formality — and it is a
+        # distinct request stage the client asked to see: its own span,
+        # sibling to the agent run, rather than an event buried inside it.
+        with safe_span(_TRACER_NAME, "summary_agent_path.validation",
+                       {"correlation_id": correlation_id}) as vspan:
+            outcome = validate_draft(result.draft, result.ledger)
+            vspan.set_attribute("passed", outcome.passed)
+            if outcome.code:
+                vspan.set_attribute("validation_code", outcome.code)
+
+        draft = agent_drafts.create_draft(
+            db, patient_id=patient_id, generated_text=result.draft.summary,
+            correlation_id=correlation_id, provenance_label=result.label.value,
+            model_id=result.model_id, prompt_version=result.prompt_version,
+            citations=result.citations, trace=trace,
         )
-        for turn in result.usage
-    ])
-    log.info(
-        "summary agent draft (correlation_id=%s patient_id=%s version=%s label=%s passed=%s code=%s)",
-        correlation_id, patient_id, draft.version, result.label.value, outcome.passed,
-        outcome.refusal_code,
-    )
+        agent_drafts.record_validation(
+            db, draft, passed=outcome.passed, validation_code=outcome.refusal_code, trace=trace,
+        )
+        # W10 Final Stage 4: append every stage this generation accumulated
+        # (request, provider_call(s), agent_decision(s), retrieval(s), draft,
+        # validation) to the durable lifecycle stream, in the SAME transaction
+        # as the draft/validation rows above — commits or rolls back together.
+        agent_lifecycle.persist(db, correlation_id, trace.events)
+        # W10 Final Stage 5 sub-slice 3: durable usage accounting for whichever
+        # turns genuinely called a real Bedrock model — empty whenever no real
+        # model was ever configured/reached, never invented.
+        bedrock_usage.persist(db, correlation_id, [
+            bedrock_usage.UsageEvent(
+                provider=_PROVIDER, model_id=turn.model_id, use_case=_USE_CASE, sequence=turn.turn,
+                input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+            )
+            for turn in result.usage
+        ])
+        log.info(
+            "summary agent draft (correlation_id=%s patient_id=%s version=%s label=%s passed=%s code=%s)",
+            correlation_id, patient_id, draft.version, result.label.value, outcome.passed,
+            outcome.refusal_code,
+        )
+        # Terminal outcome, on the entry span itself — never patient_id (see
+        # libs.agent_provenance.FORBIDDEN_KEYS's identical exclusion for the
+        # durable trace; the same boundary applies here even though
+        # libs.tracing's own redact() word-list does not separately name it).
+        span.set_attribute("provenance_label", result.label.value)
+        span.set_attribute("termination_reason", result.termination_reason or "unknown")
+        span.set_attribute("accepted", outcome.passed)
+
     return GenerationOutcome(draft=draft, validation=outcome, label=result.label.value, trace=trace)

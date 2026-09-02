@@ -30,6 +30,7 @@ from libs.metrics import record_counter
 from libs.metrics import ai as ai_metrics
 from libs.policy_corpus import PolicyRetriever, RetrievalLedger, RetrievalScope
 from libs.safe_logging import get_safe_logger
+from libs.tracing.spans import new_correlation_id, record_event, safe_span
 
 from .contracts import CitedSource, PolicyNavigatorResult, UsageTurn
 from .tool import build_policy_tool
@@ -41,6 +42,7 @@ DEFAULT_MAX_TURNS = 4
 # Bounded metrics label for this surface, matching the durable
 # `bedrock_usage_events.use_case` records-service writes for it.
 METRICS_USE_CASE = "policy_navigator_chat"
+_TRACER_NAME = "policy_navigator"
 
 _SAFE_PROVIDER_REPLY = (
     "I couldn't reach the policy navigator just now. Please try again in a moment."
@@ -109,13 +111,21 @@ def _model_id_of(model) -> Optional[str]:
     return None
 
 
-def _usage_middleware(model_id: Optional[str], label: ProvenanceLabel, usage_events: list):
+def _usage_middleware(model_id: Optional[str], label: ProvenanceLabel, usage_events: list,
+                      correlation_id: Optional[str] = None):
     """W10 Final Stage 5 sub-slice 3: records each REAL turn's token usage
     in-memory only — never for a fixture/scripted test model, even one
     that happens to set usage_metadata itself. No trace/error handling
     here (unlike summary_agent's middleware): a failed call is caught by
     this run's own outer try/except, which already re-raises/classifies it
-    without this middleware's help."""
+    without this middleware's help.
+
+    W10 metrics Stage 3: also opens a real provider_call span for each turn
+    (this is the actual Bedrock round trip) and attaches an agent_decision
+    event once the response is read — a point-in-time read of what just
+    came back, not an operation with its own duration, so an event on this
+    span rather than a second span pretending to have elapsed time.
+    """
     from langchain.agents.middleware import AgentMiddleware
     from langchain_core.messages import AIMessage
 
@@ -127,36 +137,46 @@ def _usage_middleware(model_id: Optional[str], label: ProvenanceLabel, usage_eve
         def wrap_model_call(self, request, handler):
             self.turn += 1
             started = time.monotonic()
-            try:
-                response = handler(request)
-            except Exception:
-                # Categorical outcome only — the exception type is unbounded
-                # and can carry provider detail, so it is never a label. The
-                # run's own outer try/except still classifies and re-raises.
-                ai_metrics.record_provider_call(
-                    use_case=METRICS_USE_CASE, model_id=model_id, outcome="provider_error",
-                    duration_seconds=time.monotonic() - started,
-                )
-                raise
-            duration_seconds = time.monotonic() - started
-            real_usage = None
-            if label is ProvenanceLabel.REAL:
+            span_attrs = {"turn": self.turn, "model": model_id or ai_metrics.UNCONFIGURED}
+            if correlation_id:
+                span_attrs["correlation_id"] = correlation_id
+            with safe_span(_TRACER_NAME, "policy_navigator.provider_call", span_attrs) as pspan:
+                try:
+                    response = handler(request)
+                except Exception:
+                    # Categorical outcome only — the exception type is unbounded
+                    # and can carry provider detail, so it is never a label. The
+                    # run's own outer try/except still classifies and re-raises.
+                    ai_metrics.record_provider_call(
+                        use_case=METRICS_USE_CASE, model_id=model_id, outcome="provider_error",
+                        duration_seconds=time.monotonic() - started,
+                    )
+                    raise
+                duration_seconds = time.monotonic() - started
                 messages = getattr(response, "result", None) or [response]
                 ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
-                usage = getattr(ai, "usage_metadata", None) if ai else None
-                if usage:
-                    real_usage = usage
-                    usage_events.append(UsageTurn(
-                        model_id=model_id, turn=self.turn,
-                        input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
-                    ))
-            ai_metrics.record_provider_call(
-                use_case=METRICS_USE_CASE, model_id=model_id, outcome="success",
-                duration_seconds=duration_seconds,
-                input_tokens=real_usage.get("input_tokens") if real_usage else None,
-                output_tokens=real_usage.get("output_tokens") if real_usage else None,
-            )
-            return response
+                real_usage = None
+                if label is ProvenanceLabel.REAL:
+                    usage = getattr(ai, "usage_metadata", None) if ai else None
+                    if usage:
+                        real_usage = usage
+                        usage_events.append(UsageTurn(
+                            model_id=model_id, turn=self.turn,
+                            input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                        ))
+                calls = list(getattr(ai, "tool_calls", None) or []) if ai else []
+                record_event(pspan, "agent_decision", {
+                    "turn": self.turn,
+                    "stop_reason": "tool_use" if calls else "end_turn",
+                    "tool_name": calls[0]["name"] if calls else "none",
+                })
+                ai_metrics.record_provider_call(
+                    use_case=METRICS_USE_CASE, model_id=model_id, outcome="success",
+                    duration_seconds=duration_seconds,
+                    input_tokens=real_usage.get("input_tokens") if real_usage else None,
+                    output_tokens=real_usage.get("output_tokens") if real_usage else None,
+                )
+                return response
 
     return _UsageMiddleware()
 
@@ -197,25 +217,40 @@ def run_policy_navigator(
     Emits the `policy_navigator_termination_total` golden-signal counter
     exactly once per call, labelled by the outcome this function is about to
     return — see docs/planning/policy-navigator-golden-signals-week7-08-25-2026.md.
+
+    W10 metrics Stage 3: this is also the entry/terminal-outcome span for
+    the whole navigator turn (provider_call/agent_decision/retrieval nest
+    inside it via OTel's own ambient context — no span object is threaded
+    by hand). Policy Navigator is stateless and persists nothing of its
+    own (see module docstring), so `correlation_id` exists ONLY to tie this
+    turn's spans together and, optionally, to a Loki log line — it is never
+    written to any table. The caller's own durable usage-accounting row
+    (app.py::ask_policy_navigator) generates its own separate id, unrelated
+    to this one, exactly as before this stage.
     """
-    result = _run_policy_navigator(
-        question, scope=scope, retriever=retriever, model=model, label=label, max_turns=max_turns,
-    )
-    record_counter(
-        "policy_navigator_termination_total",
-        termination_reason=result.termination_reason,
-        provenance_label=result.label,
-    )
-    ai_metrics.record_agent_run(
-        use_case=METRICS_USE_CASE,
-        provenance_label=result.label,
-        termination_reason=result.termination_reason,
-    )
-    # Only a completed answer has citations to count. A refusal deliberately
-    # carries none, and observing 0 for it would drag the histogram toward
-    # zero for a reason that has nothing to do with citation richness.
-    if result.termination_reason == "answered":
-        ai_metrics.record_citations(use_case=METRICS_USE_CASE, count=len(result.citations or ()))
+    correlation_id = new_correlation_id()
+    with safe_span(_TRACER_NAME, "policy_navigator.ask", {"correlation_id": correlation_id}) as span:
+        result = _run_policy_navigator(
+            question, scope=scope, retriever=retriever, model=model, label=label, max_turns=max_turns,
+            correlation_id=correlation_id,
+        )
+        record_counter(
+            "policy_navigator_termination_total",
+            termination_reason=result.termination_reason,
+            provenance_label=result.label,
+        )
+        ai_metrics.record_agent_run(
+            use_case=METRICS_USE_CASE,
+            provenance_label=result.label,
+            termination_reason=result.termination_reason,
+        )
+        # Only a completed answer has citations to count. A refusal deliberately
+        # carries none, and observing 0 for it would drag the histogram toward
+        # zero for a reason that has nothing to do with citation richness.
+        if result.termination_reason == "answered":
+            ai_metrics.record_citations(use_case=METRICS_USE_CASE, count=len(result.citations or ()))
+        span.set_attribute("provenance_label", result.label)
+        span.set_attribute("termination_reason", result.termination_reason)
     return result
 
 
@@ -227,6 +262,7 @@ def _run_policy_navigator(
     model=None,
     label: Optional[ProvenanceLabel] = None,
     max_turns: int = DEFAULT_MAX_TURNS,
+    correlation_id: Optional[str] = None,
 ) -> PolicyNavigatorResult:
     from langchain.agents import create_agent
     from langchain_core.messages import AIMessage, HumanMessage
@@ -271,9 +307,11 @@ def _run_policy_navigator(
 
     model_id = _model_id_of(model)
     usage_events = []
-    policy_tool = build_policy_tool(retriever=retriever, scope=scope, ledger=ledger)
+    policy_tool = build_policy_tool(retriever=retriever, scope=scope, ledger=ledger,
+                                    correlation_id=correlation_id)
     agent = create_agent(model, [policy_tool], system_prompt=SYSTEM_PROMPT,
-                         middleware=[_usage_middleware(model_id, resolved, usage_events)])
+                         middleware=[_usage_middleware(model_id, resolved, usage_events,
+                                                       correlation_id=correlation_id)])
 
     try:
         state = agent.invoke(

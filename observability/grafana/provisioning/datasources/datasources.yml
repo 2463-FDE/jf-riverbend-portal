@@ -15,3 +15,33 @@ datasources:
     access: proxy
     url: http://loki:3100
     editable: false
+
+  - name: Tempo
+    uid: tempo_ds
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # W10 metrics Stage 3 trace-to-log navigation. Verified against
+      # Grafana's own Tempo datasource docs before writing (Stage 2's
+      # review round 1 caught an unverified Loki-to-Loki link in this same
+      # file) — this is the documented, supported shape: tracesToLogsV2
+      # pointed at a real tracing-adjacent target (Loki), a customQuery
+      # using the documented ${__span.tags.NAME} span-attribute
+      # interpolation, and `$` escaped as `$$` because Grafana interpolates
+      # unescaped `$` in provisioning YAML as an environment variable.
+      # correlation_id is set as a span attribute on every parent span this
+      # stage adds (libs/summary_agent/runtime.py,
+      # libs/policy_navigator/runtime.py,
+      # libs/eligibility_agent/runtimes/raw_bedrock.py) — never patient,
+      # user, or draft identifiers.
+      tracesToLogsV2:
+        datasourceUid: loki_ds
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        tags: [{ key: "correlation_id" }]
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{service=~".+"} | correlation_id="$${__span.tags.correlation_id}"'
