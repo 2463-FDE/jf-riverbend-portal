@@ -60,13 +60,19 @@ _VERIFY_SIGNALS = (
     "verify", "verified", "verification", "revalidat", "re-verif", "reverif",
     "check", "recheck", "re-check", "confirm", "eligib", "still active", "is it active",
     "is insurance active", "insurance valid", "is it valid", "coverage valid",
-    # The way front-desk staff actually phrase a verification request. "covered"
-    # carries the -ed deliberately: bare "cover" would also swallow questions
-    # about what a plan pays for ("what does my plan cover for a physical?"),
-    # which is neither tool's job. "coverage active" is likewise the whole
-    # phrase, so it cannot fire on the stored-record wording "what coverage is
-    # on file?".
-    "covered", "coverage active", "coverage is active",
+    # The way front-desk staff actually phrase a verification request. Each
+    # of these names the PERSON as the subject: "am I covered" asks whether
+    # this patient's insurance is in force. A bare "covered" signal cannot
+    # make that distinction — "is the flu shot covered?" and "what services
+    # are covered?" ask what a plan PAYS FOR, which neither tool answers, and
+    # routing them to a live payer check would answer a question nobody
+    # asked. Whoever adds a phrase here: the subject must be the patient or
+    # the coverage itself, never a service or benefit.
+    "am i covered", "are we covered", "patient covered", "member covered",
+    "is he covered", "is she covered", "are they covered",
+    # "coverage active" as a whole phrase, so it cannot fire on the
+    # stored-record wording "what coverage is on file?".
+    "coverage active", "coverage is active",
 )
 _COVERAGE_SIGNALS = (
     "on file", "on record", "stored", "member id", "member number", "member #",

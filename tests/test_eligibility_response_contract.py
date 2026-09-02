@@ -58,10 +58,28 @@ def test_the_other_covered_phrasings_are_verification_requests_too(message):
     assert decision.tool_names == (VERIFY_TOOL_NAME,)
 
 
-def test_covered_phrasing_does_not_capture_a_plan_benefits_question():
-    """"cover" without the -ed is a question about what a plan pays for —
-    neither tool answers that, so it must not be forced into one."""
-    assert classify_intent("What does my plan cover for an annual physical?").intent is Intent.UNSPECIFIED
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What does my plan cover for an annual physical?",
+        # COVERED-BENEFITS-MISROUTE: these all contain "covered" but ask what
+        # the plan PAYS FOR, not whether this patient's insurance is in
+        # force. Neither tool answers them, so neither may be narrowed to —
+        # least of all a live payer verification, which would answer a
+        # question nobody asked and read as though it had.
+        "Is the flu shot covered?",
+        "What services are covered?",
+        "Is physical therapy covered?",
+        "What benefits are covered?",
+    ],
+)
+def test_a_benefit_or_service_question_is_never_routed_to_verification(message):
+    decision = classify_intent(message)
+    assert decision.intent is Intent.UNSPECIFIED
+    # Explicitly NOT narrowed to live verification — the tool set is left as
+    # it was, which is what UNSPECIFIED means.
+    assert decision.tool_names != (VERIFY_TOOL_NAME,)
+    assert set(decision.tool_names) == {VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME}
 
 
 @pytest.mark.parametrize(
