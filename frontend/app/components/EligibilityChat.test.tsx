@@ -134,3 +134,81 @@ describe("EligibilityChat streaming", () => {
     expect(capturedSignal?.aborted).toBe(true);
   });
 });
+
+describe("EligibilityChat response contract", () => {
+  it("renders the deterministic reply and a compact status badge from the terminal event", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      streamResponse([
+        line({ kind: "delta", text: "Eligibility is active as of August 23, 2026." }),
+        line({
+          kind: "done",
+          tool_called: true,
+          eligibility_status: "active",
+          termination_reason: "answered",
+          turns_used: 2,
+        }),
+      ])
+    );
+    render(<EligibilityChat appointmentId={7} />);
+    await open();
+
+    await sendMessage("verify eligibility");
+
+    await waitFor(() =>
+      expect(screen.getByText("Eligibility is active as of August 23, 2026.")).toBeInTheDocument()
+    );
+    // The terminal event's structured status is shown as a compact badge...
+    expect(screen.getByText("active")).toBeInTheDocument();
+    // ...and none of its other metadata leaks into the UI.
+    expect(screen.queryByText(/tool_called|turns_used|termination_reason/)).not.toBeInTheDocument();
+  });
+
+  it("never renders raw payload text, markdown table syntax, or emoji from a reply", async () => {
+    // Even if a reply somehow arrived carrying these, they are rendered as
+    // literal text inside a plain-text node — never parsed as markup — and
+    // the component adds no renderer of its own.
+    vi.mocked(apiFetch).mockResolvedValue(
+      streamResponse([
+        line({ kind: "delta", text: "Coverage on file is Aetna PPO. Its stored status is active." }),
+        line({ kind: "done", tool_called: true, eligibility_status: "active", termination_reason: "answered" }),
+      ])
+    );
+    const { container } = render(<EligibilityChat appointmentId={7} />);
+    await open();
+
+    await sendMessage("what coverage is on file?");
+
+    await waitFor(() =>
+      expect(screen.getByText("Coverage on file is Aetna PPO. Its stored status is active.")).toBeInTheDocument()
+    );
+    expect(container.querySelector("table")).toBeNull();
+    expect(container.innerHTML).not.toContain("has_coverage_on_file");
+    expect(container.innerHTML).not.toContain("|---|");
+  });
+
+  it("does not carry a previous turn's status badge into the next question", async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      streamResponse([
+        line({ kind: "delta", text: "Eligibility is active as of August 23, 2026." }),
+        line({ kind: "done", tool_called: true, eligibility_status: "active", termination_reason: "answered" }),
+      ])
+    );
+    render(<EligibilityChat appointmentId={7} />);
+    await open();
+    await sendMessage("verify eligibility");
+    await waitFor(() => expect(screen.getByText("active")).toBeInTheDocument());
+
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      streamResponse([
+        line({ kind: "delta", text: "No insurance coverage is on file for this visit." }),
+        line({ kind: "done", tool_called: true, termination_reason: "answered" }),
+      ])
+    );
+    await sendMessage("what coverage is on file?");
+
+    await waitFor(() =>
+      expect(screen.getByText("No insurance coverage is on file for this visit.")).toBeInTheDocument()
+    );
+    expect(screen.queryByText("active")).not.toBeInTheDocument();
+  });
+});

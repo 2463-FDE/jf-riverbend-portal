@@ -15,6 +15,13 @@ turn-bounded loop shape and the same tool-dispatch/persistence-scoping rule
 via _dispatch_tool_call below — a single source of truth for "only a
 VERIFIED verify_current_eligibility outcome may update eligibility_status",
 so the two loops cannot drift into disagreeing about it.
+
+The loop shape, turn budget, authorization, visit scope and persistence rule
+are unchanged; what the model no longer decides is (a) WHICH tool may run —
+the classified intent narrows the offered tool list and is re-enforced at
+dispatch — and (b) WHAT THE CALLER READS once a tool has run, which is
+rendered from the tool payload itself. See
+libs/eligibility_agent/response_contract.py for both.
 """
 from datetime import datetime, timezone
 from typing import Iterable, Iterator, List, Optional
@@ -37,19 +44,20 @@ from ..contracts import (
 )
 from ..eligibility_tool import (
     COVERAGE_TOOL_NAME,
-    COVERAGE_TOOL_SPEC,
     VERIFY_TOOL_NAME,
-    VERIFY_TOOL_SPEC,
     EligibilityToolConfig,
     GetCoverageOnFileTool,
     VerifyCurrentEligibilityTool,
 )
 from ..memory import VisitMemoryPort
+from ..response_contract import classify_intent, render_reply
 
 log = get_safe_logger(__name__)
 
 _TRACER_NAME = "eligibility_agent"
-_TOOL_SPECS = [VERIFY_TOOL_SPEC, COVERAGE_TOOL_SPEC]
+# Every tool that exists. The set actually offered to (and runnable by) the
+# model on a given turn is the classified intent's own narrower subset — see
+# response_contract.IntentDecision and _dispatch_tool_call below.
 _ALLOWED_TOOLS = frozenset({VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME})
 
 _SAFE_PROVIDER_ERROR_REPLY = (
@@ -99,15 +107,24 @@ class RawBedrockAgentRuntime:
             COVERAGE_TOOL_NAME: GetCoverageOnFileTool(context),
         }
 
-    def _dispatch_tool_call(self, call, tools_by_name: dict, context: VisitContext):
+    def _dispatch_tool_call(self, call, tools_by_name: dict, context: VisitContext, allowed_names=_ALLOWED_TOOLS):
         """Returns (payload, ok, context) for one tool call. `context` is
         the SAME object passed in unless this call is a VERIFIED
         verify_current_eligibility outcome, in which case it is the newly
         persisted copy — see the module docstring for why this is the one
-        place that decision is made, shared by both loops below."""
+        place that decision is made, shared by both loops below.
+
+        `allowed_names` is the classified intent's own tool set (see
+        libs/eligibility_agent/response_contract.py). Narrowing the offered
+        tool list is not enough on its own: a model can name a tool it was
+        never offered, so the same narrowing is enforced again here, at the
+        only point a tool can actually run."""
         if call.name not in _ALLOWED_TOOLS:
             log.warning("agent tool call rejected (reason=unknown_tool)")
             return {"error": "unknown_tool"}, False, context
+        if call.name not in allowed_names:
+            log.warning("agent tool call rejected (reason=outside_requested_intent tool=%s)", call.name)
+            return {"error": "tool_not_requested"}, False, context
 
         # This surface's closest analogue to "retrieval": a bounded external
         # call fetching payer/coverage evidence, real I/O with real
@@ -202,11 +219,16 @@ class RawBedrockAgentRuntime:
         eligibility_status: Optional[EligibilityStatus] = context.eligibility_status
         usage_events: List[UsageTurn] = []
         model_id = getattr(self._model, "model_id", None)
+        # Classified on the SCRUBBED message: scrubbing removes identifiers,
+        # not question words, so intent survives it and no raw identifier is
+        # ever read here.
+        decision = classify_intent(user_message)
+        results = _ToolResults()
 
         for turn in range(1, self._max_turns + 1):
             with safe_span(_TRACER_NAME, "eligibility_agent.provider_call", {"turn": turn}) as span:
                 try:
-                    response = self._model.converse(messages, _TOOL_SPECS, timeout=self._timeout_seconds)
+                    response = self._model.converse(messages, decision.tool_specs, timeout=self._timeout_seconds)
                 except LLMClientError as exc:
                     # The provider-error base — covers timeout, transient, and the
                     # non-retryable/response-shape failures the tool port now
@@ -239,7 +261,11 @@ class RawBedrockAgentRuntime:
                 if not response.tool_calls:
                     return VisitTurnResult(
                         visit_id=visit_id,
-                        reply=response.text or "",
+                        # Once a tool has run, its result is rendered from the
+                        # payload itself — the model's prose for this turn is
+                        # discarded rather than trusted to describe an
+                        # outcome it could soften or overstate.
+                        reply=results.render(decision) or response.text or "",
                         tool_called=tool_called,
                         eligibility_status=eligibility_status,
                         termination_reason=TerminationReason.ANSWERED,
@@ -250,10 +276,13 @@ class RawBedrockAgentRuntime:
             messages.append({"role": "assistant", "content": _assistant_content(response)})
             tool_result_blocks = []
             for call in response.tool_calls:
-                payload, ok, context = self._dispatch_tool_call(call, tools_by_name, context)
+                payload, ok, context = self._dispatch_tool_call(
+                    call, tools_by_name, context, decision.tool_names
+                )
                 if ok:
                     tool_called = True
                     eligibility_status = context.eligibility_status
+                    results.record(call.name, payload)
                 tool_result_blocks.append(
                     {"toolResult": {"toolUseId": call.id, "content": [{"json": payload}]}}
                 )
@@ -273,13 +302,21 @@ class RawBedrockAgentRuntime:
         self, visit_id: str, user_message: str, *, known_identifiers: Iterable[str] = ()
     ) -> Iterator[VisitStreamEvent]:
         """w-9-2-planner P1b: same bounded loop and dispatch rule as
-        handle_message, but forwards each text_delta from the model AS IT
-        ARRIVES instead of buffering a complete reply. Tool calls are never
-        forwarded — only dispatched internally, exactly like handle_message
-        — so a tool-resolution turn (the normal case for this agent)
-        produces no output at all until the model's actual answer starts
-        streaming; the caller may show a spinner in the meantime, per
-        agents.md.
+        handle_message, delivered as newline-delimited events. Tool calls are
+        never forwarded — only dispatched internally, exactly like
+        handle_message — so a tool-resolution turn (the normal case for this
+        agent) produces no output at all while the lookup happens; the caller
+        may show a spinner in the meantime, per agents.md.
+
+        Text deltas are buffered for the duration of each provider turn and
+        released only once that turn is complete, because a turn may emit
+        prose BEFORE the tool call that decides whether the prose is true. A
+        turn containing any tool call has its buffered text discarded
+        outright; a turn containing none releases it in order — unless a tool
+        already ran, in which case the deterministic render replaces it. This
+        costs token-level streaming granularity and buys the guarantee that
+        nothing the model guessed about an eligibility result can reach the
+        browser ahead of the result itself.
 
         Ends in exactly one terminal event: "done" (safe categorical
         metadata, mirroring VisitTurnResult) or "error" (one sanitized
@@ -333,9 +370,19 @@ class RawBedrockAgentRuntime:
         eligibility_status: Optional[EligibilityStatus] = context.eligibility_status
         usage_events: List[UsageTurn] = []
         model_id = getattr(self._model, "model_id", None)
+        decision = classify_intent(user_message)
+        results = _ToolResults()
 
         for turn in range(1, self._max_turns + 1):
             collected_tool_calls = []
+            # Text is buffered for the WHOLE provider turn rather than
+            # forwarded as it arrives: Bedrock may emit prose BEFORE the
+            # tool_call in the same turn, and that prose is the model's guess
+            # at an answer it has not looked up yet. Forwarding it live would
+            # put "Eligibility is active" in the browser moments before the
+            # tool result that decides whether that is even true. Nothing is
+            # emitted until the turn is complete and its tool calls are known.
+            buffered_text: List[str] = []
             turn_input_tokens = turn_output_tokens = None
             # Duration here is the WHOLE streamed turn, first byte to the
             # tool-use/end-turn decision — mirrors bedrock_tool_port.py's own
@@ -344,9 +391,11 @@ class RawBedrockAgentRuntime:
             # handling closes this span cleanly on an early gen.close() too).
             with safe_span(_TRACER_NAME, "eligibility_agent.provider_call", {"turn": turn}) as span:
                 try:
-                    for event in self._model.converse_stream(messages, _TOOL_SPECS, timeout=self._timeout_seconds):
+                    for event in self._model.converse_stream(
+                        messages, decision.tool_specs, timeout=self._timeout_seconds
+                    ):
                         if event.kind == "text_delta" and event.text:
-                            yield VisitStreamEvent(kind="delta", text=event.text)
+                            buffered_text.append(event.text)
                         elif event.kind == "tool_call" and event.tool_call is not None:
                             collected_tool_calls.append(event.tool_call)
                         elif event.kind == "usage":
@@ -354,6 +403,11 @@ class RawBedrockAgentRuntime:
                 except LLMClientError as exc:
                     log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
                     span.record_exception_type(type(exc).__name__)
+                    # Anything buffered before the failure is discarded: a
+                    # turn that never completed cannot have produced a
+                    # trustworthy answer, and the sanitized terminal error is
+                    # the only thing the caller should see.
+                    buffered_text.clear()
                     yield VisitStreamEvent(
                         kind="error",
                         text=_SAFE_PROVIDER_ERROR_REPLY,
@@ -375,6 +429,19 @@ class RawBedrockAgentRuntime:
                 record_event(span, "agent_decision", {"turn": turn, "stop_reason": stop_reason})
 
                 if not collected_tool_calls:
+                    # The turn is complete and asked for no tool, so this is
+                    # the answer turn. Either a tool ran earlier — in which
+                    # case the deterministic render replaces the model's
+                    # narration of it — or none ever did, and the buffered
+                    # text is released in its original order. Both arrive as
+                    # ordinary deltas, so the existing NDJSON contract
+                    # ("done" never carries reply text) is unchanged.
+                    rendered = results.render(decision)
+                    if rendered:
+                        yield VisitStreamEvent(kind="delta", text=rendered)
+                    else:
+                        for chunk in buffered_text:
+                            yield VisitStreamEvent(kind="delta", text=chunk)
                     yield VisitStreamEvent(
                         kind="done",
                         tool_called=tool_called,
@@ -385,6 +452,9 @@ class RawBedrockAgentRuntime:
                     )
                     return
 
+            # This turn asked for a tool, so whatever prose it also emitted
+            # was written before the lookup happened. `buffered_text` is
+            # dropped here, unsent, and re-initialised on the next turn.
             messages.append(
                 {"role": "assistant", "content": [
                     {"toolUse": {"toolUseId": c.id, "name": c.name, "input": c.arguments}} for c in collected_tool_calls
@@ -392,10 +462,13 @@ class RawBedrockAgentRuntime:
             )
             tool_result_blocks = []
             for call in collected_tool_calls:
-                payload, ok, context = self._dispatch_tool_call(call, tools_by_name, context)
+                payload, ok, context = self._dispatch_tool_call(
+                    call, tools_by_name, context, decision.tool_names
+                )
                 if ok:
                     tool_called = True
                     eligibility_status = context.eligibility_status
+                    results.record(call.name, payload)
                 tool_result_blocks.append(
                     {"toolResult": {"toolUseId": call.id, "content": [{"json": payload}]}}
                 )
@@ -416,6 +489,31 @@ class RawBedrockAgentRuntime:
             termination_reason=TerminationReason.MAX_TURNS,
             turns_used=self._max_turns,
             usage=tuple(usage_events),
+        )
+
+
+class _ToolResults:
+    """The payloads this turn's tools actually produced, kept per tool so the
+    deterministic renderer sees each outcome once. Only successful dispatches
+    are recorded: a rejected call (unknown tool, arguments the model tried to
+    smuggle, a tool outside the requested intent) leaves nothing here, so it
+    can never be rendered as though a lookup had happened."""
+
+    def __init__(self):
+        self._verify: Optional[dict] = None
+        self._coverage: Optional[dict] = None
+
+    def record(self, tool_name: str, payload: dict) -> None:
+        if tool_name == VERIFY_TOOL_NAME:
+            self._verify = payload
+        elif tool_name == COVERAGE_TOOL_NAME:
+            self._coverage = payload
+
+    def render(self, decision) -> Optional[str]:
+        return render_reply(
+            verify_payload=self._verify,
+            coverage_payload=self._coverage,
+            include_member_id=decision.include_member_id,
         )
 
 
