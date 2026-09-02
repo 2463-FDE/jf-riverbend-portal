@@ -15,8 +15,10 @@ this stage does not add. The commands and the two full trace payloads Tempo
 returned (one for each exporter config, before and after the otlp_grpc
 rename) are recorded in this PR's own description.
 """
+import os
 import pathlib
 import re
+import subprocess
 import sys
 import types
 
@@ -114,6 +116,101 @@ def test_records_service_and_eligibility_service_get_distinct_otel_service_names
     services = _compose_services()
     assert services["records-service"]["environment"]["OTEL_SERVICE_NAME"] == "records-service"
     assert services["eligibility-service"]["environment"]["OTEL_SERVICE_NAME"] == "eligibility-service"
+
+
+# --- TRACE-B01: the three traced services actually point at the collector --
+#
+# Review finding TRACE-B01: intake-service, eligibility-service, and
+# records-service were never given OTEL_EXPORTER_OTLP_ENDPOINT in
+# docker-compose.yml at all — .env's own copy of that var is commented out by
+# default, so every one of them silently fell back to ConsoleSpanExporter
+# regardless of whether `make up-observability` was running. Tested against
+# the RESOLVED `docker compose config`, not the raw YAML: a real `docker
+# compose config` invocation with a fully-isolated, test-only environment
+# (mirrors tests/test_phi_compose_wiring.py's own established pattern) —
+# never this worktree's own .env — so the assertion holds regardless of
+# whether these values are later written as literals or as ${VAR:-default}
+# interpolation.
+
+_COMPOSE_REQUIRED_ENV = {
+    "INTERNAL_SERVICE_TOKEN": "test-internal-token-well-over-the-32-char-floor",
+    "DB_PASSWORD": "test-db-password",
+    "DB_ADMIN_PASSWORD": "test-db-admin-password",
+    "PHI_ACTIVE_KEY_VERSION": "v1",
+    "PHI_ENCRYPTION_KEY_V1": "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+    "PHI_BLIND_INDEX_KEY_V1": "OTg3NjU0MzIxMDk4NzY1NDMyMTA5ODc2NTQzMjEwOTg=",
+}
+
+_EXPECTED_TRACED_SERVICES = {
+    "intake-service": "intake-service",
+    "eligibility-service": "eligibility-service",
+    "records-service": "records-service",
+}
+
+
+def _docker_available():
+    try:
+        subprocess.run(["docker", "--version"], capture_output=True, check=True)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def _resolved_compose_config():
+    """The fully-resolved compose config, from a real `docker compose
+    config` run against an isolated, test-only environment — never this
+    worktree's own .env."""
+    full_env = {"PATH": os.environ.get("PATH", "")}
+    full_env.update(_COMPOSE_REQUIRED_ENV)
+    result = subprocess.run(
+        ["docker", "compose", "--env-file", "/dev/null", "config"],
+        cwd=_ROOT,
+        env=full_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return yaml.safe_load(result.stdout)
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
+def test_each_traced_service_resolves_to_the_collector_endpoint_and_its_own_name():
+    resolved = _resolved_compose_config()
+    for service, expected_name in _EXPECTED_TRACED_SERVICES.items():
+        env = resolved["services"][service]["environment"]
+        assert env.get("OTEL_SERVICE_NAME") == expected_name, (
+            f"{service} should resolve OTEL_SERVICE_NAME={expected_name!r}, got {env.get('OTEL_SERVICE_NAME')!r}"
+        )
+        assert env.get("OTEL_EXPORTER_OTLP_ENDPOINT") == "http://otel-collector:4318", (
+            f"{service} should resolve OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, "
+            f"got {env.get('OTEL_EXPORTER_OTLP_ENDPOINT')!r} — the collector's actual compose "
+            f"service name is 'otel-collector', not 'collector'"
+        )
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
+@pytest.mark.parametrize("service", sorted(_EXPECTED_TRACED_SERVICES))
+def test_the_traced_service_endpoint_is_not_silently_dropped(service):
+    """The failure mode TRACE-B01 actually was: the key present with an
+    empty/placeholder value, or absent from the environment mapping
+    entirely, either of which leaves spans.py's own `if otlp_endpoint:`
+    check false and traces never leave the container."""
+    resolved = _resolved_compose_config()
+    env = resolved["services"][service]["environment"]
+    assert env.get("OTEL_EXPORTER_OTLP_ENDPOINT"), (
+        f"{service} has no truthy OTEL_EXPORTER_OTLP_ENDPOINT in the resolved config"
+    )
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
+def test_untraced_services_get_no_otel_configuration_added():
+    """Review scope boundary: gateway/scheduling/roi/interop must not gain
+    tracing configuration as a side effect of this fix."""
+    resolved = _resolved_compose_config()
+    for service in ("gateway", "scheduling-service", "roi-service", "interop-service"):
+        env = resolved["services"][service].get("environment") or {}
+        assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env, f"{service} should not receive OTEL_EXPORTER_OTLP_ENDPOINT"
+        assert "OTEL_SERVICE_NAME" not in env, f"{service} should not receive OTEL_SERVICE_NAME"
 
 
 def test_otel_collector_config_is_a_traces_only_pipeline():

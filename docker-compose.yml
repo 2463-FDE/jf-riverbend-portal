@@ -178,6 +178,19 @@ services:
       PHI_ACTIVE_KEY_VERSION: ${PHI_ACTIVE_KEY_VERSION:?PHI_ACTIVE_KEY_VERSION must be set in .env — see adr/0012}
       PHI_ENCRYPTION_KEY_V1: ${PHI_ENCRYPTION_KEY_V1:?PHI_ENCRYPTION_KEY_V1 must be set in .env — see adr/0012}
       PHI_BLIND_INDEX_KEY_V1: ${PHI_BLIND_INDEX_KEY_V1:?PHI_BLIND_INDEX_KEY_V1 must be set in .env — see adr/0012}
+      # TRACE-B01 fix (W10 metrics Stage 3 review): without these, spans.py's
+      # own OTLP branch is never reached at all — .env's own
+      # OTEL_EXPORTER_OTLP_ENDPOINT is commented out by default, so this
+      # service silently fell back to ConsoleSpanExporter regardless of the
+      # observability profile being up. Same reasoning as records-service/
+      # eligibility-service's own OTEL_SERVICE_NAME override below: .env's
+      # shared value can't differ per service. Pointed at the collector
+      # unconditionally (not profile-conditional) is safe — libs/tracing's
+      # own exporter setup only warns and falls back to console if
+      # otel-collector isn't actually reachable, per its own no-op-on-
+      # failure contract; it never affects the request being served.
+      OTEL_SERVICE_NAME: intake-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "8071:8071"
     depends_on:
@@ -218,6 +231,10 @@ services:
       # actually attributable to it in Tempo, rather than every traced
       # service showing up under the same generic name.
       OTEL_SERVICE_NAME: eligibility-service
+      # TRACE-B01 fix (review): also needs its own endpoint override — see
+      # intake-service's identical entry above for why .env's own value
+      # can't do this alone.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     depends_on:
       redis:
         condition: service_started
@@ -264,6 +281,8 @@ services:
       # above — this service hosts the summary agent and Policy Navigator,
       # so its spans need their own distinct service.name too.
       OTEL_SERVICE_NAME: records-service
+      # TRACE-B01 fix (review): see intake-service's identical entry above.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     ports:
       - "8073:8073"
     depends_on:
