@@ -683,7 +683,10 @@ def test_stream_never_forwards_a_tool_call_as_a_delta_and_persists_a_verified_ou
     events = list(runtime.handle_message_stream("visit-1", "am I covered?"))
 
     deltas = [e for e in events if e.kind == "delta"]
-    assert [d.text for d in deltas] == ["You're covered."]  # the tool call itself never appears as a delta
+    # The tool call itself never appears as a delta, and now that a tool HAS
+    # run the single delta is the deterministic render of its payload — the
+    # scripted model prose ("You're covered.") is deliberately discarded.
+    assert [d.text for d in deltas] == ["Eligibility is active as of July 17, 2026."]
     done = events[-1]
     assert done.kind == "done"
     assert done.eligibility_status == EligibilityStatus.ACTIVE
@@ -826,3 +829,183 @@ def test_a_message_within_the_bound_is_not_affected_by_the_preflight_check():
     result = runtime.handle_message("visit-1", "a short message")
 
     assert result.termination_reason == TerminationReason.ANSWERED
+
+
+# --- Response contract (raw_bedrock only — the default runtime; langchain
+# remains the unwired comparison spike, see the file-level docstring) -------
+#
+# These prove the two things the model no longer decides: which tool it may
+# reach for a given ask, and what the caller reads once that tool has run.
+
+
+class _RecordingToolModel(FakeToolCapableModel):
+    """FakeToolCapableModel that also records the tool specs it was offered,
+    so a test can assert what the model was even able to call."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.offered_tools = []
+
+    def converse(self, messages, tools, *, timeout):
+        self.offered_tools.append([spec["name"] for spec in tools])
+        return super().converse(messages, tools, timeout=timeout)
+
+
+def _contract_runtime(script, memory, tool_transport, tool_config=_CONFIGURED):
+    model = _RecordingToolModel(script)
+    runtime = RawBedrockAgentRuntime(
+        memory=memory, model=model, tool_config=tool_config, tool_transport=tool_transport,
+    )
+    return runtime, model
+
+
+def test_a_verification_ask_only_ever_offers_the_verify_tool():
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    runtime, model = _contract_runtime(
+        [("tool_call", {}), ("text", "ignored")], memory, eligibility_transport("active")
+    )
+
+    runtime.handle_message("visit-1", "Is insurance valid?")
+
+    assert model.offered_tools[0] == [VERIFY_TOOL_NAME]
+
+
+def test_a_stored_record_ask_only_ever_offers_the_coverage_tool():
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_payer_name="Kaiser", coverage_plan_type="HMO", coverage_status="active")
+    runtime, model = _contract_runtime(
+        [("tool_call_named", COVERAGE_TOOL_NAME, {}), ("text", "ignored")], memory, never_called_transport()
+    )
+
+    runtime.handle_message("visit-1", "What coverage is on file?")
+
+    assert model.offered_tools[0] == [COVERAGE_TOOL_NAME]
+
+
+def test_an_explicitly_combined_ask_offers_both_tools():
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_payer_name="Kaiser", coverage_status="active")
+    runtime, model = _contract_runtime(
+        [("tool_call_named", COVERAGE_TOOL_NAME, {}), ("text", "ignored")], memory, never_called_transport()
+    )
+
+    runtime.handle_message("visit-1", "What coverage is on file, and is it still active?")
+
+    assert set(model.offered_tools[0]) == {VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME}
+
+
+def test_a_tool_outside_the_requested_intent_is_refused_at_dispatch():
+    """Narrowing the offer is not enough on its own — a model can still name
+    a tool it was never offered, so the same narrowing is enforced where the
+    tool would actually run. never_called_transport() proves no payer call
+    escaped."""
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_payer_name="Kaiser", coverage_status="active")
+    runtime, _ = _contract_runtime(
+        [("tool_call", {}), ("text", "I could not do that.")], memory, never_called_transport()
+    )
+
+    result = runtime.handle_message("visit-1", "What coverage is on file?")
+
+    assert result.tool_called is False
+    assert result.eligibility_status is None
+    assert memory.get("visit-1").eligibility_status is None
+    # No tool ran, so there is nothing to render deterministically and the
+    # model's own safe text is what the caller sees.
+    assert result.reply == "I could not do that."
+
+
+def test_a_verified_result_is_rendered_deterministically_not_by_the_model():
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    runtime, _ = _contract_runtime(
+        [("tool_call", {}), ("text", "# Eligibility ✅\n\n| Field | Value |\n|---|---|\n| Status | ACTIVE |")],
+        memory,
+        eligibility_transport("active", checked_at="2026-08-23T14:02:00Z"),
+    )
+
+    result = runtime.handle_message("visit-1", "verify eligibility")
+
+    assert result.reply == "Eligibility is active as of August 23, 2026."
+    assert result.eligibility_status == EligibilityStatus.ACTIVE
+
+
+def test_a_simulated_outcome_never_reads_as_a_completed_verification():
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_status="active")
+    runtime, _ = _contract_runtime(
+        [("tool_call", {}), ("text", "Verified! The patient's insurance is active. 🎉")],
+        memory,
+        never_called_transport(),
+        tool_config=EligibilityToolConfig(payer_configured=False),
+    )
+
+    result = runtime.handle_message("visit-1", "verify eligibility")
+
+    assert result.reply == (
+        "A current eligibility check was not run because this is a synthetic training environment. "
+        "Coverage on file is active."
+    )
+    # A simulated attempt must not be recorded as a fresh verification.
+    assert memory.get("visit-1").eligibility_status is None
+
+
+def test_an_unavailable_outcome_does_not_overwrite_stored_coverage():
+    memory = FakeVisitMemory()
+    _seed_context(memory, coverage_status="active")
+
+    def failing(request):
+        raise httpx.ConnectError("payer unreachable")
+
+    runtime, _ = _contract_runtime(
+        [("tool_call", {}), ("text", "ignored")], memory, httpx.MockTransport(failing)
+    )
+
+    result = runtime.handle_message("visit-1", "verify eligibility")
+
+    assert result.reply.startswith("Eligibility could not be verified right now.")
+    assert "active" in result.reply  # the stored record is reported, and reported AS stored
+    assert memory.get("visit-1").coverage_status == "active"
+    assert memory.get("visit-1").eligibility_status is None
+
+
+def test_a_stored_lookup_renders_concise_plain_text_without_the_member_id():
+    memory = FakeVisitMemory()
+    _seed_context(
+        memory,
+        coverage_payer_name="UnitedHealthcare",
+        coverage_plan_type="HMO",
+        coverage_status="active",
+        coverage_member_id_masked="****6789",
+    )
+    runtime, _ = _contract_runtime(
+        [("tool_call_named", COVERAGE_TOOL_NAME, {}), ("text", "ignored")], memory, never_called_transport()
+    )
+
+    result = runtime.handle_message("visit-1", "What coverage is on file?")
+
+    assert result.reply == "Coverage on file is UnitedHealthcare HMO. Its stored status is active."
+    assert "6789" not in result.reply
+
+
+def test_stream_replaces_model_prose_with_one_deterministic_delta():
+    """The streamed turn must not show the model's own description of the
+    outcome first and then contradict it — the only delta is the render."""
+    memory = FakeVisitMemory()
+    _seed_context(memory)
+    model = _RecordingToolModel(
+        [("tool_call", {}), ("text", "Sure! ✅ Here is a **table** of results | a | b |")]
+    )
+    runtime = RawBedrockAgentRuntime(
+        memory=memory, model=model, tool_config=_CONFIGURED,
+        tool_transport=eligibility_transport("active", checked_at="2026-08-23T14:02:00Z"),
+    )
+
+    events = list(runtime.handle_message_stream("visit-1", "verify eligibility"))
+
+    deltas = [e for e in events if e.kind == "delta"]
+    assert [d.text for d in deltas] == ["Eligibility is active as of August 23, 2026."]
+    assert events[-1].kind == "done"
+    assert events[-1].termination_reason == TerminationReason.ANSWERED
+    assert len([e for e in events if e.kind in ("done", "error")]) == 1
