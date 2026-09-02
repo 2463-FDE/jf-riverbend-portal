@@ -58,7 +58,7 @@ def _eval_report(results, **overrides):
     defaults = dict(
         total_cases=len(results), runnable_cases=0, negative_cases=0, deferred_cases=0, spec_conflicts=0,
         required_targets=0, required_hits=0, retrieved_sources_for_runnable=0,
-        forbidden_citation_count=0, unauthorized_retrieval_count=0, results=tuple(results),
+        forbidden_citation_count=0, unauthorized_retrieval_count=0, results=tuple(results), top_k=5,
     )
     defaults.update(overrides)
     return EvaluationReport(**defaults)
@@ -261,6 +261,16 @@ def test_evaluation_gauges_includes_recall_precision_mrr_when_present():
     assert "rag_eval_negative_case_retrieval_safety_rate" not in gauges
 
 
+def test_evaluation_gauges_top_k_reflects_the_reports_own_value_not_a_constant():
+    """The policy corpus defaults to k=5 (db/policy_corpus_evaluate.py's
+    --top-k), never the same constant as the patient-record corpus's k=1 —
+    this must come from the report the caller actually produced, not a
+    value duplicated inside this module."""
+    for k in (5, 3, 17):
+        report = _eval_report([_case("e1", "negative")], top_k=k)
+        assert policy_corpus_evaluation_gauges(report=report)["rag_eval_top_k"] == float(k)
+
+
 def test_evaluation_gauges_omits_recall_precision_and_mrr_when_no_runnable_cases_exist():
     report = _eval_report([_case("e1", "negative")])
     gauges = policy_corpus_evaluation_gauges(report=report)
@@ -294,7 +304,18 @@ def test_patient_record_corpus_gauges_normalizes_percentages_to_fractions():
     assert gauges["rag_eval_duplicate_rate"] == pytest.approx(1.0)
     assert gauges["rag_eval_fragment_coverage_gap"] == pytest.approx(0.0)
     assert gauges[MRR_METRIC] == pytest.approx(1.0)
+    assert gauges["rag_eval_top_k"] == 1.0
     assert LAST_RUN_TIMESTAMP_METRIC in gauges
+
+
+def test_patient_record_corpus_gauges_top_k_reflects_the_reports_own_value():
+    """Preserves this corpus's own default (k=1, RAG_EVAL_TOP_K) independent
+    of whatever the policy corpus uses — never forced to match it."""
+    report = EvalReport(
+        provider_name="fake", top_k=7, total_cases=0, recall_at_k=0.0, precision_at_k=0.0,
+        duplicate_rate=0.0, fragment_coverage_gap=0.0, per_case=[], duplicate_clusters=[],
+    )
+    assert patient_record_corpus_gauges(report=report)["rag_eval_top_k"] == 7.0
 
 
 def test_patient_record_corpus_gauges_omits_mrr_when_there_are_no_cases():
@@ -321,7 +342,7 @@ def test_patient_record_corpus_gauges_carries_no_query_or_patient_identifying_co
     )
     gauges = patient_record_corpus_gauges(report=report)
     allowed = {
-        "rag_eval_recall_at_k", "rag_eval_precision_at_k", "rag_eval_duplicate_rate",
+        "rag_eval_top_k", "rag_eval_recall_at_k", "rag_eval_precision_at_k", "rag_eval_duplicate_rate",
         "rag_eval_fragment_coverage_gap", MRR_METRIC, LAST_RUN_TIMESTAMP_METRIC,
     }
     assert set(gauges) == allowed

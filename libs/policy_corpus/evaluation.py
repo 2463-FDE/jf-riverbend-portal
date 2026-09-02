@@ -111,6 +111,14 @@ class EvaluationReport:
     forbidden_citation_count: int
     unauthorized_retrieval_count: int
     results: Tuple[CaseResult, ...]
+    # W10 Metrics Stage 5 (retrieval-cutoff truthfulness): the actual top_k
+    # this run was called with — never a duplicated constant elsewhere.
+    # Different corpora/harnesses may legitimately use different cutoffs
+    # (e.g. the policy corpus defaults to 5, the patient-record corpus to
+    # 1), so a recall/precision score is only ever comparable to another
+    # score computed at the SAME top_k — this field is what makes that
+    # comparability checkable rather than assumed.
+    top_k: int
 
     @property
     def recall_at_k(self) -> Optional[float]:
@@ -133,6 +141,7 @@ class EvaluationReport:
 
     def as_dict(self) -> dict:
         return {
+            "top_k": self.top_k,
             "total_cases": self.total_cases,
             "runnable_cases": self.runnable_cases,
             "negative_cases": self.negative_cases,
@@ -357,6 +366,7 @@ def evaluate_retrieval(
         forbidden_citation_count=sum(len(result.forbidden_hits) for result in result_tuple),
         unauthorized_retrieval_count=sum(len(result.unauthorized_hits) for result in result_tuple),
         results=result_tuple,
+        top_k=top_k,
     )
 
 

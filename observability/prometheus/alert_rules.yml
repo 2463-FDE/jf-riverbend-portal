@@ -129,17 +129,29 @@ groups:
       # ever published) alert too: a bare staleness comparison against a
       # metric that doesn't exist produces NO series at all, not a true
       # condition, so it would otherwise never fire for that case.
+      # Explicitly per corpus, NOT a bare metric-name absent() check: with
+      # only ONE corpus's series present (the other never having published),
+      # a plain `absent(rag_eval_last_run_timestamp_seconds)` would find the
+      # metric name technically exists and never fire for the missing
+      # corpus. Each `absent(...{corpus="..."}) == 1` clause is scoped to
+      # exactly one corpus, so this rule independently detects: neither
+      # published (both clauses fire, two alert instances), only one
+      # published (the missing corpus's clause fires alone), and both
+      # published but one gone stale (the staleness comparison fires for
+      # just that corpus's series).
       - alert: RagEvaluationStaleOrMissing
         expr: |
-          absent(rag_eval_last_run_timestamp_seconds) == 1
+          absent(rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}) == 1
+          or
+          absent(rag_eval_last_run_timestamp_seconds{corpus="patient_record_corpus"}) == 1
           or
           (time() - rag_eval_last_run_timestamp_seconds) > 86400
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "RAG evaluation is missing or stale"
-          description: "No batch RAG evaluation has ever published, or none has published in over 24 hours."
+          summary: "RAG evaluation is missing or stale for a corpus"
+          description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
 
       - alert: RagCorpusFreshnessCheckStaleOrNotFresh
         expr: |

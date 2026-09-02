@@ -272,13 +272,17 @@ tests:
         exp_alerts: []
 
   # --- RagEvaluationStaleOrMissing (W10 metrics Stage 5) ------------------
+  # Corpus-specific: 6 scenarios covering every combination of neither/
+  # either/both corpora publishing, plus one-stale-one-recent in both
+  # directions.
 
   - interval: 1m
     input_series:
-      # A completely clean Pushgateway: rag_eval_last_run_timestamp_seconds
-      # has NEVER been pushed at all. A bare staleness comparison against a
-      # metric that doesn't exist yields no series (never fires) — only the
-      # absent() branch catches this, which is exactly what this case proves.
+      # A completely clean Pushgateway: NEITHER corpus has ever published.
+      # Both per-corpus absent() clauses fire — two independent alert
+      # instances, one per corpus — proving a bare metric-name absent()
+      # check (which a single missing corpus could defeat if the other
+      # corpus's series still exists) is not what this rule relies on.
       - series: 'up{job="unrelated"}'
         values: "1x30"
     alert_rule_test:
@@ -287,15 +291,58 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              corpus: policy_corpus
             exp_annotations:
-              summary: "RAG evaluation is missing or stale"
-              description: "No batch RAG evaluation has ever published, or none has published in over 24 hours."
+              summary: "RAG evaluation is missing or stale for a corpus"
+              description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
+          - exp_labels:
+              severity: warning
+              corpus: patient_record_corpus
+            exp_annotations:
+              summary: "RAG evaluation is missing or stale for a corpus"
+              description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
 
   - interval: 1m
     input_series:
-      # The timestamp advances roughly in step with the synthetic clock —
-      # "age" stays near zero the whole time, must never fire on staleness.
+      # Only policy_corpus has ever published (recently) — patient_record_
+      # corpus's own absent() clause must fire alone.
       - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RagEvaluationStaleOrMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              corpus: patient_record_corpus
+            exp_annotations:
+              summary: "RAG evaluation is missing or stale for a corpus"
+              description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
+
+  - interval: 1m
+    input_series:
+      # Only patient_record_corpus has ever published (recently) —
+      # policy_corpus's own absent() clause must fire alone.
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="patient_record_corpus"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RagEvaluationStaleOrMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              corpus: policy_corpus
+            exp_annotations:
+              summary: "RAG evaluation is missing or stale for a corpus"
+              description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
+
+  - interval: 1m
+    input_series:
+      # Both corpora recently published — neither absent() nor staleness
+      # fires for either.
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
+        values: "0+60x30"
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="patient_record_corpus"}'
         values: "0+60x30"
     alert_rule_test:
       - eval_time: 25m
@@ -304,10 +351,13 @@ tests:
 
   - interval: 1m
     input_series:
-      # A fixed, far-in-the-past timestamp: time() - value vastly exceeds
-      # 86400s from the very first sample, giving `for: 5m` time to satisfy.
+      # policy_corpus is far-in-the-past stale; patient_record_corpus is
+      # recent — only the stale corpus's series triggers the staleness
+      # branch; the recent one must not.
       - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
         values: "-200000+0x30"
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="patient_record_corpus"}'
+        values: "0+60x30"
     alert_rule_test:
       - eval_time: 3m
         alertname: RagEvaluationStaleOrMissing
@@ -319,8 +369,26 @@ tests:
               severity: warning
               corpus: policy_corpus
             exp_annotations:
-              summary: "RAG evaluation is missing or stale"
-              description: "No batch RAG evaluation has ever published, or none has published in over 24 hours."
+              summary: "RAG evaluation is missing or stale for a corpus"
+              description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
+
+  - interval: 1m
+    input_series:
+      # The mirror image: patient_record_corpus stale, policy_corpus recent.
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="patient_record_corpus"}'
+        values: "-200000+0x30"
+      - series: 'rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RagEvaluationStaleOrMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              corpus: patient_record_corpus
+            exp_annotations:
+              summary: "RAG evaluation is missing or stale for a corpus"
+              description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
 
   # --- RagCorpusFreshnessCheckStaleOrNotFresh (W10 metrics Stage 5) -------
 

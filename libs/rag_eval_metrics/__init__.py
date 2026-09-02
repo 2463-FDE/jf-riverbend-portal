@@ -34,12 +34,18 @@ should proceed, then evaluation).
 
 Both corpora publish under the SAME metric names, distinguished by a
 `corpus` label ("policy_corpus" | "patient_record_corpus") set via
-Pushgateway's grouping key — so every rate/accuracy value here is
-normalized to a 0-1 fraction. libs.rag_eval.metrics.EvalReport reports its
-own recall/precision/duplicate-rate/fragment-coverage-gap as 0-100
-percentages; this module divides them by 100 before publishing so the two
-corpora's numbers are directly comparable on one Grafana panel rather than
-silently disagreeing in scale under the same metric name.
+Pushgateway's grouping key. libs.rag_eval.metrics.EvalReport reports its own
+recall/precision/duplicate-rate/fragment-coverage-gap as 0-100 percentages;
+this module divides them by 100 before publishing so both corpora's values
+share one unit convention (0-1 fractions) on the same axis. Sharing a UNIT
+is not the same as being COMPARABLE: each corpus keeps its own,
+independently appropriate retrieval cutoff (`rag_eval_top_k` — the policy
+corpus defaults to 5, the patient-record corpus to 1; see
+db/policy_corpus_evaluate.py's --top-k and RAG_EVAL_TOP_K respectively), so
+recall@5 for one corpus and recall@1 for the other are never a fair
+side-by-side comparison. `rag_eval_top_k` is published specifically so a
+dashboard or query can check this before treating two numbers as
+comparable, rather than assuming it.
 """
 import logging
 import time
@@ -193,6 +199,7 @@ def policy_corpus_evaluation_gauges(*, report, embedding_client=None) -> Dict[st
     runnable cases existed at all) is omitted, never published as 0 or
     guessed."""
     values: Dict[str, Optional[float]] = {
+        "rag_eval_top_k": float(report.top_k),
         "rag_eval_recall_at_k": report.recall_at_k,
         "rag_eval_precision_at_k": report.precision_at_k,
         MRR_METRIC: mean_reciprocal_rank(report),
@@ -217,6 +224,7 @@ def patient_record_corpus_gauges(*, report, embedding_client=None) -> Dict[str, 
     has no freshness concept of its own (no manifest/database parity check
     exists for it), so it only ever publishes under kind="evaluation"."""
     values: Dict[str, Optional[float]] = {
+        "rag_eval_top_k": float(report.top_k),
         "rag_eval_recall_at_k": report.recall_at_k / 100.0,
         "rag_eval_precision_at_k": report.precision_at_k / 100.0,
         MRR_METRIC: mean_reciprocal_rank_patient_corpus(report),
