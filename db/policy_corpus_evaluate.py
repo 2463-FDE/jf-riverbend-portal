@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Sanitized freshness and real-vector retrieval evaluation for policy RAG."""
+"""Sanitized freshness and real-vector retrieval evaluation for policy RAG.
+
+W10 Metrics Stage 5: `--publish` additionally pushes the sanitized, numeric
+aggregate of this SAME run to a local Prometheus Pushgateway
+(RAG_EVAL_PUSHGATEWAY_URL) — see libs/rag_eval_metrics. Publishing is
+strictly additive and opt-in: without the flag (or with the env var unset),
+behavior is byte-for-byte unchanged from before this stage. A push failure
+never changes this script's exit code — see `output["published"]` in the
+printed JSON for whether it actually succeeded.
+"""
 import argparse
 import json
 import os
@@ -22,6 +31,11 @@ from libs.policy_corpus.evaluation import (  # noqa: E402
 )
 from libs.policy_corpus.manifest import load_manifest  # noqa: E402
 from libs.policy_navigator import scope_for_role  # noqa: E402
+from libs.rag_eval_metrics import (  # noqa: E402
+    policy_corpus_evaluation_gauges,
+    policy_corpus_freshness_gauges,
+    push_metrics,
+)
 
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
 _MANIFEST = os.path.join(_ROOT, "docs", "RagDocs", "manifest.json")
@@ -38,6 +52,10 @@ def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument(
+        "--publish", action="store_true",
+        help="also push this run's sanitized aggregate metrics to RAG_EVAL_PUSHGATEWAY_URL",
+    )
     return parser
 
 
@@ -57,6 +75,16 @@ def main(argv=None) -> int:
         freshness = check_corpus_freshness(conn, _MANIFEST, provider=_PROVIDER, model=model_id)
         output = {"freshness": freshness.as_dict()}
         if not freshness.is_fresh or args.verify_only:
+            if args.publish:
+                # Freshness-only: no evaluation ran, so ONLY the freshness
+                # snapshot/timestamp is touched — kind="evaluation"'s last
+                # completed-run metrics (a prior successful run's
+                # recall/precision/etc.) are never overwritten by this push;
+                # see libs/rag_eval_metrics' module docstring.
+                output["published"] = push_metrics(
+                    pushgateway_url=os.getenv("RAG_EVAL_PUSHGATEWAY_URL", ""),
+                    corpus="policy_corpus", kind="freshness", gauges=policy_corpus_freshness_gauges(freshness=freshness),
+                )
             print(json.dumps(output, indent=2, sort_keys=True))
             return 0 if freshness.is_fresh else 2
 
@@ -88,6 +116,23 @@ def main(argv=None) -> int:
                 "keyword_baseline": keyword_report.as_dict(),
             }
         )
+        if args.publish:
+            # A full run publishes BOTH snapshots: freshness (re-checked
+            # above to decide this run should proceed at all) and the
+            # completed evaluation. The VECTOR report — the real retriever's
+            # own performance — is what gets published; keyword_report is a
+            # comparison baseline only, never mistaken for the navigator's
+            # actual behavior.
+            gateway_url = os.getenv("RAG_EVAL_PUSHGATEWAY_URL", "")
+            freshness_published = push_metrics(
+                pushgateway_url=gateway_url, corpus="policy_corpus", kind="freshness",
+                gauges=policy_corpus_freshness_gauges(freshness=freshness),
+            )
+            evaluation_published = push_metrics(
+                pushgateway_url=gateway_url, corpus="policy_corpus", kind="evaluation",
+                gauges=policy_corpus_evaluation_gauges(report=vector_report, embedding_client=embedding_client),
+            )
+            output["published"] = {"freshness": freshness_published, "evaluation": evaluation_published}
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0 if not vector_report.unauthorized_retrieval_count and not vector_report.forbidden_citation_count else 3
     finally:

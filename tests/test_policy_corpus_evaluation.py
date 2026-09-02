@@ -142,6 +142,27 @@ def test_report_never_contains_question_or_retrieved_text():
     assert report.as_dict()["agent_refusal_accuracy"] is None
 
 
+def test_retrieved_identities_preserve_rank_order_and_dedupe():
+    """W10 Metrics Stage 5 (MRR): retrieved_identities is the ordered,
+    deduped source_id@version list mean_reciprocal_rank ranks against —
+    must preserve retrieval RANK order, and collapse a repeated identity
+    (e.g. two sections of the same source/version) to its first occurrence,
+    never counting it twice or losing its earliest rank."""
+    manifest = load_manifest(MANIFEST_PATH)
+    aliases = load_aliases(ALIASES_PATH)
+    case = _case()
+    retriever = _Retriever(
+        [_chunk("EDU-A1C-001", "1.1"), _chunk("EDU-A1C-001", "1.1"), _chunk("UNAPP-900", "2026-08-22")]
+    )
+
+    report = evaluate_retrieval(
+        [case], aliases=aliases, manifest=manifest, retriever=retriever,
+        scope_resolver=scope_for_role, top_k=5,
+    )
+
+    assert report.results[0].retrieved_identities == ("EDU-A1C-001@1.1", "UNAPP-900@2026-08-22")
+
+
 def test_deferred_case_is_visible_but_never_counted_as_a_pass():
     manifest = load_manifest(MANIFEST_PATH)
     aliases = {"CIT@1.0": AliasTarget("excluded", None, None, "citation_only")}

@@ -43,6 +43,15 @@ COPY db/migrations/scripts/encrypt_agent_draft_text.py ./db/migrations/scripts/e
 COPY db/policy_corpus_prepare.py ./db/policy_corpus_prepare.py
 COPY docs/RagDocs/ ./docs/RagDocs/
 
+# W10 Metrics Stage 5: `make rag-eval-publish`'s policy-corpus half runs
+# this script's --publish flag via `docker compose exec`. Only the two
+# fixed evaluation-case/citation-alias files it reads are copied — not the
+# rest of docs/client-inputs/ (see .dockerignore's per-ancestor-level
+# re-inclusion comment for why each parent directory is listed there too).
+COPY db/policy_corpus_evaluate.py ./db/policy_corpus_evaluate.py
+COPY docs/client-inputs/2026-08-24/evaluations/retrieval-evaluations.jsonl ./docs/client-inputs/2026-08-24/evaluations/retrieval-evaluations.jsonl
+COPY docs/client-inputs/2026-08-24/evaluations/citation-aliases.json ./docs/client-inputs/2026-08-24/evaluations/citation-aliases.json
+
 # roles_config.py resolves <module dir>/../../config/roles.yaml, so the signed
 # permission matrix must sit two levels above /app/roles_config.py — i.e.
 # /config/roles.yaml. Without it every authorized route would fail at request

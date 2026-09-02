@@ -30,6 +30,17 @@ node_modules/
 docs/*
 !docs/RagDocs
 !docs/RagDocs/**
+# W10 Metrics Stage 5: db/policy_corpus_evaluate.py (re-included below) reads
+# these two fixed, synthetic evaluation-case/citation-alias files — same
+# per-ancestor-level re-inclusion requirement as docs/RagDocs above (a bare
+# `!docs/client-inputs/2026-08-24/evaluations` alone does not reach through
+# `docs/*`'s exclusion of its own direct-child ancestor,
+# docs/client-inputs). No other client-inputs content (fixtures/, other
+# dated directories) is re-included.
+!docs/client-inputs
+!docs/client-inputs/2026-08-24
+!docs/client-inputs/2026-08-24/evaluations
+!docs/client-inputs/2026-08-24/evaluations/**
 adr/
 tests/
 .claude/
@@ -63,3 +74,7 @@ db/
 # run it via `docker compose exec`, without needing the sibling CLI scripts
 # (policy_corpus_ingest.py/policy_corpus_evaluate.py) it does not import.
 !db/policy_corpus_prepare.py
+# W10 Metrics Stage 5: records-service's Dockerfile now also COPYs
+# policy_corpus_evaluate.py so `make rag-eval-publish` can run its
+# --publish flag via `docker compose exec`.
+!db/policy_corpus_evaluate.py

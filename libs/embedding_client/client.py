@@ -64,10 +64,25 @@ class EmbeddingClient:
         self._provider = provider if provider is not None else _build_provider(self._config.provider)
         self._sleep = sleep
         self._tokens_used = 0
+        self._retry_count = 0
 
     @property
     def provider_name(self) -> str:
         return self._config.provider
+
+    @property
+    def tokens_used(self) -> int:
+        """Cumulative input tokens reported across every embed() call made
+        through this client instance — W10 Metrics Stage 5's "embedding
+        input-token totals". Zero for a provider that never reports usage."""
+        return self._tokens_used
+
+    @property
+    def retry_count(self) -> int:
+        """Cumulative retry attempts (not counting the first try) across
+        every embed() call made through this client instance — W10 Metrics
+        Stage 5's "provider retry" total."""
+        return self._retry_count
 
     def embed(self, texts: List[str], *, timeout: Optional[float] = None) -> List[List[float]]:
         if not texts:
@@ -104,6 +119,7 @@ class EmbeddingClient:
                     self._config.max_retries,
                     type(exc).__name__,
                 )
+                self._retry_count += 1
                 self._sleep(self._backoff_delay(attempt))
 
         self._tokens_used += response.input_tokens

@@ -113,3 +113,68 @@ groups:
         annotations:
           summary: "Bedrock training cost budget exceeded"
           description: "Versioned, exact-rate Bedrock cost has exceeded $5 over the last hour — a local training threshold, not a production spend limit."
+
+      # W10 metrics Stage 5 — built on libs/rag_eval_metrics' opt-in batch
+      # publish (`make rag-eval-publish`). 86400s (24h) is a local training
+      # cadence, not an SLA: this is a once-in-a-while offline evaluation
+      # run, not a live scrape target.
+      #
+      # TWO separate alerts, not one, deliberately: an EVALUATION (recall/
+      # precision/etc.) and a FRESHNESS CHECK (manifest/database parity) are
+      # independent snapshots published under independent Pushgateway
+      # grouping keys and independent timestamps (see libs/rag_eval_metrics'
+      # module docstring) — a stale/missing evaluation says nothing about
+      # whether the corpus itself is fresh, and vice versa. Each `absent(...)
+      # == 1` branch is what makes a completely clean Pushgateway (nothing
+      # ever published) alert too: a bare staleness comparison against a
+      # metric that doesn't exist produces NO series at all, not a true
+      # condition, so it would otherwise never fire for that case.
+      # Explicitly per corpus, NOT a bare metric-name absent() check: with
+      # only ONE corpus's series present (the other never having published),
+      # a plain `absent(rag_eval_last_run_timestamp_seconds)` would find the
+      # metric name technically exists and never fire for the missing
+      # corpus. Each `absent(...{corpus="..."}) == 1` clause is scoped to
+      # exactly one corpus, so this rule independently detects: neither
+      # published (both clauses fire, two alert instances), only one
+      # published (the missing corpus's clause fires alone), and both
+      # published but one gone stale (the staleness comparison fires for
+      # just that corpus's series).
+      - alert: RagEvaluationStaleOrMissing
+        expr: |
+          absent(rag_eval_last_run_timestamp_seconds{corpus="policy_corpus"}) == 1
+          or
+          absent(rag_eval_last_run_timestamp_seconds{corpus="patient_record_corpus"}) == 1
+          or
+          (time() - rag_eval_last_run_timestamp_seconds) > 86400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAG evaluation is missing or stale for a corpus"
+          description: "The policy_corpus or patient_record_corpus batch RAG evaluation has never published, or has not published in over 24 hours."
+
+      - alert: RagCorpusFreshnessCheckStaleOrNotFresh
+        expr: |
+          absent(rag_corpus_freshness_checked_at_seconds) == 1
+          or
+          (time() - rag_corpus_freshness_checked_at_seconds) > 86400
+          or
+          rag_corpus_freshness_fresh == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy corpus freshness check is missing, stale, or not fresh"
+          description: "No corpus freshness check has ever published, none has published in over 24 hours, or the most recent one reports the corpus is not fresh."
+
+      - alert: RagForbiddenOrUnauthorizedRetrieval
+        expr: |
+          rag_eval_forbidden_citation_count > 0
+          or
+          rag_eval_unauthorized_retrieval_count > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RAG evaluation found a forbidden or unauthorized retrieval"
+          description: "The latest published policy-corpus evaluation recorded at least one forbidden citation or unauthorized (role-scope-violating) retrieval — never expected to be non-zero."

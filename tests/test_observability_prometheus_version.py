@@ -80,12 +80,20 @@ def test_every_committed_prometheus_version_reference_agrees():
     assert len(distinct) == 1, f"prom/prometheus version references disagree: {refs}"
 
 
+# gateway's /metrics is unauthenticated (matches its own /healthz).
+# pushgateway (W10 Metrics Stage 5) has no auth of its own either — it is a
+# local-only observability-profile service with no internal-service-token
+# concept, holding only the sanitized numeric gauges libs/rag_eval_metrics
+# pushed to it.
+_UNAUTHENTICATED_JOBS = ("gateway", "pushgateway")
+
+
 def test_the_token_guarded_scrape_jobs_still_carry_the_internal_token_header():
     config = yaml.safe_load(_PROMETHEUS_TEMPLATE.read_text())
     jobs = {job["job_name"]: job for job in config["scrape_configs"]}
 
-    assert set(jobs) == {"gateway", *_TOKEN_GUARDED_JOBS}, (
-        "the set of scrape jobs changed — update _TOKEN_GUARDED_JOBS if intentional"
+    assert set(jobs) == {*_UNAUTHENTICATED_JOBS, *_TOKEN_GUARDED_JOBS}, (
+        "the set of scrape jobs changed — update _TOKEN_GUARDED_JOBS/_UNAUTHENTICATED_JOBS if intentional"
     )
 
     for name in _TOKEN_GUARDED_JOBS:
@@ -98,5 +106,15 @@ def test_the_token_guarded_scrape_jobs_still_carry_the_internal_token_header():
             f"container startup, never a literal secret committed here"
         )
 
-    # gateway is deliberately unauthenticated (matches its own /healthz).
-    assert "http_headers" not in jobs["gateway"]
+    for name in _UNAUTHENTICATED_JOBS:
+        assert "http_headers" not in jobs[name]
+
+
+def test_the_pushgateway_scrape_job_honors_pushed_labels():
+    """Without honor_labels, Prometheus's own job/instance labels would
+    silently overwrite the job="rag_eval"/corpus="..." labels each publish
+    already set via its grouping key — collapsing both evaluation corpora's
+    series into one indistinguishable set."""
+    config = yaml.safe_load(_PROMETHEUS_TEMPLATE.read_text())
+    jobs = {job["job_name"]: job for job in config["scrape_configs"]}
+    assert jobs["pushgateway"].get("honor_labels") is True

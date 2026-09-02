@@ -1,4 +1,4 @@
-.PHONY: up down logs ps build seed seed-gen demo-reset psql test frontend-dev config phi-backfill up-observability down-observability rag-prepare
+.PHONY: up down logs ps build seed seed-gen demo-reset psql test frontend-dev config phi-backfill up-observability down-observability rag-prepare rag-eval-publish
 
 up:            ## start the whole stack
 	docker compose up -d
@@ -47,6 +47,14 @@ demo-reset:    ## return all four canonical demo patients (1042, 1737, 1738, 173
 
 rag-prepare:   ## idempotently make the approved synthetic policy corpus ready (needs `make up` + real AWS credentials in .env — runs Bedrock embedding calls if the corpus is missing/stale, none if already fresh)
 	docker compose exec -T records-service python3 db/policy_corpus_prepare.py
+
+rag-eval-publish:  ## push this run's sanitized batch RAG evaluation metrics to the local Pushgateway (needs `make up-observability`; the policy-corpus half also needs real AWS credentials in .env and an already-prepared corpus — see rag-prepare)
+	@# W10 Metrics Stage 5. The patient-record-corpus half runs first: it
+	@# needs no external credentials (default fake/in-memory config) and
+	@# always succeeds, so a missing/misconfigured policy-corpus credential
+	@# never blocks it from publishing.
+	docker compose exec -T -e RAG_EVAL_PUSHGATEWAY_URL=http://pushgateway:9091 records-service python3 -m libs.rag_eval.harness --publish
+	docker compose exec -T -e RAG_EVAL_PUSHGATEWAY_URL=http://pushgateway:9091 records-service python3 db/policy_corpus_evaluate.py --publish
 
 seed-gen:      ## regenerate db/seed/seed.sql from the generator (deterministic)
 	python3 db/seed/generate_seed.py > db/seed/seed.sql

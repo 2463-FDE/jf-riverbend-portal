@@ -67,6 +67,13 @@ class CaseResult:
     forbidden_hits: Tuple[str, ...]
     unauthorized_hits: Tuple[str, ...]
     reason: str
+    # W10 Metrics Stage 5 (MRR): every retrieved chunk's `source_id@version`
+    # identity, IN RETRIEVAL RANK ORDER, deduped by identity (first
+    # occurrence kept) — unlike retrieved_source_ids/retrieved_citation_ids
+    # above, this carries the version too, so it matches required_targets'
+    # own identity shape exactly. Never a query, document, or citation TEXT
+    # — only the same source_id/version identifiers already exposed above.
+    retrieved_identities: Tuple[str, ...] = ()
 
     @property
     def retrieval_passed(self) -> bool:
@@ -82,6 +89,7 @@ class CaseResult:
             "retrieval_passed": self.retrieval_passed,
             "retrieved_source_ids": list(self.retrieved_source_ids),
             "retrieved_citation_ids": list(self.retrieved_citation_ids),
+            "retrieved_identities": list(self.retrieved_identities),
             "required_targets": list(self.required_targets),
             "missing_targets": list(self.missing_targets),
             "forbidden_hits": list(self.forbidden_hits),
@@ -103,6 +111,14 @@ class EvaluationReport:
     forbidden_citation_count: int
     unauthorized_retrieval_count: int
     results: Tuple[CaseResult, ...]
+    # W10 Metrics Stage 5 (retrieval-cutoff truthfulness): the actual top_k
+    # this run was called with — never a duplicated constant elsewhere.
+    # Different corpora/harnesses may legitimately use different cutoffs
+    # (e.g. the policy corpus defaults to 5, the patient-record corpus to
+    # 1), so a recall/precision score is only ever comparable to another
+    # score computed at the SAME top_k — this field is what makes that
+    # comparability checkable rather than assumed.
+    top_k: int
 
     @property
     def recall_at_k(self) -> Optional[float]:
@@ -125,6 +141,7 @@ class EvaluationReport:
 
     def as_dict(self) -> dict:
         return {
+            "top_k": self.top_k,
             "total_cases": self.total_cases,
             "runnable_cases": self.runnable_cases,
             "negative_cases": self.negative_cases,
@@ -316,14 +333,18 @@ def evaluate_retrieval(
         chunks = retriever.retrieve(case.question, scope, top_k)
         source_ids = tuple(dict.fromkeys(chunk.source_id for chunk in chunks))
         citation_ids = tuple(dict.fromkeys(chunk.citation_id for chunk in chunks))
-        retrieved_identities = {f"{chunk.source_id}@{chunk.source_version}" for chunk in chunks}
-        missing = tuple(sorted(set(classified.required_targets) - retrieved_identities))
+        # Ordered (rank-preserving), deduped by identity — the MRR input.
+        # Different from the two dedup tuples above: this one keeps the
+        # source VERSION too, matching required_targets' own identity shape.
+        ordered_identities = tuple(dict.fromkeys(f"{chunk.source_id}@{chunk.source_version}" for chunk in chunks))
+        missing = tuple(sorted(set(classified.required_targets) - set(ordered_identities)))
         forbidden = tuple(sorted(set(source_ids) & set(classified.forbidden_targets)))
         unauthorized = tuple(sorted({chunk.citation_id for chunk in chunks if not _authorized(chunk, scope, manifest)}))
         results.append(
             CaseResult(
                 eval_id=case.eval_id, classification=classified.classification, actor_role=actor_role,
                 retrieved_source_ids=source_ids, retrieved_citation_ids=citation_ids,
+                retrieved_identities=ordered_identities,
                 required_targets=classified.required_targets, missing_targets=missing,
                 forbidden_hits=forbidden, unauthorized_hits=unauthorized, reason="",
             )
@@ -345,6 +366,7 @@ def evaluate_retrieval(
         forbidden_citation_count=sum(len(result.forbidden_hits) for result in result_tuple),
         unauthorized_retrieval_count=sum(len(result.unauthorized_hits) for result in result_tuple),
         results=result_tuple,
+        top_k=top_k,
     )
 
 

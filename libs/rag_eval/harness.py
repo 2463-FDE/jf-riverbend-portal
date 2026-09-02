@@ -85,6 +85,30 @@ def run_eval(
 
 
 if __name__ == "__main__":
+    # W10 Metrics Stage 5: --publish pushes this SAME run's sanitized,
+    # numeric aggregate to a local Prometheus Pushgateway — see
+    # libs/rag_eval_metrics. Opt-in and strictly additive: without the
+    # flag, or with RAG_EVAL_PUSHGATEWAY_URL unset, behavior is unchanged.
+    import argparse
+
+    from libs.rag_eval_metrics import patient_record_corpus_gauges, push_metrics
+
     from .report import render_markdown
 
-    print(render_markdown(run_eval()))
+    _parser = argparse.ArgumentParser(description=__doc__)
+    _parser.add_argument(
+        "--publish", action="store_true", help="also push sanitized aggregate metrics to RAG_EVAL_PUSHGATEWAY_URL",
+    )
+    opts = _parser.parse_args()
+
+    client = EmbeddingClient()
+    report = run_eval(embedding_client=client)
+    print(render_markdown(report))
+    if opts.publish:
+        # This corpus has no freshness concept of its own — always kind=
+        # "evaluation" (see libs/rag_eval_metrics.patient_record_corpus_gauges).
+        published = push_metrics(
+            pushgateway_url=os.getenv("RAG_EVAL_PUSHGATEWAY_URL", ""), corpus="patient_record_corpus", kind="evaluation",
+            gauges=patient_record_corpus_gauges(report=report, embedding_client=client),
+        )
+        print(f"published={published}")

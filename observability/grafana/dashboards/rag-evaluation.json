@@ -1,0 +1,127 @@
+{
+  "id": null,
+  "uid": "rag-evaluation",
+  "title": "RAG Evaluation",
+  "description": "W10 metrics Stage 5 — the latest sanitized, offline batch RAG-evaluation run for each corpus (policy_corpus: db/policy_corpus_evaluate.py; patient_record_corpus: libs/rag_eval/harness.py), pushed opt-in via libs/rag_eval_metrics to the local Pushgateway. Never populated by an interactive request — only `make rag-eval-publish`. No query, answer, document, citation, or case identifier is ever in these series, only aggregate scores/counts. The Pushgateway holds NO persistent volume and is never seeded with placeholder/fake values: after any restart (or before the first-ever publish) every panel here is truthfully empty and the missing-evaluation/freshness alerts fire correctly, until `make rag-eval-publish` runs again.",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Recall@k / Precision@k / MRR by corpus",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "rag_eval_mrr: mean reciprocal rank over runnable/gold cases — absent (not zero) when a corpus has no runnable case to rank at all. CAUTION: the two corpora use DIFFERENT retrieval cutoffs (see the rag_eval_top_k panel) — policy_corpus defaults to k=5, patient_record_corpus to k=1. A recall/precision/MRR value is only meaningful compared to another value at the SAME top_k; these two lines are NOT a fair side-by-side comparison of retrieval quality, only two independently-tracked trends sharing one axis/unit.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_recall_at_k", "legendFormat": "recall@k / {{corpus}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_precision_at_k", "legendFormat": "precision@k / {{corpus}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_mrr", "legendFormat": "MRR / {{corpus}}", "refId": "C" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Retrieval cutoff (top_k) by corpus",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "The actual top_k each corpus's most recent evaluation was run with — read from that run's own report, never a value duplicated here. Different corpora legitimately use different cutoffs (policy_corpus: 5 by default; patient_record_corpus: 1 by default) — always check this before comparing recall/precision/MRR across corpora.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_top_k", "legendFormat": "{{corpus}}", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "title": "Policy corpus: citation-target accuracy and negative-case retrieval safety",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "rag_eval_negative_case_retrieval_safety_rate: fraction of unanswerable-by-design cases whose RETRIEVAL avoided every forbidden/unauthorized hit — see libs/rag_eval_metrics.negative_case_retrieval_safety_rate's docstring. This measures retrieval restraint only, NOT agent refusal-wording correctness (no agent runs as part of this evaluation).",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_citation_target_accuracy{corpus=\"policy_corpus\"}", "legendFormat": "citation-target accuracy", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_negative_case_retrieval_safety_rate{corpus=\"policy_corpus\"}", "legendFormat": "negative-case retrieval safety rate", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_case_coverage{corpus=\"policy_corpus\"}", "legendFormat": "case coverage", "refId": "C" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Policy corpus: forbidden citation / unauthorized retrieval",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_forbidden_citation_count{corpus=\"policy_corpus\"}", "legendFormat": "forbidden citations", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_unauthorized_retrieval_count{corpus=\"policy_corpus\"}", "legendFormat": "unauthorized retrievals", "refId": "B" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Patient-record corpus: duplicate rate / fragment-coverage gap",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "AUD-09 identity-fragmentation effects on retrieval quality — see libs/rag_eval/metrics.py.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_duplicate_rate{corpus=\"patient_record_corpus\"}", "legendFormat": "duplicate rate", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_fragment_coverage_gap{corpus=\"patient_record_corpus\"}", "legendFormat": "fragment-coverage gap", "refId": "B" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Policy corpus freshness",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "short", "mappings": [{ "type": "value", "options": { "0": { "text": "STALE" }, "1": { "text": "fresh" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_freshness_fresh{corpus=\"policy_corpus\"}", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "Policy corpus: document/chunk parity and freshness issues",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "expected_* comes from the current manifest; database_*/embedded_* from Postgres — a gap between them is exactly what freshness_issues_total counts.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_expected_documents{corpus=\"policy_corpus\"}", "legendFormat": "expected documents", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_database_documents{corpus=\"policy_corpus\"}", "legendFormat": "database documents", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_expected_chunks{corpus=\"policy_corpus\"}", "legendFormat": "expected chunks", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_embedded_chunks{corpus=\"policy_corpus\"}", "legendFormat": "embedded chunks", "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_corpus_freshness_issues_total{corpus=\"policy_corpus\"}", "legendFormat": "freshness issues", "refId": "E" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Evaluation age / freshness-check age by corpus",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "description": "Two INDEPENDENT ages, matching the two independent alerts: how long ago each CORPUS's last COMPLETED evaluation published (RagEvaluationStaleOrMissing checks policy_corpus and patient_record_corpus separately) vs. how long ago the policy corpus's freshness check last ran (RagCorpusFreshnessCheckStaleOrNotFresh). A stale/verify-only run advances only the second. A corpus with NO series here yet (a clean Pushgateway, or one that never published) is exactly the condition RagEvaluationStaleOrMissing's absent() branch catches.",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "time() - rag_eval_last_run_timestamp_seconds", "legendFormat": "evaluation age / {{corpus}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "time() - rag_corpus_freshness_checked_at_seconds", "legendFormat": "freshness-check age / {{corpus}}", "refId": "B" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Embedding input tokens / provider retries per run",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_embedding_input_tokens_total", "legendFormat": "input tokens / {{corpus}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus_ds" }, "expr": "rag_eval_embedding_provider_retry_total", "legendFormat": "provider retries / {{corpus}}", "refId": "B" }
+      ]
+    }
+  ]
+}
