@@ -64,8 +64,12 @@ frontend-dev:  ## run the Next.js dev server
 config:        ## validate the compose file
 	docker compose config -q && echo "compose OK"
 
-up-observability:  ## start the whole stack PLUS Prometheus/Grafana/Loki/Alloy (local observability POC — see docs/runbook.md)
-	docker compose --profile observability up -d
+up-observability:  ## start the whole stack PLUS Prometheus/Grafana/Loki/Alloy/Tempo (local observability POC — see docs/runbook.md)
+	@# TRACE-M01: intake-service/eligibility-service/records-service's own
+	@# OTEL_EXPORTER_OTLP_ENDPOINT (docker-compose.yml) defaults to empty —
+	@# `make up` must never point them at a collector this profile alone
+	@# starts. This is the one place that value is supplied.
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 docker compose --profile observability up -d
 	@$(MAKE) phi-backfill
 
 down-observability: ## stop the stack including the observability profile's containers

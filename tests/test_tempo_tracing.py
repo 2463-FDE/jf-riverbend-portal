@@ -118,19 +118,26 @@ def test_records_service_and_eligibility_service_get_distinct_otel_service_names
     assert services["eligibility-service"]["environment"]["OTEL_SERVICE_NAME"] == "eligibility-service"
 
 
-# --- TRACE-B01: the three traced services actually point at the collector --
+# --- TRACE-B01 / TRACE-M01: the collector endpoint, correctly scoped ------
 #
-# Review finding TRACE-B01: intake-service, eligibility-service, and
-# records-service were never given OTEL_EXPORTER_OTLP_ENDPOINT in
-# docker-compose.yml at all — .env's own copy of that var is commented out by
-# default, so every one of them silently fell back to ConsoleSpanExporter
-# regardless of whether `make up-observability` was running. Tested against
-# the RESOLVED `docker compose config`, not the raw YAML: a real `docker
-# compose config` invocation with a fully-isolated, test-only environment
-# (mirrors tests/test_phi_compose_wiring.py's own established pattern) —
-# never this worktree's own .env — so the assertion holds regardless of
-# whether these values are later written as literals or as ${VAR:-default}
-# interpolation.
+# TRACE-B01: intake-service, eligibility-service, and records-service were
+# never given OTEL_EXPORTER_OTLP_ENDPOINT in docker-compose.yml at all —
+# .env's own copy of that var is commented out by default, so every one of
+# them silently fell back to ConsoleSpanExporter regardless of whether
+# `make up-observability` was running.
+#
+# TRACE-M01: the first fix made the endpoint a literal, unconditional value —
+# which then pointed all three at otel-collector even under plain `make up`,
+# where that container never starts. `${OTEL_EXPORTER_OTLP_ENDPOINT:-}`
+# resolves to empty by default; only `make up-observability` (via the
+# Makefile, not `.env`) supplies the real value.
+#
+# Tested against the RESOLVED `docker compose config`, not the raw YAML: a
+# real `docker compose config` invocation with a fully-isolated, test-only
+# environment (mirrors tests/test_phi_compose_wiring.py's own established
+# pattern) — never this worktree's own .env — so the assertion holds
+# regardless of whether these values are later written as literals or as
+# ${VAR:-default} interpolation.
 
 _COMPOSE_REQUIRED_ENV = {
     "INTERNAL_SERVICE_TOKEN": "test-internal-token-well-over-the-32-char-floor",
@@ -147,6 +154,8 @@ _EXPECTED_TRACED_SERVICES = {
     "records-service": "records-service",
 }
 
+_COLLECTOR_ENDPOINT = "http://otel-collector:4318"
+
 
 def _docker_available():
     try:
@@ -156,12 +165,14 @@ def _docker_available():
         return False
 
 
-def _resolved_compose_config():
+def _resolved_compose_config(extra_env=None):
     """The fully-resolved compose config, from a real `docker compose
     config` run against an isolated, test-only environment — never this
-    worktree's own .env."""
+    worktree's own .env. `extra_env` simulates what `make up-observability`
+    supplies on the command line, not through `.env`."""
     full_env = {"PATH": os.environ.get("PATH", "")}
     full_env.update(_COMPOSE_REQUIRED_ENV)
+    full_env.update(extra_env or {})
     result = subprocess.run(
         ["docker", "compose", "--env-file", "/dev/null", "config"],
         cwd=_ROOT,
@@ -174,43 +185,78 @@ def _resolved_compose_config():
 
 
 @pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
-def test_each_traced_service_resolves_to_the_collector_endpoint_and_its_own_name():
+def test_the_default_config_leaves_the_collector_endpoint_unset_for_all_three():
+    """Plain `make up` (no override, no observability profile running) must
+    resolve to the SAME falsy value libs/tracing's own `if otlp_endpoint:`
+    check already treats as "not configured" — never a value pointing at a
+    container this path never starts."""
     resolved = _resolved_compose_config()
+    for service in _EXPECTED_TRACED_SERVICES:
+        env = resolved["services"][service]["environment"]
+        assert not env.get("OTEL_EXPORTER_OTLP_ENDPOINT"), (
+            f"{service} should resolve OTEL_EXPORTER_OTLP_ENDPOINT to empty under plain `make up`, "
+            f"got {env.get('OTEL_EXPORTER_OTLP_ENDPOINT')!r}"
+        )
+        # OTEL_SERVICE_NAME is unaffected by TRACE-M01 — still set unconditionally.
+        assert env.get("OTEL_SERVICE_NAME") == _EXPECTED_TRACED_SERVICES[service]
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
+def test_the_observability_path_resolves_the_collector_endpoint_and_distinct_names():
+    """Simulates exactly what `make up-observability` supplies on the
+    command line (see the Makefile target) — never through `.env`."""
+    resolved = _resolved_compose_config({"OTEL_EXPORTER_OTLP_ENDPOINT": _COLLECTOR_ENDPOINT})
     for service, expected_name in _EXPECTED_TRACED_SERVICES.items():
         env = resolved["services"][service]["environment"]
         assert env.get("OTEL_SERVICE_NAME") == expected_name, (
             f"{service} should resolve OTEL_SERVICE_NAME={expected_name!r}, got {env.get('OTEL_SERVICE_NAME')!r}"
         )
-        assert env.get("OTEL_EXPORTER_OTLP_ENDPOINT") == "http://otel-collector:4318", (
-            f"{service} should resolve OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318, "
+        assert env.get("OTEL_EXPORTER_OTLP_ENDPOINT") == _COLLECTOR_ENDPOINT, (
+            f"{service} should resolve OTEL_EXPORTER_OTLP_ENDPOINT={_COLLECTOR_ENDPOINT!r}, "
             f"got {env.get('OTEL_EXPORTER_OTLP_ENDPOINT')!r} — the collector's actual compose "
             f"service name is 'otel-collector', not 'collector'"
         )
 
 
 @pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
-@pytest.mark.parametrize("service", sorted(_EXPECTED_TRACED_SERVICES))
-def test_the_traced_service_endpoint_is_not_silently_dropped(service):
-    """The failure mode TRACE-B01 actually was: the key present with an
-    empty/placeholder value, or absent from the environment mapping
-    entirely, either of which leaves spans.py's own `if otlp_endpoint:`
-    check false and traces never leave the container."""
-    resolved = _resolved_compose_config()
-    env = resolved["services"][service]["environment"]
-    assert env.get("OTEL_EXPORTER_OTLP_ENDPOINT"), (
-        f"{service} has no truthy OTEL_EXPORTER_OTLP_ENDPOINT in the resolved config"
-    )
-
-
-@pytest.mark.skipif(not _docker_available(), reason="docker CLI not available")
 def test_untraced_services_get_no_otel_configuration_added():
     """Review scope boundary: gateway/scheduling/roi/interop must not gain
-    tracing configuration as a side effect of this fix."""
-    resolved = _resolved_compose_config()
-    for service in ("gateway", "scheduling-service", "roi-service", "interop-service"):
-        env = resolved["services"][service].get("environment") or {}
-        assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env, f"{service} should not receive OTEL_EXPORTER_OTLP_ENDPOINT"
-        assert "OTEL_SERVICE_NAME" not in env, f"{service} should not receive OTEL_SERVICE_NAME"
+    tracing configuration as a side effect of this fix, in either mode."""
+    for extra_env in (None, {"OTEL_EXPORTER_OTLP_ENDPOINT": _COLLECTOR_ENDPOINT}):
+        resolved = _resolved_compose_config(extra_env)
+        for service in ("gateway", "scheduling-service", "roi-service", "interop-service"):
+            env = resolved["services"][service].get("environment") or {}
+            assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env, (
+                f"{service} should not receive OTEL_EXPORTER_OTLP_ENDPOINT"
+            )
+            assert "OTEL_SERVICE_NAME" not in env, f"{service} should not receive OTEL_SERVICE_NAME"
+
+
+def test_make_up_observability_supplies_the_expected_collector_endpoint():
+    """Pins the Makefile <-> compose relationship so they cannot silently
+    drift apart: if the collector's compose service name or port ever
+    changes, this must change too, deliberately, in the same diff."""
+    makefile = (_ROOT / "Makefile").read_text()
+    match = re.search(r"^up-observability:.*\n((?:\t.*\n)+)", makefile, re.M)
+    assert match, "expected an up-observability target in the Makefile"
+    body = match.group(1)
+    assert f"OTEL_EXPORTER_OTLP_ENDPOINT={_COLLECTOR_ENDPOINT}" in body, (
+        f"up-observability must supply OTEL_EXPORTER_OTLP_ENDPOINT={_COLLECTOR_ENDPOINT!r} "
+        f"on the compose invocation itself — found: {body!r}"
+    )
+    assert "--profile observability" in body and " up" in body, (
+        "up-observability must actually start the observability profile"
+    )
+    # The env var assignment must precede the same line's `docker compose`
+    # invocation, not merely appear somewhere else in the target body.
+    for line in body.splitlines():
+        if "docker compose" in line and "--profile observability" in line:
+            assert line.strip().startswith(f"OTEL_EXPORTER_OTLP_ENDPOINT={_COLLECTOR_ENDPOINT}"), (
+                f"expected the env var set on the same line as the compose invocation: {line!r}"
+            )
+            break
+    else:
+        pytest.fail("no line in up-observability invokes `docker compose ... --profile observability up`")
 
 
 def test_otel_collector_config_is_a_traces_only_pipeline():

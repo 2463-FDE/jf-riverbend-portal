@@ -178,19 +178,24 @@ services:
       PHI_ACTIVE_KEY_VERSION: ${PHI_ACTIVE_KEY_VERSION:?PHI_ACTIVE_KEY_VERSION must be set in .env — see adr/0012}
       PHI_ENCRYPTION_KEY_V1: ${PHI_ENCRYPTION_KEY_V1:?PHI_ENCRYPTION_KEY_V1 must be set in .env — see adr/0012}
       PHI_BLIND_INDEX_KEY_V1: ${PHI_BLIND_INDEX_KEY_V1:?PHI_BLIND_INDEX_KEY_V1 must be set in .env — see adr/0012}
-      # TRACE-B01 fix (W10 metrics Stage 3 review): without these, spans.py's
-      # own OTLP branch is never reached at all — .env's own
-      # OTEL_EXPORTER_OTLP_ENDPOINT is commented out by default, so this
-      # service silently fell back to ConsoleSpanExporter regardless of the
-      # observability profile being up. Same reasoning as records-service/
-      # eligibility-service's own OTEL_SERVICE_NAME override below: .env's
-      # shared value can't differ per service. Pointed at the collector
-      # unconditionally (not profile-conditional) is safe — libs/tracing's
-      # own exporter setup only warns and falls back to console if
-      # otel-collector isn't actually reachable, per its own no-op-on-
-      # failure contract; it never affects the request being served.
+      # TRACE-B01 fix (W10 metrics Stage 3 review): without OTEL_SERVICE_NAME,
+      # spans from this service would report under .env's single shared
+      # value, indistinguishable from every other traced service — see
+      # records-service/eligibility-service's identical override below.
+      #
+      # TRACE-M01 fix: OTEL_EXPORTER_OTLP_ENDPOINT is deliberately NOT a
+      # literal here. `make up` (no observability profile) never starts
+      # otel-collector, so an unconditional endpoint would still be handed
+      # to this service, and libs/tracing's real exporter would then retry
+      # a genuinely nonexistent host on every batch flush — non-fatal (its
+      # own no-op-on-failure contract holds), but noisy, misleading log
+      # spam on the ordinary default path. `${OTEL_EXPORTER_OTLP_ENDPOINT:-}`
+      # resolves to empty unless `make up-observability` supplies it (see
+      # the Makefile target), which is exactly the same falsy value
+      # spans.py's own `if otlp_endpoint:` check already treats as "no
+      # OTLP configured" — unchanged behavior for `make up`.
       OTEL_SERVICE_NAME: intake-service
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "8071:8071"
     depends_on:
@@ -234,7 +239,7 @@ services:
       # TRACE-B01 fix (review): also needs its own endpoint override — see
       # intake-service's identical entry above for why .env's own value
       # can't do this alone.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       redis:
         condition: service_started
@@ -282,7 +287,7 @@ services:
       # so its spans need their own distinct service.name too.
       OTEL_SERVICE_NAME: records-service
       # TRACE-B01 fix (review): see intake-service's identical entry above.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "8073:8073"
     depends_on:

@@ -352,13 +352,22 @@ Endpoints once up:
   network.
 - `make up-observability` also starts the trace path (W10 metrics Stage 3):
   `otel-collector` and `tempo`, neither with a host-published port. `intake-
-  service`, `eligibility-service`, and `records-service` each ship spans to
-  `http://otel-collector:4318`, which forwards to Tempo. Traces are viewed
-  through Grafana's Explore view against the Tempo datasource (search by
-  `service.name` or `correlation_id`) — there is no separate Tempo UI.
-  Span/event content is metadata only (ids, categorical outcomes, counts,
-  durations): never a prompt, a model response, patient data, or a
-  credential — see `libs/tracing/spans.py`'s own redaction contract.
+  service`, `eligibility-service`, and `records-service` each resolve
+  `OTEL_EXPORTER_OTLP_ENDPOINT` to empty under plain `make up` — no spans
+  leave the container, same as leaving tracing unconfigured entirely.
+  `make up-observability` is what actually supplies
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` to all three (set
+  directly on the compose invocation, not via `.env` — see the Makefile
+  target), which forwards to Tempo. If you invoke
+  `docker compose --profile observability up` directly instead of through
+  `make up-observability`, set that same value yourself first (in `.env` or
+  your shell), or the collector/Tempo containers will be running with
+  nothing exporting to them. Traces are viewed through Grafana's Explore
+  view against the Tempo datasource (search by `service.name` or
+  `correlation_id`) — there is no separate Tempo UI. Span/event content is
+  metadata only (ids, categorical outcomes, counts, durations): never a
+  prompt, a model response, patient data, or a credential — see
+  `libs/tracing/spans.py`'s own redaction contract.
 
 This is a **local observability POC**, not production monitoring: no
 remote-write, no long-term retention policy beyond local disk, no alert
