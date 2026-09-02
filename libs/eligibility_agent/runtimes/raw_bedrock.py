@@ -302,13 +302,21 @@ class RawBedrockAgentRuntime:
         self, visit_id: str, user_message: str, *, known_identifiers: Iterable[str] = ()
     ) -> Iterator[VisitStreamEvent]:
         """w-9-2-planner P1b: same bounded loop and dispatch rule as
-        handle_message, but forwards each text_delta from the model AS IT
-        ARRIVES instead of buffering a complete reply. Tool calls are never
-        forwarded — only dispatched internally, exactly like handle_message
-        — so a tool-resolution turn (the normal case for this agent)
-        produces no output at all until the model's actual answer starts
-        streaming; the caller may show a spinner in the meantime, per
-        agents.md.
+        handle_message, delivered as newline-delimited events. Tool calls are
+        never forwarded — only dispatched internally, exactly like
+        handle_message — so a tool-resolution turn (the normal case for this
+        agent) produces no output at all while the lookup happens; the caller
+        may show a spinner in the meantime, per agents.md.
+
+        Text deltas are buffered for the duration of each provider turn and
+        released only once that turn is complete, because a turn may emit
+        prose BEFORE the tool call that decides whether the prose is true. A
+        turn containing any tool call has its buffered text discarded
+        outright; a turn containing none releases it in order — unless a tool
+        already ran, in which case the deterministic render replaces it. This
+        costs token-level streaming granularity and buys the guarantee that
+        nothing the model guessed about an eligibility result can reach the
+        browser ahead of the result itself.
 
         Ends in exactly one terminal event: "done" (safe categorical
         metadata, mirroring VisitTurnResult) or "error" (one sanitized
@@ -367,6 +375,14 @@ class RawBedrockAgentRuntime:
 
         for turn in range(1, self._max_turns + 1):
             collected_tool_calls = []
+            # Text is buffered for the WHOLE provider turn rather than
+            # forwarded as it arrives: Bedrock may emit prose BEFORE the
+            # tool_call in the same turn, and that prose is the model's guess
+            # at an answer it has not looked up yet. Forwarding it live would
+            # put "Eligibility is active" in the browser moments before the
+            # tool result that decides whether that is even true. Nothing is
+            # emitted until the turn is complete and its tool calls are known.
+            buffered_text: List[str] = []
             turn_input_tokens = turn_output_tokens = None
             # Duration here is the WHOLE streamed turn, first byte to the
             # tool-use/end-turn decision — mirrors bedrock_tool_port.py's own
@@ -378,13 +394,8 @@ class RawBedrockAgentRuntime:
                     for event in self._model.converse_stream(
                         messages, decision.tool_specs, timeout=self._timeout_seconds
                     ):
-                        # Once a tool has run this turn's model prose is
-                        # going to be replaced by the deterministic render,
-                        # so it must not reach the browser first — otherwise
-                        # the caller would watch an unvetted description of
-                        # the outcome appear and then be contradicted.
-                        if event.kind == "text_delta" and event.text and not results.any_recorded:
-                            yield VisitStreamEvent(kind="delta", text=event.text)
+                        if event.kind == "text_delta" and event.text:
+                            buffered_text.append(event.text)
                         elif event.kind == "tool_call" and event.tool_call is not None:
                             collected_tool_calls.append(event.tool_call)
                         elif event.kind == "usage":
@@ -392,6 +403,11 @@ class RawBedrockAgentRuntime:
                 except LLMClientError as exc:
                     log.warning("agent provider call failed (turn=%s, error_type=%s)", turn, type(exc).__name__)
                     span.record_exception_type(type(exc).__name__)
+                    # Anything buffered before the failure is discarded: a
+                    # turn that never completed cannot have produced a
+                    # trustworthy answer, and the sanitized terminal error is
+                    # the only thing the caller should see.
+                    buffered_text.clear()
                     yield VisitStreamEvent(
                         kind="error",
                         text=_SAFE_PROVIDER_ERROR_REPLY,
@@ -413,13 +429,19 @@ class RawBedrockAgentRuntime:
                 record_event(span, "agent_decision", {"turn": turn, "stop_reason": stop_reason})
 
                 if not collected_tool_calls:
-                    # The deterministic result arrives as an ordinary delta,
-                    # exactly like any other user-facing text, so the
-                    # existing NDJSON contract ("done" never carries reply
-                    # text) is unchanged.
+                    # The turn is complete and asked for no tool, so this is
+                    # the answer turn. Either a tool ran earlier — in which
+                    # case the deterministic render replaces the model's
+                    # narration of it — or none ever did, and the buffered
+                    # text is released in its original order. Both arrive as
+                    # ordinary deltas, so the existing NDJSON contract
+                    # ("done" never carries reply text) is unchanged.
                     rendered = results.render(decision)
                     if rendered:
                         yield VisitStreamEvent(kind="delta", text=rendered)
+                    else:
+                        for chunk in buffered_text:
+                            yield VisitStreamEvent(kind="delta", text=chunk)
                     yield VisitStreamEvent(
                         kind="done",
                         tool_called=tool_called,
@@ -430,6 +452,9 @@ class RawBedrockAgentRuntime:
                     )
                     return
 
+            # This turn asked for a tool, so whatever prose it also emitted
+            # was written before the lookup happened. `buffered_text` is
+            # dropped here, unsent, and re-initialised on the next turn.
             messages.append(
                 {"role": "assistant", "content": [
                     {"toolUse": {"toolUseId": c.id, "name": c.name, "input": c.arguments}} for c in collected_tool_calls
@@ -477,10 +502,6 @@ class _ToolResults:
     def __init__(self):
         self._verify: Optional[dict] = None
         self._coverage: Optional[dict] = None
-
-    @property
-    def any_recorded(self) -> bool:
-        return self._verify is not None or self._coverage is not None
 
     def record(self, tool_name: str, payload: dict) -> None:
         if tool_name == VERIFY_TOOL_NAME:

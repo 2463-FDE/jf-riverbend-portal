@@ -60,6 +60,13 @@ _VERIFY_SIGNALS = (
     "verify", "verified", "verification", "revalidat", "re-verif", "reverif",
     "check", "recheck", "re-check", "confirm", "eligib", "still active", "is it active",
     "is insurance active", "insurance valid", "is it valid", "coverage valid",
+    # The way front-desk staff actually phrase a verification request. "covered"
+    # carries the -ed deliberately: bare "cover" would also swallow questions
+    # about what a plan pays for ("what does my plan cover for a physical?"),
+    # which is neither tool's job. "coverage active" is likewise the whole
+    # phrase, so it cannot fire on the stored-record wording "what coverage is
+    # on file?".
+    "covered", "coverage active", "coverage is active",
 )
 _COVERAGE_SIGNALS = (
     "on file", "on record", "stored", "member id", "member number", "member #",

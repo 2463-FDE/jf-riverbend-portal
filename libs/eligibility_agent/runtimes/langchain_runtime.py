@@ -47,18 +47,19 @@ from libs.safe_logging import get_safe_logger
 from ..contracts import EligibilityStatus, TerminationReason, VisitContext, VisitTurnResult, parse_as_of
 from ..eligibility_tool import (
     COVERAGE_TOOL_NAME,
-    COVERAGE_TOOL_SPEC,
     VERIFY_TOOL_NAME,
-    VERIFY_TOOL_SPEC,
     EligibilityToolConfig,
     GetCoverageOnFileTool,
     VerifyCurrentEligibilityTool,
 )
 from ..memory import VisitMemoryPort
+from ..response_contract import classify_intent, render_reply
 
 log = get_safe_logger(__name__)
 
-_TOOL_SPECS = [VERIFY_TOOL_SPEC, COVERAGE_TOOL_SPEC]
+# Every tool that exists. What the model is actually bound to, and allowed to
+# run, on a given call is the classified intent's own narrower subset — see
+# response_contract.IntentDecision and tools_node below.
 _ALLOWED_TOOLS = frozenset({VERIFY_TOOL_NAME, COVERAGE_TOOL_NAME})
 
 _SAFE_PROVIDER_ERROR_REPLY = (
@@ -126,10 +127,25 @@ class LangChainAgentRuntime:
             ),
             COVERAGE_TOOL_NAME: GetCoverageOnFileTool(context),
         }
+        # Same response contract as raw_bedrock (see
+        # libs/eligibility_agent/response_contract.py): the caller's own words
+        # decide which tool may run, and the tool payload — not the model's
+        # narration of it — is what the caller reads.
+        decision = classify_intent(user_message)
         chat_model = self._chat_model_factory()
-        bound_model = chat_model.bind_tools(_TOOL_SPECS)
+        bound_model = chat_model.bind_tools(decision.tool_specs)
 
-        outcome = {"tool_called": False, "eligibility_status": context.eligibility_status, "context": context}
+        outcome = {
+            "tool_called": False,
+            "eligibility_status": context.eligibility_status,
+            "context": context,
+            # Kept per tool so each outcome is rendered once. A local pair of
+            # slots rather than a shared helper: raw_bedrock's accumulator is
+            # private to that module, and duplicating two assignments is
+            # cheaper than coupling the two runtimes' internals.
+            "verify_payload": None,
+            "coverage_payload": None,
+        }
         max_turns = self._max_turns
 
         def agent_node(state):
@@ -159,11 +175,23 @@ class LangChainAgentRuntime:
                 if call["name"] not in _ALLOWED_TOOLS:
                     log.warning("agent tool call rejected (reason=unknown_tool)")
                     payload = {"error": "unknown_tool"}
+                elif call["name"] not in decision.tool_names:
+                    # Binding only the intent's tools is not enough on its
+                    # own — a model can name a tool it was never offered — so
+                    # the same narrowing is enforced here, before invoke().
+                    log.warning(
+                        "agent tool call rejected (reason=outside_requested_intent tool=%s)", call["name"]
+                    )
+                    payload = {"error": "tool_not_requested"}
                 else:
                     result = tools_by_name[call["name"]].invoke(call.get("args") or {})
                     payload = result.payload
                     if result.ok:
                         outcome["tool_called"] = True
+                        if call["name"] == VERIFY_TOOL_NAME:
+                            outcome["verify_payload"] = payload
+                        elif call["name"] == COVERAGE_TOOL_NAME:
+                            outcome["coverage_payload"] = payload
                         # Same scoping as raw_bedrock.py: only a VERIFIED
                         # outcome from verify_current_eligibility may update
                         # eligibility_status/eligibility_checked_at — see
@@ -245,9 +273,18 @@ class LangChainAgentRuntime:
                 turns_used=turns_used,
             )
 
+        rendered = render_reply(
+            verify_payload=outcome["verify_payload"],
+            coverage_payload=outcome["coverage_payload"],
+            include_member_id=decision.include_member_id,
+        )
         return VisitTurnResult(
             visit_id=visit_id,
-            reply=getattr(last, "content", "") or "",
+            # Once a tool has run its result is rendered from the payload —
+            # the model's narration of that result is discarded, exactly as
+            # in raw_bedrock. With no tool result there is nothing to render
+            # and the model's own answer stands.
+            reply=rendered or getattr(last, "content", "") or "",
             tool_called=outcome["tool_called"],
             eligibility_status=outcome["eligibility_status"],
             termination_reason=TerminationReason.ANSWERED,

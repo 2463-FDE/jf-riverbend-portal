@@ -76,8 +76,11 @@ class ConverseTurn:
 @dataclass(frozen=True)
 class ConverseStreamEvent:
     """One increment of a streamed turn — w-9-2-planner P1b. `kind` is
-    "text_delta" (a piece of user-facing answer text, safe to forward to the
-    browser as it arrives), "tool_call" (a fully-assembled tool call, never
+    "text_delta" (a piece of model answer text — NOT automatically safe to
+    forward: a turn can emit prose before the tool call that decides whether
+    that prose is true, so the caller buffers per turn and decides once the
+    turn is complete; see runtimes/raw_bedrock.py), "tool_call" (a
+    fully-assembled tool call, never
     forwarded to the browser — internal dispatch only), "stop" (the turn
     ended; carries Bedrock's own stop_reason, itself just a short enum
     string, not raw provider output), or "usage" (W10 Metrics Stage 4:
@@ -293,9 +296,11 @@ class BedrockConverseToolModel(ToolCapableModel):
 
     def _converse_stream(self, messages: list, tools: list, *, timeout: float) -> Iterator[ConverseStreamEvent]:
         """w-9-2-planner P1b: Bedrock's ConverseStream API, translated to
-        ConverseStreamEvent. Text deltas are yielded AS THEY ARRIVE — the
-        caller (RawBedrockAgentRuntime) forwards exactly these to the
-        browser, live. A toolUse content block's `input` streams as
+        ConverseStreamEvent. Text deltas are yielded here AS THEY ARRIVE,
+        but that is a transport detail, not permission to display them: the
+        caller (RawBedrockAgentRuntime) buffers them for the whole turn and
+        decides what to release once it knows whether the turn also called a
+        tool. A toolUse content block's `input` streams as
         fragments of a JSON string across several deltas — accumulated
         silently here and parsed once as a whole on contentBlockStop; a
         tool call is never itself forwarded to the browser, only dispatched

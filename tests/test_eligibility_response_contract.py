@@ -38,6 +38,32 @@ def test_a_verification_question_reaches_only_the_verify_tool(message):
     assert [spec["name"] for spec in decision.tool_specs] == [VERIFY_TOOL_NAME]
 
 
+def test_am_i_covered_is_a_verification_request():
+    """INTENT-COVERED-GAP: the canonical front-desk phrasing. Left
+    unclassified it would have fallen through to UNSPECIFIED and offered
+    both tools, which is exactly the ambiguity this contract removes."""
+    decision = classify_intent("am I covered?")
+    assert decision.intent is Intent.VERIFY
+    assert decision.tool_names == (VERIFY_TOOL_NAME,)
+    assert [spec["name"] for spec in decision.tool_specs] == [VERIFY_TOOL_NAME]
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["am I covered?", "is this patient covered?", "is coverage active?", "coverage active"],
+)
+def test_the_other_covered_phrasings_are_verification_requests_too(message):
+    decision = classify_intent(message)
+    assert decision.intent is Intent.VERIFY
+    assert decision.tool_names == (VERIFY_TOOL_NAME,)
+
+
+def test_covered_phrasing_does_not_capture_a_plan_benefits_question():
+    """"cover" without the -ed is a question about what a plan pays for —
+    neither tool answers that, so it must not be forced into one."""
+    assert classify_intent("What does my plan cover for an annual physical?").intent is Intent.UNSPECIFIED
+
+
 @pytest.mark.parametrize(
     "message",
     [
