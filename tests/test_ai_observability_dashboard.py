@@ -183,41 +183,17 @@ def test_the_alert_file_states_these_are_local_prometheus_rules_only():
     assert "no external paging" in text or "no production paging" in text
 
 
-# --- Loki correlation_id derived field (pulled forward from Stage 3) -----
-
-
-def _loki_datasource():
+def test_datasources_yaml_declares_no_unverified_correlation_link():
+    """Review finding OBS-M01: a Loki derivedFields correlation link was
+    added and removed in this PR. It shipped with an unescaped `$` (Grafana
+    interpolates `$` in provisioning YAML as an env-var reference — the
+    Loki docs require `$${__value.raw}`) and relied on undocumented
+    internal-link-to-Loki semantics this session has no live Grafana to
+    verify. Rather than ship a fixed-looking but still-unverified URL
+    scheme, the feature was dropped entirely — asserted absent here so it
+    isn't reintroduced without an actual running Grafana to prove it works
+    against. Stage 3's real Tempo-backed trace-to-log link is the honest
+    place for this capability."""
     config = yaml.safe_load(_DATASOURCES.read_text())
-    matches = [ds for ds in config["datasources"] if ds["uid"] == "loki_ds"]
-    assert len(matches) == 1
-    return matches[0]
-
-
-def test_loki_has_a_correlation_id_derived_field():
-    loki = _loki_datasource()
-    fields = loki.get("jsonData", {}).get("derivedFields", [])
-    by_name = {f["name"]: f for f in fields}
-    assert "correlation_id" in by_name, "expected a correlation_id derivedField on the Loki datasource"
-
-
-def test_the_derived_field_extracts_only_correlation_id_never_an_identifier():
-    """The privacy boundary this dashboard's Loki panel already assumes:
-    only a categorical/opaque field may become a clickable link. A regex
-    accidentally capturing a patient/user/draft id would turn a harmless
-    log-correlation feature into an identifier-search tool."""
-    loki = _loki_datasource()
-    field = next(f for f in loki["jsonData"]["derivedFields"] if f["name"] == "correlation_id")
-    forbidden = ("patient", "user_id", "ssn", "ip_address", "draft_id", "insurance_id")
-    assert not any(word in field["matcherRegex"].lower() for word in forbidden)
-    assert not any(word in field["name"].lower() for word in forbidden)
-
-
-def test_the_derived_field_links_back_into_loki_not_an_external_or_broken_datasource():
-    """Must resolve to a datasource this stack actually runs today
-    (loki_ds) — not a placeholder Tempo datasource this stage never
-    provisions, which would just show as an unhealthy link."""
-    loki = _loki_datasource()
-    field = next(f for f in loki["jsonData"]["derivedFields"] if f["name"] == "correlation_id")
-    known = _known_datasource_uids()
-    assert field["datasourceUid"] in known
-    assert field["datasourceUid"] == "loki_ds"
+    loki = next(ds for ds in config["datasources"] if ds["uid"] == "loki_ds")
+    assert "jsonData" not in loki or "derivedFields" not in loki.get("jsonData", {})
