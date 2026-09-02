@@ -99,6 +99,17 @@ USERS = [
     ("itadmin",   "Helix Support"),
     # Reviewer for the S3 queue — see the note above on why these are not 'staff'.
     ("drkim",     "Dr. Grace Kim", "clinician"),
+    # Demo-readiness slice: a least-privilege ROI demo identity, real
+    # role='roi_clerk' (config/roles.yaml), not the deprecated flat 'staff'
+    # role every other account above still carries. Deliberately the SAME
+    # person as 'roiclerk' above (also "Dana White") rather than a fictional
+    # new hire: this is one job function shown twice — once on the legacy
+    # broad role every pre-migration account still has, once on the
+    # narrowly-scoped role that job function would actually get — not two
+    # different people. 'roiclerk' is untouched by this addition; migrating
+    # it onto roi_clerk is the separate, roster-gated account migration this
+    # generator's own module docstring already says is out of scope here.
+    ("dwhite",    "Dana White", "roi_clerk"),
 ]
 
 # Pre-activated patient portal accounts (2026-08-22). Only 1738 and 1739 —
@@ -746,7 +757,8 @@ emit()
 # ---------------------------------------------------------------------------
 # PR #23 review round 2 (2026-08-07): grants are keyed on users.id (the stable
 # principal the gateway forwards as X-Actor-Id), never username. Ids from the
-# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6, drkim=13.
+# users INSERT above: frontdesk=2, rdelgado=3, drpatel=5, drnguyen=6, drkim=13,
+# dwhite=14.
 emit("INSERT INTO patient_access_grants (user_id, patient_id) VALUES")
 gwrows = [
     " (2, 1042)", " (2, 1330)", " (2, 1588)", " (2, 1601)",   # frontdesk
@@ -791,6 +803,11 @@ gwrows = [
     # transition, never how many attempts a case tolerates).
     " (13, 1042)", " (13, 1737)", " (13, 1738)",               # drkim
     " (6, 1738)", " (6, 1739)",                                # drnguyen
+    # Demo-readiness slice: dwhite's ONE grant, scoped to 1042 only — proves
+    # roi_clerk is a real least-privilege demo (a request for any other
+    # patient must be denied the same way an ungranted clinician is denied
+    # above), not merely "a new account with the same broad reach".
+    " (14, 1042)",                                             # dwhite
 ]
 # Self-grants for the two pre-activated patient accounts — the same fact and
 # the same table a real activation writes (services/gateway/app.py's

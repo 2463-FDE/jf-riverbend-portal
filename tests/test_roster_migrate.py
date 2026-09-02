@@ -166,11 +166,22 @@ def test_the_dry_run_is_the_default_and_writes_nothing(capsys):
 
 def test_the_dry_run_reports_the_real_roster_plan(capsys):
     """End-to-end against the committed roster and seed: the plan the client
-    receives. Pinned because these counts are what they sign."""
+    receives. Pinned because these counts are what they sign.
+
+    Demo-readiness slice (dwhite, role='roi_clerk'): normalise_name() strips
+    parenthetical decoration, so 'Dana White (ROI Clerk)' (roiclerk) and
+    'Dana White' (dwhite) normalise to the same roster key — both are the
+    same demo person, one on the legacy role, one on the real least-
+    privilege role, so both legitimately match the roster's single "Dana
+    White" row and both migrate. MIGRATE goes from 10 to 11; every other
+    bucket is unaffected, since dwhite is a real, active, roster-matched
+    account, not one of the three that aren't people.
+    """
     migrate.main(["roster_migrate.py"])
     out = capsys.readouterr().out
 
-    assert "MIGRATE — role assigned  [10]" in out
+    assert "MIGRATE — role assigned  [11]" in out
+    assert "dwhite -> roi_clerk" in out
     assert "DEACTIVATE — cannot authenticate  [0]" in out
     assert "LEFT ALONE — needs a human decision  [3]" in out
     # The three that are not people — left alone, not auto-deactivated.

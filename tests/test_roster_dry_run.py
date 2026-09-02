@@ -328,12 +328,14 @@ def test_reads_the_seeded_accounts_from_seed_sql():
     accounts = dry_run.read_accounts_from_seed(SEED_SQL)
 
     by_username = {a.username: a for a in accounts}
-    # 13 since the S3 review queue added `drkim` (role='clinician') to the
+    # 14 since the S3 review queue added `drkim` (role='clinician') to the
     # seed — the queue is gated on a permission `staff` does not hold, so
-    # without one clinical account the feature is unreachable by anyone.
-    assert len(accounts) == 13
+    # without one clinical account the feature is unreachable by anyone —
+    # plus the demo-readiness slice's `dwhite` (role='roi_clerk').
+    assert len(accounts) == 14
     assert by_username["drpatel"].full_name == "Dr. Anil Patel"
     assert by_username["itadmin"].full_name == "Helix Support"
+    assert by_username["dwhite"].full_name == "Dana White"
     # Every seeded account is on the legacy role — the thing the migration exists
     # to change. If this ever fails, the seed moved ahead of the migration.
     # Was {"staff"} alone, and that was the point: it pinned the pre-migration
@@ -344,9 +346,12 @@ def test_reads_the_seeded_accounts_from_seed_sql():
     # gated on a permission `staff` does not hold and a SINGLE clinical
     # account could only ever prove exclusive access, never that patient 1738's
     # deliberate two-reviewer overlap works. These are demo accounts with
-    # obvious roles, not the roster-gated account migration.
-    assert {a.role for a in accounts} == {"staff", "clinician"}
+    # obvious roles, not the roster-gated account migration. `dwhite` is a
+    # third such deliberate exception: a real `roi_clerk` demo identity, not
+    # a step toward the general migration either.
+    assert {a.role for a in accounts} == {"staff", "clinician", "roi_clerk"}
     assert sum(1 for a in accounts if a.role == "clinician") == 2
+    assert sum(1 for a in accounts if a.role == "roi_clerk") == 1
     assert all(a.is_active for a in accounts)
 
 
@@ -356,12 +361,17 @@ def test_the_seeded_accounts_produce_the_documented_split():
         dry_run.read_roster(ROSTER_CSV), dry_run.read_accounts_from_seed(SEED_SQL)
     )
 
-    # Against the CLIENT's roster: ten of the thirteen seeded accounts map
+    # Against the CLIENT's roster: eleven of the fourteen seeded accounts map
     # cleanly, and the three that do not are exactly the three that are not
     # people. Nothing lands in DENY BY DEFAULT or UNRECOGNISED STATUS — before
     # the vocabulary fix, seven real staff sat in the former and three dated
     # statuses in the latter.
-    assert len(_outcomes(findings, dry_run.MIGRATE)) == 10
+    #
+    # Demo-readiness slice: `dwhite` (role='roi_clerk') is the eleventh —
+    # normalise_name() strips parenthetical decoration, so 'Dana White (ROI
+    # Clerk)' (roiclerk) and 'Dana White' (dwhite) key to the same roster
+    # row; both are the same demo person and both legitimately migrate.
+    assert len(_outcomes(findings, dry_run.MIGRATE)) == 11
     assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 3   # frontdesk, labtech, itadmin
     assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 0  # no departure holds an account
     assert len(_outcomes(findings, dry_run.DEPARTED_CHECKED)) == 2  # Marcus Hale, Erin Castillo

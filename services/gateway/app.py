@@ -2845,3 +2845,71 @@ def proxy_create_own_thread(
         raise HTTPException(status_code=403, detail="not authorized")
     return _post("records", f"/patients/{patient_id}/threads", payload,
                  headers=_agent_headers(session), forward_status=True)
+
+
+# --------------------------------------------------------------------------- #
+# Observability demo readiness (W10 demo-readiness slice)
+#
+# One safe place for a presenter to confirm the local observability POC
+# (Grafana/Prometheus/Loki/Tempo, all `profiles: ["observability"]` in
+# docker-compose.yml) is actually up, instead of landing on Grafana's generic
+# home page and guessing. Gated on `patients.read` — the narrowest existing
+# permission that every staff/clinician role holds and the `patient` role
+# does not (config/roles.yaml) — rather than a new permission or role change,
+# since this reports zero patient data and needs no dedicated grant.
+#
+# Every dependency check hits only a well-known, unauthenticated readiness
+# path (Grafana's /api/health, Prometheus's /-/healthy, Loki's and Tempo's
+# /ready) with a short timeout, and every failure — timeout, connection
+# refused, non-200 — collapses to the single categorical "unavailable".
+# Nothing upstream (exception text, host/port, stack trace) ever reaches the
+# response or the log; only the dependency name and its category are logged.
+# --------------------------------------------------------------------------- #
+
+_OBSERVABILITY_CHECK_TIMEOUT_SECONDS = 1.5
+
+_OBSERVABILITY_DASHBOARDS = {
+    "ai_agent_observability": "/d/ai-agent-observability/ai-agent-observability",
+    "rag_evaluation": "/d/rag-evaluation/rag-evaluation",
+    "riverbend_services": "/d/riverbend-services/riverbend-services",
+}
+
+
+def _observability_dependency_ready(url: str) -> str:
+    """"ready" only on a real 200 from the dependency's own readiness path;
+    every other outcome — timeout, DNS failure (profile not started),
+    connection refused, non-200 — is "unavailable". No exception detail,
+    URL, or response body is ever returned or logged."""
+    try:
+        resp = httpx.get(url, timeout=_OBSERVABILITY_CHECK_TIMEOUT_SECONDS)
+        return "ready" if resp.status_code == 200 else "unavailable"
+    except Exception:
+        return "unavailable"
+
+
+@app.get("/observability/status")
+def observability_status(session: dict = Depends(require_permission("patients.read"))):
+    dependencies = {
+        "grafana": _observability_dependency_ready(f"{settings.grafana_url}/api/health"),
+        "prometheus": _observability_dependency_ready(f"{settings.prometheus_url}/-/healthy"),
+        "loki": _observability_dependency_ready(f"{settings.loki_url}/ready"),
+        "tempo": _observability_dependency_ready(f"{settings.tempo_url}/ready"),
+    }
+    overall = "ready" if all(v == "ready" for v in dependencies.values()) else "degraded"
+    log.info(
+        "observability status check overall=%s grafana=%s prometheus=%s loki=%s tempo=%s",
+        overall, dependencies["grafana"], dependencies["prometheus"],
+        dependencies["loki"], dependencies["tempo"],
+    )
+    return {
+        "status": overall,
+        "dependencies": dependencies,
+        "dashboards": {
+            name: f"{settings.grafana_public_url}{path}"
+            for name, path in _OBSERVABILITY_DASHBOARDS.items()
+        },
+        "note": (
+            "Run an AI action, refresh Grafana, and use `make rag-eval-publish` "
+            "before the RAG Evaluation dashboard."
+        ),
+    }
