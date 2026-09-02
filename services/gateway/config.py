@@ -86,6 +86,25 @@ class Settings:
     # PAYER_API_KEY.
     payer_integration_mode = os.getenv("PAYER_INTEGRATION_MODE", "simulation").strip().lower()
 
+    # Demo-readiness slice: internal (compose-network) URLs for the local
+    # observability POC's own readiness paths — only reachable when that
+    # stack is actually started (`docker compose --profile observability up`,
+    # profiles: ["observability"] in docker-compose.yml). No `:?` guard and
+    # no compose wiring needed: these are read-only checks against sensible
+    # compose-network defaults, and /observability/status treats an
+    # unreachable dependency as a normal "unavailable" outcome, not a
+    # configuration error.
+    grafana_url = os.getenv("GRAFANA_URL", "http://grafana:3000")
+    prometheus_url = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
+    loki_url = os.getenv("LOKI_URL", "http://loki:3100")
+    tempo_url = os.getenv("TEMPO_URL", "http://tempo:3200")
+
+    # The browser-facing counterpart to grafana_url above — the host-published
+    # port (docker-compose.yml's grafana service), for the dashboard links
+    # /observability/status hands back to a presenter's own browser rather
+    # than the compose-internal address used for the server-side health check.
+    grafana_public_url = os.getenv("GRAFANA_PUBLIC_URL", "http://localhost:3000")
+
     @property
     def db_url(self) -> str:
         return (

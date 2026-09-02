@@ -369,6 +369,15 @@ Endpoints once up:
   prompt, a model response, patient data, or a credential — see
   `libs/tracing/spans.py`'s own redaction contract.
 
+**Before presenting, check `GET /observability/status`** (any authenticated
+staff/clinician session) instead of guessing from Grafana's generic home
+page: it reports `ready`/`degraded` for Grafana/Prometheus/Loki/Tempo and
+returns the three dashboard links directly
+(`ai-agent-observability`, `rag-evaluation`, `riverbend-services`). Open the
+link it returns for the dashboard you need; if any dependency reads
+`unavailable`, `make up-observability` was not run or hasn't finished
+starting.
+
 This is a **local observability POC**, not production monitoring: no
 remote-write, no long-term retention policy beyond local disk, no alert
 routing/paging, and Prometheus's scrape config is rendered from
@@ -654,6 +663,17 @@ accounts that can reach the review queue — `drkim` reviews 1042/1737/1738,
 `drnguyen` reviews 1738/1739 (see `db/seed/generate_seed.py`'s grant matrix).
 Without both, the clinician half of the demo is unreachable for whichever
 patient the missing one covers. (Full list: `db/seed/generate_seed.py`.)
+
+**One exception carries a real least-privilege role: `dwhite` / `portal123`,
+role `roi_clerk`.** Demonstrates the ROI role without the legacy `staff`
+account's broad reach: `dwhite` holds exactly one active grant, for patient
+`1042`. Use it to run the ROI create → authorize → review → fulfill flow for
+1042, or to show that the same request for any other patient is denied and
+that `roi_clerk` cannot read clinical records/notes at all. `roiclerk`
+(same demo person, "Dana White," on the legacy `staff` role) is unchanged —
+`dwhite` is an addition, not a migration. Browser fulfillment still needs
+an authorization already reviewed as `valid`; this account does not add a
+review UI.
 
 ## Running the patient-portal demo
 

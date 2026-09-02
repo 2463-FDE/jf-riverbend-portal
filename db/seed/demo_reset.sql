@@ -164,11 +164,11 @@ DELETE FROM patient_invitations WHERE patient_id IN (1738, 1739);
 UPDATE users SET is_active = TRUE
  WHERE patient_id IN (1738, 1739) AND role = 'patient' AND is_active = FALSE;
 
--- --- Clinician accounts themselves — restored active, never deleted --------
--- A test that deactivated drkim or drnguyen (or, before this reset, one that
--- never distinguished them from an ordinary account) must not leave the
--- demo unable to show either reviewer's half of the queue.
-UPDATE users SET is_active = TRUE WHERE username IN ('drkim', 'drnguyen') AND is_active = FALSE;
+-- --- Named demo staff accounts — restored active, never deleted -------------
+-- A test or rehearsal that deactivated either clinician or the scoped ROI
+-- clerk must not leave the next demo unable to authenticate after a reset.
+UPDATE users SET is_active = TRUE
+ WHERE username IN ('drkim', 'drnguyen', 'dwhite') AND is_active = FALSE;
 
 -- --- Staff/clinician/self grants — restore ACTIVE, never merely EXISTS -----
 --
@@ -191,6 +191,7 @@ UPDATE users SET is_active = TRUE WHERE username IN ('drkim', 'drnguyen') AND is
 --   drkim     : 1042, 1737, 1738       (clinician reviewer — NOT 1739)
 --   drnguyen  : 1738, 1739             (clinician reviewer — NOT 1042, NOT 1737)
 --   patient-1738, patient-1739         (self-grants — the pre-activated accounts)
+--   dwhite    : 1042 ONLY              (least-privilege roi_clerk demo identity)
 WITH pairs (username, patient_id) AS (
     VALUES
         ('frontdesk', 1042), ('frontdesk', 1737), ('frontdesk', 1738), ('frontdesk', 1739),
@@ -199,7 +200,12 @@ WITH pairs (username, patient_id) AS (
         ('drkim', 1042), ('drkim', 1737), ('drkim', 1738),
         ('drnguyen', 1738), ('drnguyen', 1739),
         ('patient-1738', 1738),
-        ('patient-1739', 1739)
+        ('patient-1739', 1739),
+        -- Demo-readiness slice: dwhite's ONE scoped ROI grant. Listed here so
+        -- a reset restores it the same way as every other fixture grant —
+        -- clears an accidental revoke/expiry and reinserts if missing —
+        -- rather than leaving it as one-time seed data nothing repairs.
+        ('dwhite', 1042)
 )
 UPDATE patient_access_grants g
    SET revoked_at = NULL,
@@ -218,7 +224,12 @@ WITH pairs (username, patient_id) AS (
         ('drkim', 1042), ('drkim', 1737), ('drkim', 1738),
         ('drnguyen', 1738), ('drnguyen', 1739),
         ('patient-1738', 1738),
-        ('patient-1739', 1739)
+        ('patient-1739', 1739),
+        -- Demo-readiness slice: dwhite's ONE scoped ROI grant. Listed here so
+        -- a reset restores it the same way as every other fixture grant —
+        -- clears an accidental revoke/expiry and reinserts if missing —
+        -- rather than leaving it as one-time seed data nothing repairs.
+        ('dwhite', 1042)
 )
 INSERT INTO patient_access_grants (user_id, patient_id)
 SELECT u.id, p.patient_id

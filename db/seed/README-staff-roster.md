@@ -34,14 +34,15 @@ case produces:
 
 | Case | Roster side | Account side | Dry-run outcome |
 |---|---|---|---|
-| Clean map, one person one account | Maya Okonkwo, Rosa Delgado, Jin Park, Anil Patel, Anita Nguyen, Sandra Lee, **Grace Kim**, Karen Cole, Tom Reyes, Dana White | `mokonkwo`, `rdelgado`, `jpark`, `drpatel`, `drnguyen`, `drlee`, `drkim`, `nurse_kc`, `billing1`, `roiclerk` | **Migrate** — ten accounts onto their roles |
+| Clean map, one person one account | Maya Okonkwo, Rosa Delgado, Jin Park, Anil Patel, Anita Nguyen, Sandra Lee, **Grace Kim**, Karen Cole, Tom Reyes | `mokonkwo`, `rdelgado`, `jpark`, `drpatel`, `drnguyen`, `drlee`, `drkim`, `nurse_kc`, `billing1` | **Migrate** — nine accounts onto their roles |
+| **Duplicate accounts for one person** | Dana White | `roiclerk` and the least-privilege demo account `dwhite` both normalize to Dana White | **Cannot migrate automatically.** Both accounts enter the human-decision bucket until the canonical credential is chosen |
 | **Shared login** — several people, one account | four front-desk staff share it; only three are named | `frontdesk` — "Front Desk (Riverbend Main)", not a person | **Cannot migrate.** Split into named accounts first. Blocked: the fourth staffer is named nowhere |
 | **Shared login**, second instance | Ben Osei, Priya Raman | `labtech` — "Lab Intake" | Same: split before migrating |
 | **Account with no owner** | *no row* — nobody is Helix Support | `itadmin` | **Disable, do not migrate.** The departed contractor |
 | **Person with no account** | eight people, incl. the first `scheduler` and `it_admin` anywhere | *none* | Report as needing an account, with the role their function maps to |
 | **Temporary placement** | Sofia Marin, `temp_ends_2026-09-30` | *none* | Provision **with an expiry**. Same role as a permanent registrar; the temporary part is the expiry, not a weaker role |
 | **Departed, may still hold an account** | Marcus Hale, Erin Castillo | *none found* | **Departures checked** — reported as no-live-account-found rather than dropped, because the client asked precisely this |
-| **Renames** | Tom Reyes on `billing1`, Dana White on `roiclerk` | generic usernames | Migrate, and rename during migration so the audit log names a human. The rename is a migration step, not a mapping outcome |
+| **Renames** | Tom Reyes on `billing1` | generic username | Migrate, and rename during migration so the audit log names a human. Dana White's rename is deferred until the duplicate-account decision above is resolved |
 
 ### Two cases the client's roster does not contain
 
@@ -60,7 +61,7 @@ Raised with the client 2026-08-20, unresolved at the time of writing:
 2. **The header count does not reconcile.** Twenty people are identifiable,
    plus the unnamed float; the client's header says 22.
 3. **Scale.** They describe "on the order of a thousand accounts" on the
-   `staff` role. The seeded database has 13, so the report demonstrates the
+   `staff` role. The seeded database has 14, so the report demonstrates the
    mechanism, not the volume.
 
 ## Name matching is the hard part, and it bit us

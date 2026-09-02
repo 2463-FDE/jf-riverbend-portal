@@ -166,15 +166,20 @@ def test_the_dry_run_is_the_default_and_writes_nothing(capsys):
 
 def test_the_dry_run_reports_the_real_roster_plan(capsys):
     """End-to-end against the committed roster and seed: the plan the client
-    receives. Pinned because these counts are what they sign."""
+    receives. Pinned because these counts are what they sign. The two Dana
+    White credentials are both left alone: the roster identifies one person
+    and cannot choose which account is canonical.
+    """
     migrate.main(["roster_migrate.py"])
     out = capsys.readouterr().out
 
-    assert "MIGRATE — role assigned  [10]" in out
+    assert "MIGRATE — role assigned  [9]" in out
+    assert "dwhite -> roi_clerk" not in out
     assert "DEACTIVATE — cannot authenticate  [0]" in out
-    assert "LEFT ALONE — needs a human decision  [3]" in out
-    # The three that are not people — left alone, not auto-deactivated.
-    for username in ("frontdesk", "labtech", "itadmin"):
+    assert "LEFT ALONE — needs a human decision  [5]" in out
+    # The three ownerless accounts plus both credentials for Dana White are
+    # left alone, never auto-migrated or auto-deactivated.
+    for username in ("frontdesk", "labtech", "itadmin", "dwhite", "roiclerk"):
         assert username in out
     # And the client's copy is quoted so an operator sees what the user will
     # see for whichever accounts a human later decides to deactivate.

@@ -19,8 +19,9 @@ INSERT INTO users (id, username, password_hash, full_name, role, created_at) VAL
  (10, 'labtech', 'pbkdf2_sha256$260000$riverbend10saltval0$foQLZvzL5VE1DicUMngxFRVEoHee5XZqfO2Vkg0Ltkk=', 'Lab Intake', 'staff', now()),
  (11, 'nurse_kc', 'pbkdf2_sha256$260000$riverbend11saltval0$mccK64T/hIlQYtgWgTK7i+DGLH/sftxHqECHgtsexC0=', 'Karen Cole, RN', 'staff', now()),
  (12, 'itadmin', 'pbkdf2_sha256$260000$riverbend12saltval0$IUYsIcUdl0ludp6kkVgRboYSPtmaEoTRZKKT22MqkhI=', 'Helix Support', 'staff', now()),
- (13, 'drkim', 'pbkdf2_sha256$260000$riverbend13saltval0$mIOQEPIzb5EVs9o6nIa7TWzF2dwPOdNjR+XisQSmyRg=', 'Dr. Grace Kim', 'clinician', now());
-SELECT setval('users_id_seq', 15, true);
+ (13, 'drkim', 'pbkdf2_sha256$260000$riverbend13saltval0$mIOQEPIzb5EVs9o6nIa7TWzF2dwPOdNjR+XisQSmyRg=', 'Dr. Grace Kim', 'clinician', now()),
+ (14, 'dwhite', 'pbkdf2_sha256$260000$riverbend14saltval0$7TjuYxy15HBKSCME5fR/3J/yR5lTRZoBqEPl+dH3UbE=', 'Dana White', 'roi_clerk', now());
+SELECT setval('users_id_seq', 16, true);
 
 INSERT INTO patients (id, mrn, name, dob, ssn, gender, address, phone, email, notes, created_via, created_at) VALUES
  (1042, 'M4471', 'Maria Gonzalez', '1971-03-02', '412-55-9981', 'F', '118 Maple Ave, Beverly Hills, CA 90210', '310-555-0147', 'maria.g@example.com', 'Prefers morning appts.', 'self_service', '2026-06-22 09:14:06'),
@@ -284,8 +285,8 @@ INSERT INTO patients (id, mrn, name, dob, ssn, gender, address, phone, email, no
 SELECT setval('patients_id_seq', 1854, true);
 
 INSERT INTO users (id, username, password_hash, full_name, role, patient_id, created_at) VALUES
- (14, 'patient-1738', 'pbkdf2_sha256$260000$riverbendp1738saltval$/kgRufQ3ZqVlYznBIWrgySelaUOJ1COopM9SHSDvP5E=', 'Thomas Johnson', 'patient', 1738, now()),
- (15, 'patient-1739', 'pbkdf2_sha256$260000$riverbendp1739saltval$fVff8NmswcMm1v8nyPIAaOJYCHcfixQWkgHqa1TvS10=', 'Aisha Taylor', 'patient', 1739, now());
+ (15, 'patient-1738', 'pbkdf2_sha256$260000$riverbendp1738saltval$/kgRufQ3ZqVlYznBIWrgySelaUOJ1COopM9SHSDvP5E=', 'Thomas Johnson', 'patient', 1738, now()),
+ (16, 'patient-1739', 'pbkdf2_sha256$260000$riverbendp1739saltval$fVff8NmswcMm1v8nyPIAaOJYCHcfixQWkgHqa1TvS10=', 'Aisha Taylor', 'patient', 1739, now());
 
 INSERT INTO providers (id, name, specialty, location) VALUES
  (1, 'Dr. Anil Patel', 'Family Medicine', 'Riverbend Main'),
@@ -2526,8 +2527,9 @@ INSERT INTO patient_access_grants (user_id, patient_id) VALUES
  (13, 1738),
  (6, 1738),
  (6, 1739),
- (14, 1738),
- (15, 1739);
+ (14, 1042),
+ (15, 1738),
+ (16, 1739);
 
 INSERT INTO roi_requests (patient_id, requested_by, recipient, recipient_type, purpose, date_range_start, date_range_end, status, created_at) VALUES
  (1736, 'roiclerk', 'County Health', 'provider', 'Continuity of care', '2024-01-01', '2026-06-01', 'pending', '2026-06-12 00:00:00'),
@@ -2582,17 +2584,17 @@ INSERT INTO audit_logs (actor, message) VALUES
  ('records-service', 'GET /patients/1659/records 200');
 
 INSERT INTO message_threads (id, patient_id, subject, status, created_by, created_at, updated_at) VALUES
- (1, 1738, 'Question about my blood pressure readings', 'open', 14, '2026-08-20 09:00:00', '2026-08-20 09:00:00'),
- (2, 1739, 'Refill request for my inhaler', 'open', 15, '2026-08-18 14:00:00', '2026-08-18 14:32:00');
+ (1, 1738, 'Question about my blood pressure readings', 'open', 15, '2026-08-20 09:00:00', '2026-08-20 09:00:00'),
+ (2, 1739, 'Refill request for my inhaler', 'open', 16, '2026-08-18 14:00:00', '2026-08-18 14:32:00');
 
 INSERT INTO thread_messages (id, thread_id, sender_user_id, body, idempotency_key, created_at) VALUES
- (1, 1, 14, 'My home readings have been running a bit high this week, should I be concerned?', 'seed-1738-msg-1', '2026-08-20 09:00:00'),
- (2, 2, 15, 'Hi, I am almost out of my albuterol inhaler, can you send a refill?', 'seed-1739-msg-1', '2026-08-18 14:00:00'),
+ (1, 1, 15, 'My home readings have been running a bit high this week, should I be concerned?', 'seed-1738-msg-1', '2026-08-20 09:00:00'),
+ (2, 2, 16, 'Hi, I am almost out of my albuterol inhaler, can you send a refill?', 'seed-1739-msg-1', '2026-08-18 14:00:00'),
  (3, 2, 6, 'Sent a refill to your pharmacy on file. Let us know if you do not see it by tomorrow.', 'seed-1739-msg-2', '2026-08-18 14:32:00');
 
 SELECT setval('message_threads_id_seq', 2, true);
 SELECT setval('thread_messages_id_seq', 3, true);
 
 INSERT INTO thread_read_state (thread_id, user_id, last_read_message_id, updated_at) VALUES
- (2, 15, 3, '2026-08-18 15:00:00');
+ (2, 16, 3, '2026-08-18 15:00:00');
 

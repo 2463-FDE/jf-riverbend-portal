@@ -171,6 +171,23 @@ def test_an_account_nobody_owns_is_never_migrated():
         assert _subject_outcome(findings, username) == dry_run.DECIDE_NO_OWNER
 
 
+def test_two_accounts_for_one_roster_person_require_a_human_decision():
+    roster = [RosterRow("Dana White", "Release of Information Clerk", "HIM", "Main", "active")]
+    accounts = [
+        Account("roiclerk", "Dana White (ROI Clerk)", "staff", True),
+        Account("dwhite", "Dana White", "roi_clerk", True),
+    ]
+
+    findings = dry_run.build_report(roster, accounts, known_roles={"roi_clerk"})
+
+    assert not _outcomes(findings, dry_run.MIGRATE)
+    assert {f.subject for f in _outcomes(findings, dry_run.DECIDE_NO_OWNER)} == {
+        "roiclerk", "dwhite",
+    }
+    assert all("canonical account" in f.detail for f in findings)
+    assert all({"dwhite", "roiclerk"} == {line.split(" — ")[0] for line in f.context} for f in findings)
+
+
 def test_the_no_owner_finding_offers_context_without_guessing_a_role():
     findings = _report()
     frontdesk = next(f for f in findings if f.subject == "frontdesk")
@@ -328,12 +345,14 @@ def test_reads_the_seeded_accounts_from_seed_sql():
     accounts = dry_run.read_accounts_from_seed(SEED_SQL)
 
     by_username = {a.username: a for a in accounts}
-    # 13 since the S3 review queue added `drkim` (role='clinician') to the
+    # 14 since the S3 review queue added `drkim` (role='clinician') to the
     # seed — the queue is gated on a permission `staff` does not hold, so
-    # without one clinical account the feature is unreachable by anyone.
-    assert len(accounts) == 13
+    # without one clinical account the feature is unreachable by anyone —
+    # plus the demo-readiness slice's `dwhite` (role='roi_clerk').
+    assert len(accounts) == 14
     assert by_username["drpatel"].full_name == "Dr. Anil Patel"
     assert by_username["itadmin"].full_name == "Helix Support"
+    assert by_username["dwhite"].full_name == "Dana White"
     # Every seeded account is on the legacy role — the thing the migration exists
     # to change. If this ever fails, the seed moved ahead of the migration.
     # Was {"staff"} alone, and that was the point: it pinned the pre-migration
@@ -344,9 +363,12 @@ def test_reads_the_seeded_accounts_from_seed_sql():
     # gated on a permission `staff` does not hold and a SINGLE clinical
     # account could only ever prove exclusive access, never that patient 1738's
     # deliberate two-reviewer overlap works. These are demo accounts with
-    # obvious roles, not the roster-gated account migration.
-    assert {a.role for a in accounts} == {"staff", "clinician"}
+    # obvious roles, not the roster-gated account migration. `dwhite` is a
+    # third such deliberate exception: a real `roi_clerk` demo identity, not
+    # a step toward the general migration either.
+    assert {a.role for a in accounts} == {"staff", "clinician", "roi_clerk"}
     assert sum(1 for a in accounts if a.role == "clinician") == 2
+    assert sum(1 for a in accounts if a.role == "roi_clerk") == 1
     assert all(a.is_active for a in accounts)
 
 
@@ -356,13 +378,15 @@ def test_the_seeded_accounts_produce_the_documented_split():
         dry_run.read_roster(ROSTER_CSV), dry_run.read_accounts_from_seed(SEED_SQL)
     )
 
-    # Against the CLIENT's roster: ten of the thirteen seeded accounts map
-    # cleanly, and the three that do not are exactly the three that are not
-    # people. Nothing lands in DENY BY DEFAULT or UNRECOGNISED STATUS — before
-    # the vocabulary fix, seven real staff sat in the former and three dated
-    # statuses in the latter.
-    assert len(_outcomes(findings, dry_run.MIGRATE)) == 10
-    assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 3   # frontdesk, labtech, itadmin
+    # Against the CLIENT's roster, nine accounts are safe to migrate. The
+    # three ownerless shared/service accounts still require a decision, and
+    # dwhite/roiclerk now correctly add two more: both normalize to the same
+    # Dana White roster row, so neither credential is chosen automatically.
+    assert len(_outcomes(findings, dry_run.MIGRATE)) == 9
+    assert len(_outcomes(findings, dry_run.DECIDE_NO_OWNER)) == 5
+    assert {"dwhite", "roiclerk"}.issubset(
+        {f.subject for f in _outcomes(findings, dry_run.DECIDE_NO_OWNER)}
+    )
     assert len(_outcomes(findings, dry_run.DISABLE_DEPARTED)) == 0  # no departure holds an account
     assert len(_outcomes(findings, dry_run.DEPARTED_CHECKED)) == 2  # Marcus Hale, Erin Castillo
     assert len(_outcomes(findings, dry_run.UNMAPPED_FUNCTION)) == 0
