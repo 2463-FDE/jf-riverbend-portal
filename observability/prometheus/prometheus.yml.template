@@ -47,3 +47,14 @@ scrape_configs:
         values: ["${INTERNAL_SERVICE_TOKEN}"]
     static_configs:
       - targets: ["roi-service:8076"]
+
+  # eligibility-service joins the scrape set in W10 metrics Stage 1: it owns
+  # the payer circuit-breaker state and the eligibility assistant's agent-run
+  # series, neither of which any other target can observe.
+  - job_name: eligibility-service
+    metrics_path: /metrics
+    http_headers:
+      X-Internal-Token:
+        values: ["${INTERNAL_SERVICE_TOKEN}"]
+    static_configs:
+      - targets: ["eligibility-service:8072"]

@@ -30,6 +30,7 @@ is created (adr/0012 follow-up, migration 032, `phi.encrypt_draft_text`) —
 may pass draft text to a logger, a span, or a prompt — `libs.agent_provenance`
 raises if anything tries, and the log lines below carry ids and codes only.
 """
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy import func, select
@@ -38,6 +39,7 @@ from sqlalchemy.orm import Session
 
 import phi
 from libs.agent_provenance import ProvenanceLabel, TraceRecorder
+from libs.metrics import ai as ai_metrics
 from logging_config import configure
 from models import AgentDraftCitation, AgentDraftProvenance
 from config import settings
@@ -224,6 +226,29 @@ def record_validation(db: Session, draft: AgentDraftProvenance, *, passed: bool,
     return draft
 
 
+def _seconds_awaiting_review(draft) -> Optional[float]:
+    """How long the draft waited between generation and this decision.
+
+    `approved_at`/`rejected_at` are set to `func.now()`, so right after the
+    flush they are still SQL expressions rather than datetimes — the elapsed
+    time is measured against the application clock instead. Returns None on
+    anything unexpected (missing or naive-vs-aware `created_at`, a clock
+    skew producing a negative interval) so a bad reading is simply not
+    observed rather than becoming a nonsense bucket.
+    """
+    created_at = getattr(draft, "created_at", None)
+    if not isinstance(created_at, datetime):
+        return None
+    try:
+        reference = created_at
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - reference).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return elapsed if elapsed >= 0 else None
+
+
 def decide(db: Session, draft: AgentDraftProvenance, *, approve: bool,
            reviewed_by: int,
            trace: Optional[TraceRecorder] = None) -> AgentDraftProvenance:
@@ -261,6 +286,10 @@ def decide(db: Session, draft: AgentDraftProvenance, *, approve: bool,
     log.info(
         "agent draft decided (correlation_id=%s version=%s approved=%s by_user_id=%s)",
         draft.correlation_id, draft.version, approve, reviewed_by,
+    )
+    ai_metrics.record_review(
+        outcome=APPROVED if approve else REJECTED,
+        duration_seconds=_seconds_awaiting_review(draft),
     )
     if trace is not None:
         # W10 Final Stage 4 (tightened): who reviewed is already durable in

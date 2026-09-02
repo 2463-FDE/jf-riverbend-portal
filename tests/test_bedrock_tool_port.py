@@ -14,6 +14,7 @@ import types
 
 import pytest
 
+from libs.metrics import ai as ai_metrics
 from libs.llm_client.errors import (
     ProviderCallError,
     ProviderNotConfiguredError,
@@ -332,6 +333,84 @@ def test_converse_stream_closes_the_underlying_event_stream_on_early_exit(monkey
     gen = _model().converse_stream([], _TOOLS, timeout=10)
     next(gen)  # take only the first event
     gen.close()
+
+    assert fake_stream.closed is True
+
+
+# --- provider-call metric: exactly one outcome per stream (review finding
+# AI-PROVIDER-STREAM-CLOSE-MISSING) ------------------------------------------
+
+
+def _stream_call_count(*, outcome: str) -> float:
+    return ai_metrics.BEDROCK_PROVIDER_CALLS.labels(
+        provider="bedrock", model="anthropic.claude-3-5-sonnet",
+        use_case="eligibility_agent_chat", operation="converse_stream", outcome=outcome,
+    )._value.get()
+
+
+def test_an_early_close_records_exactly_one_cancelled_outcome(monkeypatch):
+    # The ordinary case for a live chat stream: the browser client
+    # disconnects, or the caller simply stops reading. Python delivers this
+    # as GeneratorExit at the suspended `yield` — a BaseException a plain
+    # `except Exception:` never sees, which is exactly how this call used to
+    # go unrecorded.
+    events = [
+        {"contentBlockDelta": {"delta": {"text": "one"}}},
+        {"contentBlockDelta": {"delta": {"text": "two"}}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+    _install_fake_boto3(monkeypatch, stream_events=events)
+    before = _stream_call_count(outcome="cancelled")
+    before_success = _stream_call_count(outcome="success")
+    before_error = _stream_call_count(outcome="provider_error")
+
+    gen = _model().converse_stream([], _TOOLS, timeout=10)
+    next(gen)  # start the stream, consume one event
+    gen.close()
+
+    assert _stream_call_count(outcome="cancelled") == before + 1
+    assert _stream_call_count(outcome="success") == before_success, "not also counted as success"
+    assert _stream_call_count(outcome="provider_error") == before_error, "not also counted as an error"
+
+
+def test_a_fully_consumed_stream_records_exactly_one_success_outcome(monkeypatch):
+    events = [{"contentBlockDelta": {"delta": {"text": "hi"}}}, {"messageStop": {"stopReason": "end_turn"}}]
+    _install_fake_boto3(monkeypatch, stream_events=events)
+    before = _stream_call_count(outcome="success")
+
+    list(_model().converse_stream([], _TOOLS, timeout=10))
+
+    assert _stream_call_count(outcome="success") == before + 1
+
+
+def test_a_provider_failure_mid_stream_records_exactly_one_provider_error_outcome(monkeypatch):
+    _install_fake_boto3(
+        monkeypatch,
+        stream_events=[{"contentBlockDelta": {"delta": {"text": "Partial"}}}],
+        stream_iter_error=_FakeTimeoutError(),
+    )
+    before = _stream_call_count(outcome="provider_error")
+
+    with pytest.raises(ProviderTimeoutError):
+        for _ in _model().converse_stream([], _TOOLS, timeout=10):
+            pass
+
+    assert _stream_call_count(outcome="provider_error") == before + 1
+
+
+def test_a_generator_exit_still_propagates_and_still_closes_the_stream(monkeypatch):
+    # The metric change must not touch the close-protocol or resource-close
+    # behavior already proven by
+    # test_converse_stream_closes_the_underlying_event_stream_on_early_exit.
+    events = [
+        {"contentBlockDelta": {"delta": {"text": "one"}}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+    fake_stream = _install_fake_boto3(monkeypatch, stream_events=events)
+
+    gen = _model().converse_stream([], _TOOLS, timeout=10)
+    next(gen)
+    gen.close()  # would raise RuntimeError if GeneratorExit were suppressed and the generator kept yielding
 
     assert fake_stream.closed is True
 

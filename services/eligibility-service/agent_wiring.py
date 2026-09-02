@@ -22,6 +22,7 @@ from typing import Iterator, Optional
 import redis as redis_lib
 
 from config import settings
+from libs.metrics import ai as ai_metrics
 from libs.eligibility_agent import (
     AgentRuntime,
     RedisVisitMemory,
@@ -75,6 +76,25 @@ def get_agent_runtime() -> Optional[AgentRuntime]:
         return None
 
 
+# Bounded metrics label for this surface.
+_METRICS_USE_CASE = "eligibility_agent_chat"
+
+
+def _record_run(termination_reason) -> None:
+    """One completed eligibility assistant turn.
+
+    `provenance_label` is deliberately `not_applicable`: unlike the summary
+    agent and Policy Navigator, this surface has no real/fixture/fallback
+    distinction of its own, and borrowing one would report a provenance the
+    code never actually determines.
+    """
+    ai_metrics.record_agent_run(
+        use_case=_METRICS_USE_CASE,
+        provenance_label=ai_metrics.NOT_APPLICABLE,
+        termination_reason=getattr(termination_reason, "value", termination_reason),
+    )
+
+
 def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
     """Safe entry point for the visit-chat endpoint: degrades to a safe
     reply if the runtime isn't available, mirroring AgentRuntime.
@@ -83,6 +103,7 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
     the caller's point of view."""
     runtime = get_agent_runtime()
     if runtime is None:
+        _record_run(TerminationReason.PROVIDER_ERROR)
         return VisitTurnResult(
             visit_id=visit_id,
             reply=UNAVAILABLE_REPLY,
@@ -91,13 +112,52 @@ def handle_visit_message(visit_id: str, message: str) -> VisitTurnResult:
             termination_reason=TerminationReason.PROVIDER_ERROR,
             turns_used=0,
         )
-    return runtime.handle_message(visit_id, message)
+    result = runtime.handle_message(visit_id, message)
+    _record_run(result.termination_reason)
+    return result
 
 
 _UNSET = object()  # distinguishes "coverage_on_file not passed" from "explicitly None"
 
 
+# VisitStreamEvent's own contract: "Exactly one of 'done'/'error' ends a
+# stream." Those are therefore the two kinds that mean a turn actually
+# terminated.
+_TERMINAL_STREAM_KINDS = frozenset({"done", "error"})
+
+
+def _record_terminal_run(events: Iterator[VisitStreamEvent]) -> Iterator[VisitStreamEvent]:
+    """Count exactly one agent run per streamed turn, at its terminal event.
+
+    Wrapping the whole generator is what makes "exactly once" true for every
+    branch below — unavailable runtime, non-streaming fallback, and the real
+    streaming runtime all end with a single done/error event, and none of
+    them has to remember to record for itself.
+
+    A stream that ends WITHOUT a terminal event records nothing, deliberately.
+    Per VisitStreamEvent's contract a client that sees neither done nor error
+    "was disconnected ... not answered", so there is no termination reason to
+    report and inventing one would misreport a disconnect as an outcome.
+    """
+    recorded = False
+    for event in events:
+        if not recorded and event.kind in _TERMINAL_STREAM_KINDS:
+            _record_run(event.termination_reason)
+            recorded = True
+        yield event
+
+
 def stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEvent]:
+    """Streaming counterpart to handle_visit_message, with run accounting.
+
+    The frontend posts to the streaming route, so this — not
+    handle_visit_message — is the path most live eligibility turns take, and
+    it must reach `agent_runs_total` or the metric undercounts real usage.
+    """
+    yield from _record_terminal_run(_stream_visit_message(visit_id, message))
+
+
+def _stream_visit_message(visit_id: str, message: str) -> Iterator[VisitStreamEvent]:
     """w-9-2-planner P1b: streaming counterpart to handle_visit_message.
     Degrades the same way — a missing/misconfigured runtime yields one
     "error" event carrying UNAVAILABLE_REPLY, never raises. A runtime that
